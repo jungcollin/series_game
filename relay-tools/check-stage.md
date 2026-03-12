@@ -1,4 +1,4 @@
-# /만든게임확인
+# /check-stage
 
 입력은 `stage-slug` 하나다.
 

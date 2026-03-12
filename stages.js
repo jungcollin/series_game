@@ -84,9 +84,13 @@ window.RELAY_POOL = [
 
 window.RELAY_CREATOR_PROMPT = `이 프로젝트에서는 전역 설정이 아니라 로컬 워크플로를 사용합니다.
 
-1. /게임만들기 <<게임 스테이지 한 줄 설명>>
-2. /만든게임확인 <stage-slug>
-3. /게임올려보기 <stage-slug>
+저장소:
+- https://github.com/jungcollin/series_game
+- git clone git@github.com:jungcollin/series_game.git
+
+1. /make-stage <<one-line stage description>>
+2. /check-stage <stage-slug>
+3. /publish-stage <stage-slug>
 
 로컬 규칙 파일:
 - AGENTS.md

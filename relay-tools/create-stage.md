@@ -1,4 +1,4 @@
-# /게임만들기
+# /make-stage
 
 입력은 스테이지 설명 한 줄이다.
 
@@ -22,7 +22,7 @@
    - `window.relayStageDebug = { forceClear(), forceFail() }`
 5. 시작 화면에 조작법, 클리어 조건, 실패 조건을 적는다.
 6. 추가 목숨, continue, checkpoint respawn, save restore는 넣지 않는다.
-7. 작업이 끝나면 `/만든게임확인 <stage-slug>` 흐름으로 넘어간다.
+7. 작업이 끝나면 `/check-stage <stage-slug>` 흐름으로 넘어간다.
 
 출력:
 - 변경한 파일만 짧게 제시한다.
