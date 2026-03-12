@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Galaxy Boss</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #020617;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #020617;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="960" height="540" aria-label="Galaxy Boss" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const PLAYER_SPEED = 360;
+      const PLAYER_BULLET_SPEED = 680;
+      const BOSS_BULLET_SPEED = 220;
+      const PLAYER_FIRE_COOLDOWN = 0.16;
+      const BOSS_START_HP = 26;
+      const relayContext = window.RelayRuntime?.readContext("galaxy-boss") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const input = {
+        left: false,
+        right: false,
+        up: false,
+        down: false,
+        shoot: false,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        player: createPlayer(),
+        boss: createBoss(),
+        playerBullets: [],
+        enemyBullets: [],
+        stars: createStars(),
+        explosions: [],
+        victoryFlash: 0,
+      };
+
+      function createPlayer() {
+        return {
+          x: VIEW.width / 2,
+          y: VIEW.height - 86,
+          w: 34,
+          h: 34,
+          fireCooldown: 0,
+        };
+      }
+
+      function createBoss() {
+        return {
+          x: VIEW.width / 2,
+          y: 112,
+          w: 176,
+          h: 96,
+          hp: BOSS_START_HP,
+          maxHp: BOSS_START_HP,
+          direction: 1,
+          speed: 126,
+          volleyCooldown: 0.9,
+          phaseTimer: 0,
+        };
+      }
+
+      function createStars() {
+        return Array.from({ length: 70 }, (_, index) => ({
+          x: (index * 83) % VIEW.width,
+          y: (index * 47) % VIEW.height,
+          size: 1 + (index % 3),
+          speed: 30 + (index % 5) * 18,
+        }));
+      }
+
+      function resetRun() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.player = createPlayer();
+        state.boss = createBoss();
+        state.playerBullets = [];
+        state.enemyBullets = [];
+        state.explosions = [];
+        state.victoryFlash = 0;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "hit_by_enemy") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function failRun(reason = "hit_by_enemy") {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        spawnExplosion(state.player.x, state.player.y, "#fb7185", 22);
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearRun() {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        state.victoryFlash = 1;
+        spawnExplosion(state.boss.x, state.boss.y, "#fde047", 42);
+        spawnExplosion(state.boss.x - 54, state.boss.y + 16, "#f97316", 28);
+        spawnExplosion(state.boss.x + 54, state.boss.y + 6, "#60a5fa", 28);
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function spawnExplosion(x, y, color, radius) {
+        state.explosions.push({
+          x,
+          y,
+          color,
+          radius,
+          life: 0.45,
+        });
+      }
+
+      function spawnPlayerBullet() {
+        const player = state.player;
+        state.playerBullets.push({
+          x: player.x,
+          y: player.y - player.h * 0.6,
+          vy: -PLAYER_BULLET_SPEED,
+          r: 5,
+        });
+      }
+
+      function spawnBossVolley() {
+        const boss = state.boss;
+        const spread = [-0.55, -0.28, 0, 0.28, 0.55];
+        for (const factor of spread) {
+          state.enemyBullets.push({
+            x: boss.x + factor * 90,
+            y: boss.y + 44,
+            vx: factor * 120,
+            vy: BOSS_BULLET_SPEED + Math.abs(factor) * 48,
+            r: 10,
+          });
+        }
+      }
+
+      function updateStars(dt) {
+        for (const star of state.stars) {
+          star.y += star.speed * dt;
+          if (star.y > VIEW.height + 4) {
+            star.y = -4;
+            star.x = (star.x + 137) % VIEW.width;
+          }
+        }
+      }
+
+      function updateExplosions(dt) {
+        state.explosions = state.explosions.filter((explosion) => {
+          explosion.life -= dt;
+          explosion.radius += dt * 60;
+          return explosion.life > 0;
+        });
+        state.victoryFlash = Math.max(0, state.victoryFlash - dt * 2.2);
+      }
+
+      function update(dt) {
+        updateStars(dt);
+        updateExplosions(dt);
+
+        if (state.mode !== "running") {
+          return;
+        }
+
+        state.elapsed += dt;
+        const player = state.player;
+        const boss = state.boss;
+
+        const dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+        const dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+        player.x = clamp(player.x + dx * PLAYER_SPEED * dt, 42, VIEW.width - 42);
+        player.y = clamp(player.y + dy * PLAYER_SPEED * dt, VIEW.height - 150, VIEW.height - 42);
+        player.fireCooldown = Math.max(0, player.fireCooldown - dt);
+
+        if (input.shoot && player.fireCooldown === 0) {
+          spawnPlayerBullet();
+          player.fireCooldown = PLAYER_FIRE_COOLDOWN;
+        }
+
+        boss.phaseTimer += dt;
+        boss.x += boss.direction * boss.speed * dt;
+        if (boss.x < 140) {
+          boss.x = 140;
+          boss.direction = 1;
+        }
+        if (boss.x > VIEW.width - 140) {
+          boss.x = VIEW.width - 140;
+          boss.direction = -1;
+        }
+        boss.y = 102 + Math.sin(boss.phaseTimer * 1.8) * 18;
+        boss.volleyCooldown -= dt;
+        if (boss.volleyCooldown <= 0) {
+          spawnBossVolley();
+          const hpRatio = boss.hp / boss.maxHp;
+          boss.volleyCooldown = Math.max(0.28, 0.88 * hpRatio + 0.16);
+        }
+
+        const alivePlayerBullets = [];
+        for (const bullet of state.playerBullets) {
+          bullet.y += bullet.vy * dt;
+          if (bullet.y < -20) {
+            continue;
+          }
+          if (circleRectOverlap(bullet, boss)) {
+            boss.hp -= 1;
+            spawnExplosion(bullet.x, bullet.y, "#fde047", 10);
+            if (boss.hp <= 0) {
+              clearRun();
+            }
+            continue;
+          }
+          alivePlayerBullets.push(bullet);
+        }
+        state.playerBullets = alivePlayerBullets;
+
+        const aliveEnemyBullets = [];
+        for (const bullet of state.enemyBullets) {
+          bullet.x += bullet.vx * dt;
+          bullet.y += bullet.vy * dt;
+          if (
+            bullet.x < -32 ||
+            bullet.x > VIEW.width + 32 ||
+            bullet.y > VIEW.height + 32
+          ) {
+            continue;
+          }
+          if (circleRectOverlap(bullet, player)) {
+            failRun("boss_bullet");
+            continue;
+          }
+          aliveEnemyBullets.push(bullet);
+        }
+        state.enemyBullets = aliveEnemyBullets;
+
+        if (rectOverlap(player, boss)) {
+          failRun("boss_collision");
+        }
+      }
+
+      function render() {
+        drawBackground();
+        drawStars();
+        drawBossAura();
+        drawBoss();
+        drawPlayerBullets();
+        drawEnemyBullets();
+        drawPlayer();
+        drawExplosions();
+        drawHud();
+        drawOverlay();
+      }
+
+      function drawBackground() {
+        const gradient = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        gradient.addColorStop(0, "#020617");
+        gradient.addColorStop(0.5, "#0f172a");
+        gradient.addColorStop(1, "#111827");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(96, 165, 250, 0.12)";
+        ctx.beginPath();
+        ctx.arc(170, 98, 120, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "rgba(244, 114, 182, 0.09)";
+        ctx.beginPath();
+        ctx.arc(800, 148, 160, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (state.victoryFlash > 0) {
+          ctx.fillStyle = `rgba(250, 204, 21, ${state.victoryFlash * 0.18})`;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+      }
+
+      function drawStars() {
+        for (const star of state.stars) {
+          ctx.fillStyle = `rgba(226, 232, 240, ${0.35 + star.size * 0.15})`;
+          ctx.fillRect(star.x, star.y, star.size, star.size);
+        }
+      }
+
+      function drawBossAura() {
+        const boss = state.boss;
+        const aura = ctx.createRadialGradient(boss.x, boss.y, 12, boss.x, boss.y, 124);
+        aura.addColorStop(0, "rgba(244, 114, 182, 0.32)");
+        aura.addColorStop(1, "rgba(244, 114, 182, 0)");
+        ctx.fillStyle = aura;
+        ctx.beginPath();
+        ctx.arc(boss.x, boss.y + 10, 124, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawBoss() {
+        const boss = state.boss;
+        ctx.save();
+        ctx.translate(boss.x, boss.y);
+
+        ctx.fillStyle = "#ec4899";
+        ctx.beginPath();
+        ctx.moveTo(-76, 10);
+        ctx.lineTo(-32, -42);
+        ctx.lineTo(0, -28);
+        ctx.lineTo(32, -42);
+        ctx.lineTo(76, 10);
+        ctx.lineTo(42, 46);
+        ctx.lineTo(-42, 46);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = "#1e1b4b";
+        ctx.fillRect(-22, -22, 44, 52);
+        ctx.fillStyle = "#fdf2f8";
+        ctx.fillRect(-56, 12, 112, 10);
+        ctx.fillStyle = "#0f172a";
+        ctx.beginPath();
+        ctx.arc(-24, -4, 9, 0, Math.PI * 2);
+        ctx.arc(24, -4, 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawPlayer() {
+        const player = state.player;
+        ctx.save();
+        ctx.translate(player.x, player.y);
+
+        ctx.fillStyle = "#38bdf8";
+        ctx.beginPath();
+        ctx.moveTo(0, -20);
+        ctx.lineTo(18, 18);
+        ctx.lineTo(0, 10);
+        ctx.lineTo(-18, 18);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = "#e0f2fe";
+        ctx.fillRect(-7, -6, 14, 24);
+        ctx.fillStyle = "#f97316";
+        ctx.fillRect(-3, 18, 6, 10);
+        ctx.restore();
+      }
+
+      function drawPlayerBullets() {
+        ctx.fillStyle = "#fde047";
+        for (const bullet of state.playerBullets) {
+          ctx.beginPath();
+          ctx.arc(bullet.x, bullet.y, bullet.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawEnemyBullets() {
+        ctx.fillStyle = "#fb7185";
+        for (const bullet of state.enemyBullets) {
+          ctx.beginPath();
+          ctx.arc(bullet.x, bullet.y, bullet.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawExplosions() {
+        for (const explosion of state.explosions) {
+          ctx.fillStyle = explosion.color;
+          ctx.globalAlpha = Math.max(0, explosion.life * 1.6);
+          ctx.beginPath();
+          ctx.arc(explosion.x, explosion.y, explosion.radius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+        ctx.fillRect(18, 16, 328, 110);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 22px Trebuchet MS";
+        ctx.fillText("Galaxy Boss", 34, 44);
+        ctx.font = "600 16px Trebuchet MS";
+        ctx.fillText("방향키 이동 / Space 발사", 34, 70);
+        ctx.fillText(`생존 시간 ${state.elapsed.toFixed(1)}초`, 34, 94);
+
+        const boss = state.boss;
+        const ratio = clamp(boss.hp / boss.maxHp, 0, 1);
+        ctx.fillStyle = "rgba(15, 23, 42, 0.7)";
+        ctx.fillRect(560, 24, 316, 24);
+        ctx.fillStyle = "#ef4444";
+        ctx.fillRect(560, 24, 316 * ratio, 24);
+        ctx.strokeStyle = "rgba(248, 250, 252, 0.7)";
+        ctx.strokeRect(560, 24, 316, 24);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 15px Trebuchet MS";
+        ctx.fillText(`BOSS HP ${boss.hp} / ${boss.maxHp}`, 652, 41);
+      }
+
+      function drawOverlay() {
+        if (state.mode === "running") {
+          return;
+        }
+
+        ctx.fillStyle = "rgba(2, 6, 23, 0.62)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        const title =
+          state.mode === "menu" ? "Galaxy Boss" : state.mode === "failed" ? "GAME OVER" : "CLEAR";
+        const accent = state.mode === "menu" ? "#f97316" : state.mode === "failed" ? "#ef4444" : "#22c55e";
+        const lines =
+          state.mode === "menu"
+            ? [
+                "클리어 조건: 보스 체력을 모두 깎아 격추하세요.",
+                "실패 조건: 보스 몸체나 탄에 한 번이라도 맞으면 즉시 종료됩니다.",
+                "Enter로 시작, 방향키로 이동, Space로 발사합니다.",
+              ]
+            : state.mode === "failed"
+              ? [
+                  `생존 시간 ${state.lastRunTime.toFixed(1)}초`,
+                  "공유 목숨 1개가 끝났습니다.",
+                  "Enter로 다시 시작합니다.",
+                ]
+              : [
+                  `격추 완료 시간 ${state.lastRunTime.toFixed(1)}초`,
+                  "보스를 쓰러뜨렸습니다.",
+                  "호스트가 다음 랜덤 스테이지를 바로 고릅니다.",
+                ];
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.96)";
+        roundRect(170, 128, 620, 250, 28);
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        roundRect(170, 128, 620, 250, 28);
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 44px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 188);
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 244 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function roundRect(x, y, width, height, radius) {
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + width, y, x + width, y + height, radius);
+        ctx.arcTo(x + width, y + height, x, y + height, radius);
+        ctx.arcTo(x, y + height, x, y, radius);
+        ctx.arcTo(x, y, x + width, y, radius);
+        ctx.closePath();
+      }
+
+      function rectOverlap(a, b) {
+        return (
+          a.x - a.w / 2 < b.x + b.w / 2 &&
+          a.x + a.w / 2 > b.x - b.w / 2 &&
+          a.y - a.h / 2 < b.y + b.h / 2 &&
+          a.y + a.h / 2 > b.y - b.h / 2
+        );
+      }
+
+      function circleRectOverlap(circle, rect) {
+        const nearestX = clamp(circle.x, rect.x - rect.w / 2, rect.x + rect.w / 2);
+        const nearestY = clamp(circle.y, rect.y - rect.h / 2, rect.y + rect.h / 2);
+        const dx = circle.x - nearestX;
+        const dy = circle.y - nearestY;
+        return dx * dx + dy * dy <= circle.r * circle.r;
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function round1(value) {
+        return Math.round(value * 10) / 10;
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "origin top-left, x right, y down, units in pixels",
+          mode: state.mode,
+          elapsed: round1(state.mode === "running" ? state.elapsed : state.lastRunTime),
+          player: {
+            x: round1(state.player.x),
+            y: round1(state.player.y),
+            fire_cooldown: round1(state.player.fireCooldown),
+          },
+          boss: {
+            x: round1(state.boss.x),
+            y: round1(state.boss.y),
+            hp: state.boss.hp,
+            max_hp: state.boss.maxHp,
+            volley_cooldown: round1(state.boss.volleyCooldown),
+          },
+          player_bullets: state.playerBullets.slice(0, 8).map((bullet) => ({
+            x: round1(bullet.x),
+            y: round1(bullet.y),
+          })),
+          enemy_bullets: state.enemyBullets.slice(0, 12).map((bullet) => ({
+            x: round1(bullet.x),
+            y: round1(bullet.y),
+            vx: round1(bullet.vx),
+            vy: round1(bullet.vy),
+          })),
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "ArrowLeft") {
+          input.left = true;
+        }
+        if (event.key === "ArrowRight") {
+          input.right = true;
+        }
+        if (event.key === "ArrowUp") {
+          input.up = true;
+        }
+        if (event.key === "ArrowDown") {
+          input.down = true;
+        }
+        if (event.code === "Space") {
+          event.preventDefault();
+          input.shoot = true;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          if (state.mode === "menu" || state.mode === "failed") {
+            resetRun();
+          }
+        }
+      }
+
+      function onKeyUp(event) {
+        if (event.key === "ArrowLeft") {
+          input.left = false;
+        }
+        if (event.key === "ArrowRight") {
+          input.right = false;
+        }
+        if (event.key === "ArrowUp") {
+          input.up = false;
+        }
+        if (event.key === "ArrowDown") {
+          input.down = false;
+        }
+        if (event.code === "Space") {
+          input.shoot = false;
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "galaxy-boss",
+        title: "Galaxy Boss",
+        creator: "Codex",
+        genre: "Arcade shooter",
+        clearCondition: "보스 체력을 모두 깎아 격추하기",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          resetRun();
+          state.boss.hp = 1;
+          state.playerBullets.push({
+            x: state.boss.x,
+            y: state.boss.y + 30,
+            vy: -PLAYER_BULLET_SPEED,
+            r: 5,
+          });
+          update(FIXED_DT);
+          render();
+        },
+        forceFail() {
+          resetRun();
+          failRun("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("blur", () => {
+        input.left = false;
+        input.right = false;
+        input.up = false;
+        input.down = false;
+        input.shoot = false;
+      });
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
