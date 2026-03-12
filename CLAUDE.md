@@ -3,9 +3,9 @@
 Use this repository-local workflow instead of any global Claude setting.
 
 Command mapping:
-- `/게임만들기 ...` -> `relay-tools/create-stage.md`
-- `/만든게임확인 ...` -> `relay-tools/check-stage.md`
-- `/게임올려보기 ...` -> `relay-tools/publish-stage.md`
+- `/make-stage ...` -> `relay-tools/create-stage.md`
+- `/check-stage ...` -> `relay-tools/check-stage.md`
+- `/publish-stage ...` -> `relay-tools/publish-stage.md`
 
 Execution rules:
 - Keep all changes inside this repository.

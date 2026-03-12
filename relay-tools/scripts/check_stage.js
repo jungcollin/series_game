@@ -47,22 +47,24 @@ async function main() {
 
   const repoRoot = path.resolve(__dirname, "../..");
   const registryPath = path.join(repoRoot, "community-stages/registry.js");
-  const stagePath = path.join(repoRoot, "community-stages", stageSlug, "index.html");
   const outputDir = path.join(repoRoot, "output", "relay-tools");
   const baseUrl = (args["base-url"] || "http://series-game.localhost:1355").replace(/\/$/, "");
-
-  if (!fs.existsSync(stagePath)) {
-    throw new Error(`Stage file not found: ${path.relative(repoRoot, stagePath)}`);
-  }
 
   const registryText = fs.readFileSync(registryPath, "utf8");
   if (!registryText.includes(`id: "${stageSlug}"`)) {
     throw new Error(`Registry entry missing for stage: ${stageSlug}`);
   }
-  const titleMatch = registryText.match(
-    new RegExp(`id: "${stageSlug}"[\\s\\S]*?title: "([^"]+)"`)
+  const entryMatch = registryText.match(
+    new RegExp(
+      `id: "${stageSlug}"[\\s\\S]*?title: "([^"]+)"[\\s\\S]*?path: "\\./([^"]+)/index\\.html"`
+    )
   );
-  const stageTitle = titleMatch ? titleMatch[1] : stageSlug;
+  const stageDir = entryMatch ? entryMatch[2] : stageSlug;
+  const stagePath = path.join(repoRoot, "community-stages", stageDir, "index.html");
+  if (!fs.existsSync(stagePath)) {
+    throw new Error(`Stage file not found: ${path.relative(repoRoot, stagePath)}`);
+  }
+  const stageTitle = entryMatch ? entryMatch[1] : stageSlug;
 
   fs.mkdirSync(outputDir, { recursive: true });
 
@@ -80,7 +82,7 @@ async function main() {
   const launcherCount = await page.locator(`text=${stageTitle}`).count();
   await page.screenshot({ path: path.join(outputDir, `${stageSlug}-launcher.png`), fullPage: true });
 
-  const stageUrl = `${baseUrl}/community-stages/${stageSlug}/index.html`;
+  const stageUrl = `${baseUrl}/community-stages/${stageDir}/index.html`;
   await page.goto(stageUrl, { waitUntil: "networkidle" });
   await page.waitForTimeout(300);
   const directChecks = await page.evaluate(() => ({
@@ -133,7 +135,7 @@ async function main() {
         };
         document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageSlug}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
       },
-      { stageSlug, iframeId }
+      { stageSlug: stageDir, iframeId }
     );
 
     const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();

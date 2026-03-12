@@ -4,13 +4,13 @@ This repository defines a project-local stage workflow. Do not rely on global sk
 
 If the user message starts with one of these commands, follow the mapped document in this repo:
 
-- `/게임만들기 ...`
+- `/make-stage ...`
   - Read [relay-tools/create-stage.md](/Users/collin/Project/etc/series_game/relay-tools/create-stage.md)
   - Prefer `node relay-tools/scripts/create_stage.js ...`
-- `/만든게임확인 ...`
+- `/check-stage ...`
   - Read [relay-tools/check-stage.md](/Users/collin/Project/etc/series_game/relay-tools/check-stage.md)
   - Run `node relay-tools/scripts/check_stage.js --stage <stage-slug>`
-- `/게임올려보기 ...`
+- `/publish-stage ...`
   - Read [relay-tools/publish-stage.md](/Users/collin/Project/etc/series_game/relay-tools/publish-stage.md)
   - Prefer `node relay-tools/scripts/publish_stage.js --stage <stage-slug>`
 

@@ -1,4 +1,4 @@
-# /게임올려보기
+# /publish-stage
 
 입력은 `stage-slug` 하나다.
 
@@ -12,6 +12,7 @@
    - `check_stage.js` 재실행
    - 관련 변경 파일 확인
    - PR 제목/본문 초안 출력
+   - GitHub PR 자동 검토는 `.github/workflows/relay-pr-review.yml` 에서 별도로 수행된다.
 3. 사용자가 실제 커밋을 원하면 아래 옵션을 붙인다.
    - 커밋: `--commit`
    - 푸시: `--push`
