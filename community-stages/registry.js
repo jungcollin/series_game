@@ -1,5 +1,13 @@
 window.COMMUNITY_STAGE_REGISTRY = [
   {
+    id: "galaxy-boss",
+    title: "Galaxy Boss",
+    creator: "Codex",
+    genre: "Arcade shooter",
+    clearCondition: "보스 체력을 모두 깎아 격추하기",
+    path: "./galaxy-boss/index.html",
+  },
+  {
     id: "quick-plus-3",
     title: "Quick Plus 3",
     creator: "Codex",
