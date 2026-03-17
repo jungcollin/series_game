@@ -1,13 +1,16 @@
 # /publish-stage
 
-입력은 `stage-slug` 하나다.
+입력은 선택적으로 `stage-slug` 하나다.
+- 예: `/publish-stage meteor-dodge-run`
+- 생략 시: Git 변경 파일에서 `community-stages/<stage-slug>/...`를 자동 추론한다.
 
 목표:
 - 스테이지를 리뷰 가능한 상태로 정리하고, 필요하면 커밋/푸시까지 준비한다.
 
 순서:
 1. 먼저 검증을 다시 돌린다.
-   - `node relay-tools/scripts/publish_stage.js --stage <stage-slug>`
+   - 기본: `node relay-tools/scripts/publish_stage.js`
+   - 명시: `node relay-tools/scripts/publish_stage.js --stage <stage-slug>`
 2. 이 스크립트는 기본적으로 아래를 수행한다.
    - `check_stage.js` 재실행
    - 관련 변경 파일 확인

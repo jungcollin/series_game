@@ -22,7 +22,7 @@
    - `window.relayStageDebug = { forceClear(), forceFail() }`
 5. 시작 화면에 조작법, 클리어 조건, 실패 조건을 적는다.
 6. 추가 목숨, continue, checkpoint respawn, save restore는 넣지 않는다.
-7. 작업이 끝나면 `/check-stage <stage-slug>` 흐름으로 넘어간다.
+7. 작업이 끝나면 `/check-stage` 흐름으로 넘어간다. (필요하면 `/check-stage <stage-slug>` 사용)
 
 출력:
 - 변경한 파일만 짧게 제시한다.

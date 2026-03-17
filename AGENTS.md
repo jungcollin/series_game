@@ -9,10 +9,10 @@ If the user message starts with one of these commands, follow the mapped documen
   - Prefer `node relay-tools/scripts/create_stage.js ...`
 - `/check-stage ...`
   - Read [relay-tools/check-stage.md](/Users/collin/Project/etc/series_game/relay-tools/check-stage.md)
-  - Run `node relay-tools/scripts/check_stage.js --stage <stage-slug>`
+  - Run `node relay-tools/scripts/check_stage.js` (or `--stage <stage-slug>`)
 - `/publish-stage ...`
   - Read [relay-tools/publish-stage.md](/Users/collin/Project/etc/series_game/relay-tools/publish-stage.md)
-  - Prefer `node relay-tools/scripts/publish_stage.js --stage <stage-slug>`
+  - Prefer `node relay-tools/scripts/publish_stage.js` (or `--stage <stage-slug>`)
 
 Rules:
 - Keep all workflow files inside this repository only.

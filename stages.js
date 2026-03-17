@@ -81,34 +81,3 @@ window.RELAY_POOL = [
     ruleFocus: "낙사나 압사 즉시 종료",
   },
 ];
-
-window.RELAY_CREATOR_PROMPT = `이 프로젝트에서는 전역 설정이 아니라 로컬 워크플로를 사용합니다.
-
-저장소:
-- https://github.com/jungcollin/series_game
-- git clone git@github.com:jungcollin/series_game.git
-
-1. /make-stage <<one-line stage description>>
-2. /check-stage <stage-slug>
-3. /publish-stage <stage-slug>
-
-로컬 규칙 파일:
-- AGENTS.md
-- CLAUDE.md
-- GEMINI.md
-- relay-tools/create-stage.md
-- relay-tools/check-stage.md
-- relay-tools/publish-stage.md
-
-핵심 계약:
-- community-stages/<stage-slug>/index.html
-- community-stages/registry.js 등록
-- parent.RelayHost.onStageCleared(...)
-- parent.RelayHost.onStageFailed(...)
-- window.render_game_to_text()
-- window.advanceTime(ms)
-- window.relayStageMeta
-- window.relayStageResult
-- window.relayStageDebug = { forceClear(), forceFail() }
-
-공유 목숨은 1개이며, 실패는 즉시 종료, 클리어는 즉시 완료입니다.`;

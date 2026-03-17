@@ -31,14 +31,51 @@ function run(command, args, cwd) {
   }).trim();
 }
 
+function parseChangedStageSlugs(gitStatus) {
+  const stageSlugs = new Set();
+  const lines = String(gitStatus || "").split("\n");
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    let changedPath = line.slice(3).trim();
+    if (!changedPath) {
+      continue;
+    }
+    if (changedPath.includes(" -> ")) {
+      changedPath = changedPath.split(" -> ").pop().trim();
+    }
+    const match = changedPath.match(/^community-stages\/([^/]+)\//);
+    if (match && match[1]) {
+      stageSlugs.add(match[1]);
+    }
+  }
+  return Array.from(stageSlugs);
+}
+
+function resolveStageSlug(args, repoRoot) {
+  if (args.stage) {
+    return args.stage;
+  }
+  const gitStatus = run("git", ["status", "--short"], repoRoot);
+  const candidates = parseChangedStageSlugs(gitStatus);
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+  if (candidates.length > 1) {
+    throw new Error(
+      `Missing --stage. Multiple changed stage candidates found: ${candidates.join(", ")}.`
+    );
+  }
+  throw new Error(
+    "Missing --stage and could not infer stage from git changes. Pass --stage <stage-slug>."
+  );
+}
+
 function main() {
   const args = parseArgs(process.argv);
-  const stageSlug = args.stage;
-  if (!stageSlug) {
-    throw new Error("Missing --stage <stage-slug>.");
-  }
-
   const repoRoot = path.resolve(__dirname, "../..");
+  const stageSlug = resolveStageSlug(args, repoRoot);
   const baseUrl = args["base-url"] || "http://series-game.localhost:1355";
   const stageDir = path.join(repoRoot, "community-stages", stageSlug);
   const stagePath = path.join(stageDir, "index.html");

@@ -1,6 +1,4 @@
 const COMMUNITY_STAGE_REGISTRY = window.COMMUNITY_STAGE_REGISTRY || [];
-const RELAY_CREATOR_PROMPT = window.RELAY_CREATOR_PROMPT || "";
-
 const relayFrameEl = document.querySelector("#relay-frame");
 const runStageTitleEl = document.querySelector("#run-stage-title");
 const runClearCountEl = document.querySelector("#run-clear-count");
@@ -10,8 +8,7 @@ const relayOverlayTitleEl = document.querySelector("#relay-overlay-title");
 const relayOverlayCopyEl = document.querySelector("#relay-overlay-copy");
 const relayRestartBtn = document.querySelector("#relay-restart");
 
-const relayPromptEl = document.querySelector("#relay-prompt");
-const copyPromptBtn = document.querySelector("#copy-prompt");
+const promptStepCopyButtons = document.querySelectorAll(".prompt-step-copy");
 const openPromptBtn = document.querySelector("#open-prompt");
 const closePromptBtn = document.querySelector("#close-prompt");
 const promptModalEl = document.querySelector("#prompt-modal");
@@ -40,12 +37,6 @@ function normalizeStagePath(path) {
       : `./community-stages/${path}`;
 }
 
-function updatePrompt() {
-  if (relayPromptEl) {
-    relayPromptEl.textContent = RELAY_CREATOR_PROMPT;
-  }
-}
-
 function setPromptModal(open) {
   if (!promptModalEl) {
     return;
@@ -63,14 +54,26 @@ function closePromptModal() {
   setPromptModal(false);
 }
 
-function copyPrompt() {
-  if (!navigator.clipboard) {
+function copyPromptStep(button) {
+  if (!navigator.clipboard || !button) {
     return;
   }
-  navigator.clipboard.writeText(RELAY_CREATOR_PROMPT).then(() => {
-    copyPromptBtn.textContent = "복사됨";
+  const targetId = button.dataset.copyTarget;
+  if (!targetId) {
+    return;
+  }
+  const targetEl = document.getElementById(targetId);
+  if (!targetEl) {
+    return;
+  }
+  const text = targetEl.textContent || "";
+  if (!text.trim()) {
+    return;
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    button.textContent = "복사됨";
     window.setTimeout(() => {
-      copyPromptBtn.textContent = "복사하기";
+      button.textContent = "복사";
     }, 1200);
   });
 }
@@ -264,7 +267,9 @@ relayFrameEl?.addEventListener("load", () => {
 
 relayRestartBtn?.addEventListener("click", startNewRun);
 
-copyPromptBtn?.addEventListener("click", copyPrompt);
+promptStepCopyButtons.forEach((button) => {
+  button.addEventListener("click", () => copyPromptStep(button));
+});
 openPromptBtn?.addEventListener("click", openPromptModal);
 closePromptBtn?.addEventListener("click", closePromptModal);
 promptModalEl?.addEventListener("click", (event) => {
@@ -285,5 +290,4 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-updatePrompt();
 startNewRun();

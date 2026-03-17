@@ -11,4 +11,4 @@ Execution rules:
 - Keep all workflow logic inside this repository.
 - Prefer the shared scripts in `relay-tools/scripts/`.
 - Do not depend on global config or global skills.
-- Verify a stage with `node relay-tools/scripts/check_stage.js --stage <stage-slug>` before handing it off.
+- Verify a stage with `node relay-tools/scripts/check_stage.js` before handing it off.
