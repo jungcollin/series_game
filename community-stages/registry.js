@@ -1,5 +1,13 @@
 window.COMMUNITY_STAGE_REGISTRY = [
   {
+    id: "slither-worm",
+    title: "Slither Worm",
+    creator: "Contributor",
+    genre: "Arcade survival",
+    clearCondition: "30초 동안 지렁이를 키우며 악마를 피해 생존하기",
+    path: "./slither-worm/index.html",
+  },
+  {
     id: "vanishing-picks",
     title: "Vanishing Picks",
     creator: "Contributor",
