@@ -1,5 +1,13 @@
 window.COMMUNITY_STAGE_REGISTRY = [
   {
+    id: "vanishing-picks",
+    title: "Vanishing Picks",
+    creator: "Contributor",
+    genre: "Luck & Speed",
+    clearCondition: "사라지기 전에 통과 선택지를 고르세요",
+    path: "./vanishing-picks/index.html",
+  },
+  {
     id: "lightning-dodge",
     title: "Lightning Dodge",
     creator: "Codex",

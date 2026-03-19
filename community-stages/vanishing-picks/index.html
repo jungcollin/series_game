@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vanishing Picks</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="960" height="540" aria-label="Vanishing Picks" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("vanishing-picks") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      /* ── Game constants ── */
+      const TOTAL_CHOICES = 10;
+      const PASS_COUNT = 5;
+      const FAIL_COUNT = 5;
+      const VANISH_INTERVAL = 1.0; // seconds between vanishes
+      const COLS = 5;
+      const ROWS = 2;
+      const CARD_W = 120;
+      const CARD_H = 140;
+      const GAP_X = 24;
+      const GAP_Y = 24;
+      const GRID_W = COLS * CARD_W + (COLS - 1) * GAP_X;
+      const GRID_H = ROWS * CARD_H + (ROWS - 1) * GAP_Y;
+      const GRID_X = (VIEW.width - GRID_W) / 2;
+      const GRID_Y = 160;
+
+      const ACCENT = "#a855f7";     // purple accent
+      const PASS_COLOR = "#22c55e"; // green
+      const FAIL_COLOR = "#ef4444"; // red
+      const CARD_BG = "#1e293b";
+      const CARD_BORDER = "#475569";
+      const HOVER_BORDER = "#a855f7";
+
+      /* ── Game state ── */
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        choices: [],        // { id, isPass, visible, vanishOrder, x, y, vanishing, vanishProgress }
+        vanishTimer: 0,
+        vanishedCount: 0,
+        vanishOrder: [],    // order in which cards vanish
+        hoveredCard: -1,
+        selectedCard: -1,
+        resultReason: "",
+        shakeTimer: 0,
+        shakeIntensity: 0,
+        particles: [],
+        countdownFlash: 0,
+        timerBarFlash: 0,
+      };
+
+      function shuffle(arr) {
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
+      }
+
+      function initChoices() {
+        const types = [];
+        for (let i = 0; i < PASS_COUNT; i++) types.push(true);
+        for (let i = 0; i < FAIL_COUNT; i++) types.push(false);
+        shuffle(types);
+
+        const vanishOrder = shuffle([...Array(TOTAL_CHOICES).keys()]);
+
+        state.choices = [];
+        for (let i = 0; i < TOTAL_CHOICES; i++) {
+          const col = i % COLS;
+          const row = Math.floor(i / COLS);
+          state.choices.push({
+            id: i,
+            isPass: types[i],
+            visible: true,
+            vanishing: false,
+            vanishProgress: 0,
+            x: GRID_X + col * (CARD_W + GAP_X),
+            y: GRID_Y + row * (CARD_H + GAP_Y),
+          });
+        }
+        state.vanishOrder = vanishOrder;
+        state.vanishedCount = 0;
+        state.vanishTimer = 0;
+        state.hoveredCard = -1;
+        state.selectedCard = -1;
+        state.resultReason = "";
+        state.particles = [];
+        state.shakeTimer = 0;
+        state.countdownFlash = 0;
+        state.timerBarFlash = 0;
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+        initChoices();
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.resultReason = reason;
+        window.relayStageResult.status = "failed";
+        state.shakeTimer = 0.4;
+        state.shakeIntensity = 8;
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        spawnClearParticles();
+        reportClearedToHost();
+      }
+
+      function spawnClearParticles() {
+        const card = state.choices[state.selectedCard];
+        if (!card) return;
+        const cx = card.x + CARD_W / 2;
+        const cy = card.y + CARD_H / 2;
+        for (let i = 0; i < 40; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 100 + Math.random() * 250;
+          state.particles.push({
+            x: cx, y: cy,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 1.0,
+            decay: 0.6 + Math.random() * 0.8,
+            size: 3 + Math.random() * 5,
+            color: Math.random() > 0.5 ? PASS_COLOR : "#86efac",
+          });
+        }
+      }
+
+      function selectCard(index) {
+        if (state.mode !== "running") return;
+        const card = state.choices[index];
+        if (!card || !card.visible || card.vanishing) return;
+
+        state.selectedCard = index;
+        if (card.isPass) {
+          clearStage();
+        } else {
+          failStage("wrong_choice");
+        }
+      }
+
+      function getRemainingPassCount() {
+        return state.choices.filter(c => c.visible && !c.vanishing && c.isPass).length;
+      }
+
+      /* ── Update ── */
+      function update(dt) {
+        if (state.mode === "running") {
+          state.elapsed += dt;
+          state.vanishTimer += dt;
+
+          // Vanish cards
+          while (state.vanishTimer >= VANISH_INTERVAL && state.vanishedCount < TOTAL_CHOICES) {
+            state.vanishTimer -= VANISH_INTERVAL;
+            const cardIdx = state.vanishOrder[state.vanishedCount];
+            state.choices[cardIdx].vanishing = true;
+            state.vanishedCount++;
+            state.countdownFlash = 0.3;
+            state.timerBarFlash = 0.3;
+
+            // Check auto-fail: no pass choices remain visible
+            const passRemaining = getRemainingPassCount();
+            if (passRemaining === 0) {
+              failStage("time_out");
+              return;
+            }
+          }
+
+          // Animate vanishing cards
+          for (const c of state.choices) {
+            if (c.vanishing && c.visible) {
+              c.vanishProgress += dt * 2.5;
+              if (c.vanishProgress >= 1) {
+                c.visible = false;
+              }
+            }
+          }
+
+          // All vanished without selection
+          if (state.choices.every(c => !c.visible)) {
+            failStage("time_out");
+          }
+        }
+
+        // Countdown flash decay
+        if (state.countdownFlash > 0) state.countdownFlash -= dt;
+        if (state.timerBarFlash > 0) state.timerBarFlash -= dt;
+
+        // Shake
+        if (state.shakeTimer > 0) state.shakeTimer -= dt;
+
+        // Particles
+        for (const p of state.particles) {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 300 * dt;
+          p.life -= p.decay * dt;
+        }
+        state.particles = state.particles.filter(p => p.life > 0);
+      }
+
+      /* ── Render helpers ── */
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      function renderBackground() {
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#0f172a");
+        grad.addColorStop(1, "#020617");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        roundRect(128, 92, 704, 356, 20);
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 226 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function renderTimerBar() {
+        const totalTime = TOTAL_CHOICES * VANISH_INTERVAL;
+        const remaining = Math.max(0, totalTime - state.elapsed);
+        const ratio = remaining / totalTime;
+
+        const barX = 80;
+        const barY = 50;
+        const barW = VIEW.width - 160;
+        const barH = 16;
+
+        // Background
+        roundRect(barX, barY, barW, barH, 8);
+        ctx.fillStyle = "#1e293b";
+        ctx.fill();
+
+        // Fill
+        if (ratio > 0) {
+          const fillW = barW * ratio;
+          roundRect(barX, barY, fillW, barH, 8);
+          const flashMix = Math.max(0, state.timerBarFlash / 0.3);
+          if (ratio > 0.5) {
+            ctx.fillStyle = flashMix > 0
+              ? lerpColor(ACCENT, "#e9d5ff", flashMix)
+              : ACCENT;
+          } else if (ratio > 0.25) {
+            ctx.fillStyle = "#f59e0b";
+          } else {
+            ctx.fillStyle = FAIL_COLOR;
+          }
+          ctx.fill();
+        }
+
+        // Timer text
+        ctx.font = "700 20px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillText(
+          `${Math.ceil(remaining)}s`,
+          VIEW.width / 2,
+          barY - 8
+        );
+      }
+
+      function lerpColor(a, b, t) {
+        const ah = parseInt(a.slice(1), 16);
+        const bh = parseInt(b.slice(1), 16);
+        const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
+        const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
+        const rr = Math.round(ar + (br - ar) * t);
+        const rg = Math.round(ag + (bg - ag) * t);
+        const rb = Math.round(ab + (bb - ab) * t);
+        return `rgb(${rr},${rg},${rb})`;
+      }
+
+      function renderChoiceCards() {
+        const visibleCount = state.choices.filter(c => c.visible).length;
+
+        for (const c of state.choices) {
+          if (!c.visible) continue;
+
+          ctx.save();
+          let alpha = 1;
+          let scale = 1;
+
+          if (c.vanishing) {
+            alpha = 1 - c.vanishProgress;
+            scale = 1 - c.vanishProgress * 0.3;
+          }
+
+          ctx.globalAlpha = alpha;
+          const cx = c.x + CARD_W / 2;
+          const cy = c.y + CARD_H / 2;
+          ctx.translate(cx, cy);
+          ctx.scale(scale, scale);
+          ctx.translate(-cx, -cy);
+
+          // Card shadow
+          roundRect(c.x + 2, c.y + 4, CARD_W, CARD_H, 14);
+          ctx.fillStyle = "rgba(0,0,0,0.3)";
+          ctx.fill();
+
+          // Card body
+          roundRect(c.x, c.y, CARD_W, CARD_H, 14);
+          ctx.fillStyle = CARD_BG;
+          ctx.fill();
+
+          // Border
+          const isHover = state.hoveredCard === c.id && !c.vanishing;
+          ctx.strokeStyle = isHover ? HOVER_BORDER : CARD_BORDER;
+          ctx.lineWidth = isHover ? 3 : 2;
+          ctx.stroke();
+
+          // Hover glow
+          if (isHover) {
+            roundRect(c.x, c.y, CARD_W, CARD_H, 14);
+            ctx.shadowColor = ACCENT;
+            ctx.shadowBlur = 15;
+            ctx.strokeStyle = ACCENT;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+          }
+
+          // Question mark
+          ctx.fillStyle = isHover ? "#e2e8f0" : "#94a3b8";
+          ctx.font = "700 48px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("?", cx, cy - 8);
+
+          // Card number
+          ctx.fillStyle = "#64748b";
+          ctx.font = "600 18px Trebuchet MS";
+          ctx.fillText(`${c.id + 1}`, cx, cy + 42);
+          ctx.textBaseline = "alphabetic";
+
+          ctx.restore();
+        }
+
+        // Remaining count label
+        ctx.font = "600 18px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#94a3b8";
+        ctx.fillText(
+          `남은 선택지: ${visibleCount} / ${TOTAL_CHOICES}`,
+          VIEW.width / 2,
+          GRID_Y + GRID_H + 40
+        );
+      }
+
+      function renderResultOverlay() {
+        if (state.mode === "cleared") {
+          const card = state.choices[state.selectedCard];
+          // Highlight the selected card green
+          if (card) {
+            ctx.save();
+            roundRect(card.x, card.y, CARD_W, CARD_H, 14);
+            ctx.fillStyle = "rgba(34, 197, 94, 0.2)";
+            ctx.fill();
+            ctx.strokeStyle = PASS_COLOR;
+            ctx.lineWidth = 4;
+            ctx.stroke();
+
+            ctx.fillStyle = PASS_COLOR;
+            ctx.font = "700 48px Trebuchet MS";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("O", card.x + CARD_W / 2, card.y + CARD_H / 2 - 8);
+            ctx.textBaseline = "alphabetic";
+            ctx.restore();
+          }
+
+          // Reveal all cards
+          for (const c of state.choices) {
+            if (c.id === state.selectedCard) continue;
+            if (!c.visible) continue;
+            ctx.save();
+            ctx.globalAlpha = 0.6;
+            const symbol = c.isPass ? "O" : "X";
+            const color = c.isPass ? PASS_COLOR : FAIL_COLOR;
+            ctx.fillStyle = color;
+            ctx.font = "700 36px Trebuchet MS";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(symbol, c.x + CARD_W / 2, c.y + CARD_H / 2 - 8);
+            ctx.textBaseline = "alphabetic";
+            ctx.restore();
+          }
+
+          // Overlay banner
+          ctx.fillStyle = "rgba(15, 23, 42, 0.6)";
+          ctx.fillRect(0, VIEW.height / 2 - 50, VIEW.width, 100);
+          ctx.font = "700 42px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillStyle = PASS_COLOR;
+          ctx.fillText("CLEAR!", VIEW.width / 2, VIEW.height / 2 + 12);
+          ctx.font = "600 20px Trebuchet MS";
+          ctx.fillStyle = "#86efac";
+          ctx.fillText(`${state.lastRunTime.toFixed(1)}s`, VIEW.width / 2, VIEW.height / 2 + 40);
+        }
+
+        if (state.mode === "failed") {
+          // Reveal all cards
+          for (const c of state.choices) {
+            if (!c.visible) continue;
+            ctx.save();
+            if (c.id === state.selectedCard) {
+              roundRect(c.x, c.y, CARD_W, CARD_H, 14);
+              ctx.fillStyle = "rgba(239, 68, 68, 0.2)";
+              ctx.fill();
+              ctx.strokeStyle = FAIL_COLOR;
+              ctx.lineWidth = 4;
+              ctx.stroke();
+            }
+            const symbol = c.isPass ? "O" : "X";
+            const color = c.isPass ? PASS_COLOR : FAIL_COLOR;
+            ctx.globalAlpha = c.id === state.selectedCard ? 1 : 0.6;
+            ctx.fillStyle = color;
+            ctx.font = c.id === state.selectedCard ? "700 48px Trebuchet MS" : "700 36px Trebuchet MS";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(symbol, c.x + CARD_W / 2, c.y + CARD_H / 2 - 8);
+            ctx.textBaseline = "alphabetic";
+            ctx.restore();
+          }
+
+          // Overlay banner
+          ctx.fillStyle = "rgba(15, 23, 42, 0.6)";
+          ctx.fillRect(0, VIEW.height / 2 - 50, VIEW.width, 100);
+          ctx.font = "700 42px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillStyle = FAIL_COLOR;
+          const failMsg = state.resultReason === "time_out"
+            ? "TIME OUT!"
+            : "FAIL!";
+          ctx.fillText(failMsg, VIEW.width / 2, VIEW.height / 2 + 12);
+          ctx.font = "600 20px Trebuchet MS";
+          ctx.fillStyle = "#fca5a5";
+          const subMsg = state.resultReason === "time_out"
+            ? "통과 선택지가 모두 사라졌습니다"
+            : "실패 선택지를 골랐습니다";
+          ctx.fillText(subMsg, VIEW.width / 2, VIEW.height / 2 + 40);
+        }
+      }
+
+      function renderParticles() {
+        for (const p of state.particles) {
+          ctx.save();
+          ctx.globalAlpha = Math.max(0, p.life);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function renderHeader() {
+        ctx.font = "700 28px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillStyle = ACCENT;
+        ctx.fillText("Vanishing Picks", VIEW.width / 2, 30);
+      }
+
+      /* ── Main render ── */
+      function render() {
+        ctx.save();
+
+        // Screen shake
+        if (state.shakeTimer > 0) {
+          const intensity = state.shakeIntensity * (state.shakeTimer / 0.4);
+          ctx.translate(
+            (Math.random() - 0.5) * intensity * 2,
+            (Math.random() - 0.5) * intensity * 2
+          );
+        }
+
+        if (state.mode === "menu") {
+          renderBackground();
+          renderCard("Vanishing Picks", [
+            "10개의 카드 중 5개는 통과, 5개는 실패",
+            "1초마다 카드가 하나씩 사라집니다",
+            "클리어: 통과 카드를 클릭하세요",
+            "실패: 실패 카드 선택 또는 미선택시 자동 탈락",
+            "클릭 또는 숫자키(1~0)로 선택 | Enter로 시작",
+          ], ACCENT);
+          ctx.restore();
+          return;
+        }
+
+        renderBackground();
+
+        if (state.mode === "running" || state.mode === "cleared" || state.mode === "failed") {
+          renderHeader();
+          if (state.mode === "running") {
+            renderTimerBar();
+          }
+          renderChoiceCards();
+          renderResultOverlay();
+          renderParticles();
+        }
+
+        ctx.restore();
+      }
+
+      /* ── Input ── */
+      function getCardAtPosition(mx, my) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = VIEW.width / rect.width;
+        const scaleY = VIEW.height / rect.height;
+        const x = (mx - rect.left) * scaleX;
+        const y = (my - rect.top) * scaleY;
+
+        for (const c of state.choices) {
+          if (!c.visible || c.vanishing) continue;
+          if (x >= c.x && x <= c.x + CARD_W && y >= c.y && y <= c.y + CARD_H) {
+            return c.id;
+          }
+        }
+        return -1;
+      }
+
+      canvas.addEventListener("mousemove", (e) => {
+        if (state.mode !== "running") return;
+        state.hoveredCard = getCardAtPosition(e.clientX, e.clientY);
+        canvas.style.cursor = state.hoveredCard >= 0 ? "pointer" : "default";
+      });
+
+      canvas.addEventListener("click", (e) => {
+        if (state.mode === "menu") {
+          canvas.focus();
+          return;
+        }
+        if (state.mode !== "running") return;
+        const cardId = getCardAtPosition(e.clientX, e.clientY);
+        if (cardId >= 0) {
+          selectCard(cardId);
+        }
+      });
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+
+        if (state.mode !== "running") return;
+
+        // Number keys 1-9 and 0 (for card 10)
+        const numMap = { "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5, "7": 6, "8": 7, "9": 8, "0": 9 };
+        if (event.key in numMap) {
+          event.preventDefault();
+          selectCard(numMap[event.key]);
+        }
+      }
+
+      /* ── render_game_to_text / advanceTime ── */
+      function renderGameToText() {
+        const visibleChoices = state.choices.filter(c => c.visible);
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540, cards in 5x2 grid",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          choices: visibleChoices.map(c => ({
+            id: c.id + 1,
+            visible: c.visible,
+            vanishing: c.vanishing,
+          })),
+          vanished_count: state.vanishedCount,
+          pass_remaining: getRemainingPassCount(),
+          result: window.relayStageResult.status,
+          result_reason: state.resultReason,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      /* ── Frame loop ── */
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "vanishing-picks",
+        title: "Vanishing Picks",
+        creator: "Contributor",
+        genre: "Luck & Speed",
+        clearCondition: "사라지기 전에 통과 선택지를 고르세요",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          state.selectedCard = state.choices.findIndex(c => c.isPass);
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
