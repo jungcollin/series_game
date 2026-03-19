@@ -80,18 +80,44 @@
     window.location.href = buildStageUrl(nextStage.path, nextContext, currentStageId);
   }
 
+  function normalizeCreator(creator) {
+    if (typeof creator === "string") {
+      return { name: creator, avatar: null, github: null };
+    }
+    if (!creator) {
+      return { name: "Unknown", avatar: null, github: null };
+    }
+    return {
+      name: creator.name || "Unknown",
+      avatar: creator.avatar || null,
+      github: creator.github || null,
+    };
+  }
+
+  function getCreatorAvatarUrl(creator) {
+    var normalized = normalizeCreator(creator);
+    if (normalized.avatar) {
+      return normalized.avatar;
+    }
+    if (normalized.github) {
+      return "https://github.com/" + normalized.github + ".png?size=80";
+    }
+    return null;
+  }
+
   function decorateRegistryLinks(registry, listEl) {
     const context = readContext();
     const played = new Set(context.history);
     listEl.innerHTML = registry
       .map((entry) => {
+        const creator = normalizeCreator(entry.creator);
         const playedBadge = played.has(entry.id) ? `<span class="card-status">진행함</span>` : "";
         const href = buildStageUrl(entry.path, context, context.previousStageId);
         return `
           <a class="stage-card" href="${href}">
             <p class="card-label">${entry.genre}</p>
             <h2>${entry.title}</h2>
-            <p class="card-meta">by ${entry.creator}</p>
+            <p class="card-meta">by ${creator.name}</p>
             <p class="card-copy">${entry.clearCondition}</p>
             <div class="card-footer">
               <span class="card-link">플레이하기</span>
@@ -109,5 +135,7 @@
     goToRandomNext,
     decorateRegistryLinks,
     buildStageUrl,
+    normalizeCreator,
+    getCreatorAvatarUrl,
   };
 })();

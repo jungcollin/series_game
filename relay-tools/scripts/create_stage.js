@@ -55,7 +55,10 @@ function main() {
   }
 
   const title = args.title || titleCaseFromSlug(slug);
-  const creator = args.creator || "Contributor";
+  const creatorName = args.creator || "Contributor";
+  const creatorAvatar = args["creator-avatar"] || null;
+  const creatorGithub = args["creator-github"] || null;
+  const creator = creatorName;
   const genre = args.genre || "Arcade stage";
   const clearCondition = args["clear-condition"] || args.clear || "스테이지 목표를 달성하기";
   const failCopy = args["fail-copy"] || "실패 조건에 맞춰 즉시 종료됩니다.";
@@ -81,7 +84,9 @@ function main() {
 
   const registryText = fs.readFileSync(registryPath, "utf8");
   if (!registryText.includes(`id: "${slug}"`)) {
-    const entry = `  {\n    id: "${slug}",\n    title: "${title}",\n    creator: "${creator}",\n    genre: "${genre}",\n    clearCondition: "${clearCondition}",\n    path: "./${slug}/index.html",\n  },\n`;
+    const avatarStr = creatorAvatar ? `"${creatorAvatar}"` : "null";
+    const githubStr = creatorGithub ? `"${creatorGithub}"` : "null";
+    const entry = `  {\n    id: "${slug}",\n    title: "${title}",\n    creator: { name: "${creatorName}", avatar: ${avatarStr}, github: ${githubStr} },\n    genre: "${genre}",\n    clearCondition: "${clearCondition}",\n    path: "./${slug}/index.html",\n  },\n`;
     const updated = registryText.replace(
       /window\.COMMUNITY_STAGE_REGISTRY = \[\n/,
       `window.COMMUNITY_STAGE_REGISTRY = [\n${entry}`

@@ -2,7 +2,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
   {
     id: "slither-worm",
     title: "영철을 피해라",
-    creator: "Contributor",
+    creator: { name: "zero4uu", avatar: null, github: "zero4uu" },
     genre: "Arcade survival",
     clearCondition: "30초 동안 지렁이를 키우며 영철를 피해 생존하기",
     path: "./slither-worm/index.html",
@@ -10,7 +10,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
   {
     id: "vanishing-picks",
     title: "Vanishing Picks",
-    creator: "Contributor",
+    creator: { name: "김우진", avatar: null, github: "ogq-bobby" },
     genre: "Luck & Speed",
     clearCondition: "사라지기 전에 통과 선택지를 고르세요",
     path: "./vanishing-picks/index.html",
@@ -18,7 +18,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
   {
     id: "lightning-dodge",
     title: "Lightning Dodge",
-    creator: "Codex",
+    creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade survival",
     clearCondition: "35초 동안 번개 예고선을 보고 모든 낙뢰를 피하기",
     path: "./lightning-dodge/index.html",
@@ -26,7 +26,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
   {
     id: "jump-hurdle",
     title: "Jump Hurdle",
-    creator: "Contributor",
+    creator: { name: "지현정", avatar: null, github: "jyeonjeeong" },
     genre: "Platformer",
     clearCondition: "30초 동안 장애물을 피하고 문에 도달하면 클리어",
     path: "./jump-hurdle/index.html",
@@ -34,7 +34,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
   {
     id: "galaxy-boss",
     title: "Galaxy Boss",
-    creator: "Codex",
+    creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade shooter",
     clearCondition: "보스 체력을 모두 깎아 격추하기",
     path: "./galaxy-boss/index.html",
@@ -42,7 +42,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
   {
     id: "quick-plus-3",
     title: "Quick Plus 3",
-    creator: "Codex",
+    creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Math quiz",
     clearCondition: "쉬운 더하기 3문제를 모두 맞히세요.",
     path: "./quick-plus-3/index.html",
@@ -50,9 +50,17 @@ window.COMMUNITY_STAGE_REGISTRY = [
   {
     id: "poop-rain-60",
     title: "Poop Rain 60",
-    creator: "Codex",
+    creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade survival",
-    clearCondition: "60초 동안 하늘에서 떨어지는 벥을 피하세요.",
+    clearCondition: "60초 동안 하늘에서 떨어지는 벡을 피하세요.",
     path: "./poop-rain/index.html",
+  },
+  {
+    id: "whack-a-mole",
+    title: "두더지 잡기",
+    creator: { name: "김우진", avatar: null, github: "ogq-bobby" },
+    genre: "Arcade",
+    clearCondition: "30초 안에 두더지 20마리 이상 잡으면 클리어",
+    path: "./whack-a-mole/index.html",
   },
 ];

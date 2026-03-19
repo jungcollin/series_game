@@ -48,6 +48,8 @@ const state = {
   leaderboardEntries: [],
   lastRunResult: null,
   saveState: "idle",
+  likeCounts: new Map(),
+  likeCountsLoaded: false,
 };
 
 function getSavedPlayerName() {
@@ -511,19 +513,30 @@ function pickNextStage() {
   }
 
   const excluded = new Set([...state.history, ...state.unavailableStageIds]);
-
-  if (!window.RelayRuntime) {
-    const candidates = COMMUNITY_STAGE_REGISTRY.filter((entry) => !excluded.has(entry.id));
-    if (!candidates.length) {
-      return null;
-    }
-    return candidates[Math.floor(Math.random() * candidates.length)];
+  const available = COMMUNITY_STAGE_REGISTRY.filter((entry) => !excluded.has(entry.id));
+  if (!available.length) {
+    return null;
   }
 
-  return window.RelayRuntime.pickRandomNext(COMMUNITY_STAGE_REGISTRY, {
-    history: Array.from(excluded),
-    currentStageId: state.currentStage?.id || null,
-  });
+  // Popularity-based selection when like data is available
+  if (state.likeCountsLoaded && state.likeCounts.size > 0) {
+    const withLikes = available
+      .map((s) => ({ ...s, likes: state.likeCounts.get(s.id) || 0 }))
+      .sort((a, b) => b.likes - a.likes);
+
+    const poolSize = Math.max(3, Math.ceil(withLikes.length * 0.7));
+    const popularPool = withLikes.slice(0, Math.min(poolSize, withLikes.length));
+    return popularPool[Math.floor(Math.random() * popularPool.length)];
+  }
+
+  // Fallback: full random
+  if (window.RelayRuntime) {
+    return window.RelayRuntime.pickRandomNext(COMMUNITY_STAGE_REGISTRY, {
+      history: Array.from(excluded),
+      currentStageId: state.currentStage?.id || null,
+    });
+  }
+  return available[Math.floor(Math.random() * available.length)];
 }
 
 function handleStageLoadTimeout() {
@@ -724,5 +737,20 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-loadLeaderboard();
-startNewRun();
+async function loadLikeCounts() {
+  if (!window.LikesClient) {
+    return;
+  }
+  try {
+    state.likeCounts = await window.LikesClient.fetchLikeCounts();
+    state.likeCountsLoaded = true;
+  } catch (error) {
+    state.likeCounts = new Map();
+    state.likeCountsLoaded = false;
+  }
+}
+
+loadLikeCounts().then(() => {
+  loadLeaderboard();
+  startNewRun();
+});
