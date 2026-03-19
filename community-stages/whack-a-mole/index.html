@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>두더지 잡기</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="960" height="540" aria-label="두더지 잡기" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("whack-a-mole") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      // Game constants
+      const GAME_TIME = 30;
+      const CLEAR_SCORE = 20;
+      const GRID_COLS = 3;
+      const GRID_ROWS = 3;
+      const HOLE_RADIUS = 44;
+      const MOLE_RADIUS = 36;
+
+      // Grid layout
+      const GRID_X = 240;
+      const GRID_Y = 120;
+      const CELL_W = 160;
+      const CELL_H = 130;
+
+      // Mole timing (lerps from start to end over 30s)
+      const SPAWN_INTERVAL_START = 1.2;
+      const SPAWN_INTERVAL_END = 0.35;
+      const MOLE_VISIBLE_START = 1.0;
+      const MOLE_VISIBLE_END = 0.35;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        score: 0,
+        timeLeft: GAME_TIME,
+        spawnTimer: 0,
+        holes: [], // 9 holes: { moleUp, moleTimer, moleMaxTime, hit, hitTimer }
+        hitEffects: [], // { x, y, timer }
+        missEffects: [], // { x, y, timer }
+      };
+
+      function initHoles() {
+        state.holes = [];
+        for (let i = 0; i < GRID_ROWS * GRID_COLS; i++) {
+          state.holes.push({
+            moleUp: false,
+            moleTimer: 0,
+            moleMaxTime: 0,
+            hit: false,
+            hitTimer: 0,
+          });
+        }
+      }
+
+      function getHoleCenter(index) {
+        const col = index % GRID_COLS;
+        const row = Math.floor(index / GRID_COLS);
+        return {
+          x: GRID_X + col * CELL_W + CELL_W / 2,
+          y: GRID_Y + row * CELL_H + CELL_H / 2,
+        };
+      }
+
+      function getSpawnInterval() {
+        const t = 1 - state.timeLeft / GAME_TIME;
+        return SPAWN_INTERVAL_START + (SPAWN_INTERVAL_END - SPAWN_INTERVAL_START) * t;
+      }
+
+      function getMoleVisibleTime() {
+        const t = 1 - state.timeLeft / GAME_TIME;
+        return MOLE_VISIBLE_START + (MOLE_VISIBLE_END - MOLE_VISIBLE_START) * t;
+      }
+
+      function spawnMole() {
+        const available = [];
+        for (let i = 0; i < state.holes.length; i++) {
+          if (!state.holes[i].moleUp) available.push(i);
+        }
+        if (available.length === 0) return;
+        const idx = available[Math.floor(Math.random() * available.length)];
+        const hole = state.holes[idx];
+        hole.moleUp = true;
+        hole.moleTimer = 0;
+        hole.moleMaxTime = getMoleVisibleTime();
+        hole.hit = false;
+        hole.hitTimer = 0;
+      }
+
+      initHoles();
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.score = 0;
+        state.timeLeft = GAME_TIME;
+        state.spawnTimer = 0;
+        state.hitEffects = [];
+        state.missEffects = [];
+        initHoles();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+        // Spawn first mole immediately
+        spawnMole();
+      }
+
+      function failStage(reason = "시간 초과! 두더지를 충분히 잡지 못했습니다.") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") return;
+
+        state.elapsed += dt;
+        state.timeLeft = Math.max(0, GAME_TIME - state.elapsed);
+
+        // Check clear: score >= 20 at any time
+        if (state.score >= CLEAR_SCORE) {
+          clearStage();
+          return;
+        }
+
+        // Check fail: time ran out
+        if (state.timeLeft <= 0) {
+          failStage("시간 초과! " + state.score + "/" + CLEAR_SCORE + "마리 잡음");
+          return;
+        }
+
+        // Update mole timers
+        for (const hole of state.holes) {
+          if (hole.moleUp) {
+            hole.moleTimer += dt;
+            if (hole.hit) {
+              hole.hitTimer += dt;
+              if (hole.hitTimer > 0.25) {
+                hole.moleUp = false;
+                hole.hit = false;
+              }
+            } else if (hole.moleTimer >= hole.moleMaxTime) {
+              hole.moleUp = false;
+            }
+          }
+        }
+
+        // Spawn timer
+        state.spawnTimer += dt;
+        const interval = getSpawnInterval();
+        if (state.spawnTimer >= interval) {
+          state.spawnTimer -= interval;
+          spawnMole();
+          // Sometimes spawn two at once in the last 10 seconds
+          if (state.timeLeft < 10 && Math.random() < 0.4) {
+            spawnMole();
+          }
+        }
+
+        // Update hit effects
+        for (const fx of state.hitEffects) fx.timer += dt;
+        state.hitEffects = state.hitEffects.filter((fx) => fx.timer < 0.4);
+
+        // Update miss effects
+        for (const fx of state.missEffects) fx.timer += dt;
+        state.missEffects = state.missEffects.filter((fx) => fx.timer < 0.3);
+      }
+
+      // --- Rendering ---
+
+      function drawRoundedRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 228 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function renderGame() {
+        // Background - grassy field
+        const bgGrad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        bgGrad.addColorStop(0, "#87CEEB");
+        bgGrad.addColorStop(0.35, "#5BA3D9");
+        bgGrad.addColorStop(0.4, "#4CAF50");
+        bgGrad.addColorStop(1, "#2E7D32");
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // Draw ground texture hints
+        ctx.fillStyle = "rgba(46, 125, 50, 0.3)";
+        for (let i = 0; i < 20; i++) {
+          const gx = (i * 137 + 23) % VIEW.width;
+          const gy = 220 + (i * 73 + 11) % 300;
+          ctx.beginPath();
+          ctx.ellipse(gx, gy, 30, 8, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Draw grid of holes and moles
+        for (let i = 0; i < 9; i++) {
+          const { x, y } = getHoleCenter(i);
+          const hole = state.holes[i];
+
+          // Hole shadow
+          ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+          ctx.beginPath();
+          ctx.ellipse(x, y + 28, HOLE_RADIUS + 8, 18, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Hole (dark ellipse)
+          ctx.fillStyle = "#3E2723";
+          ctx.beginPath();
+          ctx.ellipse(x, y + 20, HOLE_RADIUS, 22, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#1B0F0A";
+          ctx.beginPath();
+          ctx.ellipse(x, y + 20, HOLE_RADIUS - 6, 16, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Mole
+          if (hole.moleUp) {
+            const progress = hole.moleTimer / hole.moleMaxTime;
+            // Pop-up animation
+            let popY = 0;
+            if (hole.hit) {
+              // Sinking down after hit
+              popY = y - 10 + hole.hitTimer * 80;
+            } else if (progress < 0.15) {
+              // Rising
+              popY = y + 20 - (progress / 0.15) * 30;
+            } else if (progress > 0.85) {
+              // Sinking
+              popY = y - 10 + ((progress - 0.85) / 0.15) * 30;
+            } else {
+              popY = y - 10;
+            }
+
+            // Clip to hide mole below hole
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(x - HOLE_RADIUS, 0, HOLE_RADIUS * 2, y + 20);
+            ctx.clip();
+
+            // Mole body
+            const bodyColor = hole.hit ? "#D32F2F" : "#8D6E63";
+            ctx.fillStyle = bodyColor;
+            ctx.beginPath();
+            ctx.arc(x, popY, MOLE_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Mole face
+            if (!hole.hit) {
+              // Eyes
+              ctx.fillStyle = "#fff";
+              ctx.beginPath();
+              ctx.arc(x - 12, popY - 6, 8, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.beginPath();
+              ctx.arc(x + 12, popY - 6, 8, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.fillStyle = "#1B0F0A";
+              ctx.beginPath();
+              ctx.arc(x - 10, popY - 5, 4, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.beginPath();
+              ctx.arc(x + 14, popY - 5, 4, 0, Math.PI * 2);
+              ctx.fill();
+
+              // Nose
+              ctx.fillStyle = "#E91E63";
+              ctx.beginPath();
+              ctx.arc(x, popY + 6, 5, 0, Math.PI * 2);
+              ctx.fill();
+
+              // Whiskers
+              ctx.strokeStyle = "#5D4037";
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(x - 18, popY + 4);
+              ctx.lineTo(x - 34, popY);
+              ctx.moveTo(x - 18, popY + 8);
+              ctx.lineTo(x - 34, popY + 10);
+              ctx.moveTo(x + 18, popY + 4);
+              ctx.lineTo(x + 34, popY);
+              ctx.moveTo(x + 18, popY + 8);
+              ctx.lineTo(x + 34, popY + 10);
+              ctx.stroke();
+            } else {
+              // Hit face: X eyes
+              ctx.strokeStyle = "#fff";
+              ctx.lineWidth = 3;
+              ctx.beginPath();
+              ctx.moveTo(x - 16, popY - 12);
+              ctx.lineTo(x - 6, popY - 2);
+              ctx.moveTo(x - 6, popY - 12);
+              ctx.lineTo(x - 16, popY - 2);
+              ctx.stroke();
+              ctx.beginPath();
+              ctx.moveTo(x + 6, popY - 12);
+              ctx.lineTo(x + 16, popY - 2);
+              ctx.moveTo(x + 16, popY - 12);
+              ctx.lineTo(x + 6, popY - 2);
+              ctx.stroke();
+            }
+
+            ctx.restore();
+
+            // Redraw hole rim on top to mask mole lower body
+            ctx.fillStyle = "#3E2723";
+            ctx.beginPath();
+            ctx.ellipse(x, y + 20, HOLE_RADIUS, 22, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = "#1B0F0A";
+            ctx.beginPath();
+            ctx.ellipse(x, y + 20, HOLE_RADIUS - 6, 16, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Redraw the visible part of mole above hole
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(x - HOLE_RADIUS, 0, HOLE_RADIUS * 2, y + 8);
+            ctx.clip();
+
+            ctx.fillStyle = hole.hit ? "#D32F2F" : "#8D6E63";
+            ctx.beginPath();
+            ctx.arc(x, popY, MOLE_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (!hole.hit) {
+              ctx.fillStyle = "#fff";
+              ctx.beginPath();
+              ctx.arc(x - 12, popY - 6, 8, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.beginPath();
+              ctx.arc(x + 12, popY - 6, 8, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.fillStyle = "#1B0F0A";
+              ctx.beginPath();
+              ctx.arc(x - 10, popY - 5, 4, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.beginPath();
+              ctx.arc(x + 14, popY - 5, 4, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.fillStyle = "#E91E63";
+              ctx.beginPath();
+              ctx.arc(x, popY + 6, 5, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.strokeStyle = "#5D4037";
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(x - 18, popY + 4);
+              ctx.lineTo(x - 34, popY);
+              ctx.moveTo(x - 18, popY + 8);
+              ctx.lineTo(x - 34, popY + 10);
+              ctx.moveTo(x + 18, popY + 4);
+              ctx.lineTo(x + 34, popY);
+              ctx.moveTo(x + 18, popY + 8);
+              ctx.lineTo(x + 34, popY + 10);
+              ctx.stroke();
+            } else {
+              ctx.strokeStyle = "#fff";
+              ctx.lineWidth = 3;
+              ctx.beginPath();
+              ctx.moveTo(x - 16, popY - 12);
+              ctx.lineTo(x - 6, popY - 2);
+              ctx.moveTo(x - 6, popY - 12);
+              ctx.lineTo(x - 16, popY - 2);
+              ctx.stroke();
+              ctx.beginPath();
+              ctx.moveTo(x + 6, popY - 12);
+              ctx.lineTo(x + 16, popY - 2);
+              ctx.moveTo(x + 16, popY - 12);
+              ctx.lineTo(x + 6, popY - 2);
+              ctx.stroke();
+            }
+
+            ctx.restore();
+          }
+        }
+
+        // Hit effects (star burst)
+        for (const fx of state.hitEffects) {
+          const alpha = 1 - fx.timer / 0.4;
+          const scale = 1 + fx.timer * 3;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = "#FFD600";
+          ctx.font = `bold ${Math.round(28 * scale)}px Trebuchet MS`;
+          ctx.textAlign = "center";
+          ctx.fillText("+1", fx.x, fx.y - 30 - fx.timer * 60);
+          ctx.restore();
+        }
+
+        // Miss effects
+        for (const fx of state.missEffects) {
+          const alpha = 1 - fx.timer / 0.3;
+          ctx.save();
+          ctx.globalAlpha = alpha * 0.6;
+          ctx.strokeStyle = "#F44336";
+          ctx.lineWidth = 3;
+          const r = 15 + fx.timer * 20;
+          ctx.beginPath();
+          ctx.moveTo(fx.x - r, fx.y - r);
+          ctx.lineTo(fx.x + r, fx.y + r);
+          ctx.moveTo(fx.x + r, fx.y - r);
+          ctx.lineTo(fx.x - r, fx.y + r);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // HUD - top bar
+        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+        ctx.fillRect(0, 0, VIEW.width, 56);
+
+        // Timer bar
+        const timerRatio = state.timeLeft / GAME_TIME;
+        const barX = 20;
+        const barY = 16;
+        const barW = 300;
+        const barH = 24;
+        ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
+        drawRoundedRect(barX, barY, barW, barH, 12);
+        ctx.fill();
+        const barColor = timerRatio > 0.3 ? "#4CAF50" : timerRatio > 0.15 ? "#FF9800" : "#F44336";
+        ctx.fillStyle = barColor;
+        drawRoundedRect(barX, barY, Math.max(0, barW * timerRatio), barH, 12);
+        ctx.fill();
+
+        // Timer text
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 18px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(Math.ceil(state.timeLeft) + "s", barX + barW + 12, barY + 18);
+
+        // Score
+        ctx.font = "bold 26px Trebuchet MS";
+        ctx.textAlign = "right";
+        ctx.fillStyle = state.score >= CLEAR_SCORE ? "#4CAF50" : "#fff";
+        ctx.fillText(state.score + " / " + CLEAR_SCORE, VIEW.width - 24, barY + 20);
+
+        // Speed indicator
+        ctx.font = "14px Trebuchet MS";
+        ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+        ctx.textAlign = "center";
+        const speedPct = Math.round((1 - timerRatio) * 100);
+        ctx.fillText("Speed +" + speedPct + "%", VIEW.width / 2, barY + 18);
+
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.clearRect(0, 0, VIEW.width, VIEW.height);
+
+        if (state.mode === "menu") {
+          renderCard("두더지 잡기", [
+            "조작: 마우스 클릭 / 터치",
+            "클리어: 30초 안에 두더지 20마리 이상 잡기",
+            "실패: 시간 초과 시 20마리 미달이면 실패",
+            "시간이 줄수록 두더지가 빨라집니다!",
+            "",
+            "클릭 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderGame();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패!", [
+            state.score + " / " + CLEAR_SCORE + " 마리 잡음",
+            "시간이 부족했습니다...",
+          ], "#b91c1c");
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          renderCard("클리어!", [
+            state.score + "마리를 잡았습니다!",
+            "소요 시간: " + state.lastRunTime.toFixed(1) + "초",
+          ], "#15803d");
+          return;
+        }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540, 3x3 grid",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          time_left: Math.round(state.timeLeft * 10) / 10,
+          score: state.score,
+          target_score: CLEAR_SCORE,
+          active_moles: state.holes.filter((h) => h.moleUp && !h.hit).length,
+          speed_multiplier: Math.round((1 + (1 - state.timeLeft / GAME_TIME)) * 100) / 100,
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      // --- Input ---
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: ((clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function handleClick(cx, cy) {
+        if (state.mode === "menu") {
+          startStage();
+          return;
+        }
+        if (state.mode !== "running") return;
+
+        let hitAny = false;
+        for (let i = 0; i < 9; i++) {
+          const hole = state.holes[i];
+          if (!hole.moleUp || hole.hit) continue;
+          const { x, y } = getHoleCenter(i);
+          const dx = cx - x;
+          const dy = cy - (y - 10);
+          if (dx * dx + dy * dy <= (MOLE_RADIUS + 12) * (MOLE_RADIUS + 12)) {
+            hole.hit = true;
+            hole.hitTimer = 0;
+            state.score++;
+            state.hitEffects.push({ x, y: y - 10, timer: 0 });
+            hitAny = true;
+            break;
+          }
+        }
+        if (!hitAny && state.mode === "running") {
+          state.missEffects.push({ x: cx, y: cy, timer: 0 });
+        }
+      }
+
+      canvas.addEventListener("mousedown", (e) => {
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        handleClick(pos.x, pos.y);
+      });
+
+      canvas.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        const pos = getCanvasPos(touch.clientX, touch.clientY);
+        handleClick(pos.x, pos.y);
+      }, { passive: false });
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+        }
+      }
+
+      // --- Game loop ---
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      // --- Relay contract ---
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "whack-a-mole",
+        title: "두더지 잡기",
+        creator: "Contributor",
+        genre: "Arcade",
+        clearCondition: "30초 안에 두더지 20마리 이상 잡으면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
