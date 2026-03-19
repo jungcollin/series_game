@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const { findStageMeta, stagePathForDir, syncRegistry } = require("./stage_metadata");
 
 function parseArgs(argv) {
   const result = {};
@@ -29,6 +30,11 @@ function run(command, args, cwd) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+function parseRepoFullName(remoteUrl) {
+  const match = String(remoteUrl || "").match(/github\.com[:/]([^/]+\/[^/.]+)/);
+  return match ? match[1].replace(/\.git$/, "") : null;
 }
 
 function parseChangedStageSlugs(gitStatus) {
@@ -72,7 +78,7 @@ function resolveStageSlug(args, repoRoot) {
   );
 }
 
-function collectStageFiles(repoRoot, stageSlug) {
+function collectStageFiles(repoRoot, stageDir) {
   const gitStatus = run("git", ["status", "--short"], repoRoot);
   const lines = String(gitStatus || "").split("\n").filter(Boolean);
   const files = [];
@@ -82,7 +88,7 @@ function collectStageFiles(repoRoot, stageSlug) {
       changedPath = changedPath.split(" -> ").pop().trim();
     }
     if (
-      changedPath.startsWith(`community-stages/${stageSlug}/`) ||
+      changedPath.startsWith(`community-stages/${stageDir}/`) ||
       changedPath === "community-stages/registry.js"
     ) {
       files.push(changedPath);
@@ -92,11 +98,11 @@ function collectStageFiles(repoRoot, stageSlug) {
 }
 
 function ensureBranch(repoRoot, stageSlug) {
-  const branchName = `stage/${stageSlug}`;
   const currentBranch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], repoRoot);
-  if (currentBranch === branchName) {
-    return branchName;
+  if (currentBranch && currentBranch !== "HEAD" && currentBranch !== "main") {
+    return currentBranch;
   }
+  const branchName = `stage/${stageSlug}`;
   try {
     run("git", ["checkout", "-b", branchName], repoRoot);
   } catch (_err) {
@@ -109,15 +115,19 @@ function detectUpstreamRepo(repoRoot) {
   // Check if 'upstream' remote exists (fork workflow)
   try {
     const upstreamUrl = run("git", ["remote", "get-url", "upstream"], repoRoot);
-    // Extract owner/repo from upstream URL
-    const match = upstreamUrl.match(/github\.com[:/]([^/]+\/[^/.]+)/);
-    if (match) {
-      return match[1].replace(/\.git$/, "");
-    }
+    return parseRepoFullName(upstreamUrl);
   } catch (_err) {
     // No upstream remote = working on the original repo directly
   }
   return null;
+}
+
+function getOriginRepo(repoRoot) {
+  try {
+    return parseRepoFullName(run("git", ["remote", "get-url", "origin"], repoRoot));
+  } catch (_err) {
+    return null;
+  }
 }
 
 function getOriginOwner(repoRoot) {
@@ -133,38 +143,88 @@ function getOriginOwner(repoRoot) {
   return null;
 }
 
+function findExistingPr(repoRoot, repositoryFullName, branch, headOwner) {
+  const raw = run(
+    "gh",
+    [
+      "pr",
+      "list",
+      "--repo",
+      repositoryFullName,
+      "--state",
+      "all",
+      "--limit",
+      "100",
+      "--json",
+      "number,url,state,headRefName,baseRefName,headRepositoryOwner",
+    ],
+    repoRoot
+  );
+
+  const prs = JSON.parse(raw).filter((pr) => {
+    const ownerLogin = pr.headRepositoryOwner?.login || null;
+    return (
+      pr.baseRefName === "main" &&
+      pr.headRefName === branch &&
+      (!headOwner || ownerLogin === headOwner)
+    );
+  });
+
+  prs.sort((left, right) => right.number - left.number);
+
+  const openPr = prs.find((pr) => pr.state === "OPEN") || null;
+  const latestClosedPr = prs.find((pr) => pr.state !== "OPEN") || null;
+
+  return {
+    openPr,
+    latestClosedPr,
+  };
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
-  const stageSlug = resolveStageSlug(args, repoRoot);
+  const stageCandidate = resolveStageSlug(args, repoRoot);
+  const stageMeta = findStageMeta(repoRoot, stageCandidate);
   const baseUrl = args["base-url"] || "http://127.0.0.1:4173";
-  const stageDir = path.join(repoRoot, "community-stages", stageSlug);
-  const stagePath = path.join(stageDir, "index.html");
+  const stagePath = stagePathForDir(repoRoot, stageMeta?.dir || stageCandidate);
+
+  if (!stageMeta) {
+    throw new Error(`Stage metadata not found for: ${stageCandidate}`);
+  }
 
   if (!fs.existsSync(stagePath)) {
     throw new Error(`Stage file not found: ${path.relative(repoRoot, stagePath)}`);
   }
 
+  syncRegistry(repoRoot);
+
   // Run check
-  const checkOutput = run("node", ["relay-tools/scripts/check_stage.js", "--stage", stageSlug, "--base-url", baseUrl], repoRoot);
+  const checkOutput = run(
+    "node",
+    ["relay-tools/scripts/check_stage.js", "--stage", stageMeta.id, "--base-url", baseUrl],
+    repoRoot
+  );
   const gitStatus = run("git", ["status", "--short"], repoRoot);
-  const commitMessage = `feat: add relay stage ${stageSlug}`;
+  const commitMessage = `feat: add relay stage ${stageMeta.id}`;
   const prTitle = commitMessage;
   const prBody = [
     "## Summary",
-    `- Add relay stage \`${stageSlug}\``,
+    `- Add relay stage \`${stageMeta.id}\``,
+    `- Genre: ${stageMeta.genre}`,
+    `- Description: ${stageMeta.description}`,
     "",
     "## Controls",
-    "- Fill in the stage-specific controls here.",
+    `- ${stageMeta.controls}`,
     "",
     "## Clear Condition",
-    "- Fill in the clear condition here.",
+    `- ${stageMeta.clearCondition}`,
     "",
     "## Fail Condition",
-    "- Fill in the fail condition here.",
+    `- ${stageMeta.failCondition}`,
     "",
     "## Test",
-    `- \`node relay-tools/scripts/check_stage.js --stage ${stageSlug}\``,
+    `- \`node relay-tools/scripts/check_stage.js --stage ${stageMeta.id}\``,
   ].join("\n");
 
   // --pr implies --commit and --push, then creates a GitHub PR
@@ -177,20 +237,24 @@ function main() {
   let pushed = false;
   let prUrl = "";
   let isFork = false;
+  let prAction = "not_requested";
+  let existingPr = null;
+  let previousPr = null;
 
   // Detect fork vs direct workflow
   const upstreamRepo = detectUpstreamRepo(repoRoot);
+  const originRepo = getOriginRepo(repoRoot);
   const originOwner = getOriginOwner(repoRoot);
   isFork = Boolean(upstreamRepo);
 
   if (doCommit) {
     if (doPr) {
-      branch = ensureBranch(repoRoot, stageSlug);
+      branch = ensureBranch(repoRoot, stageMeta.dir);
     }
 
-    const stageFiles = collectStageFiles(repoRoot, stageSlug);
+    const stageFiles = collectStageFiles(repoRoot, stageMeta.dir);
     if (stageFiles.length === 0) {
-      throw new Error(`No changed files found for stage: ${stageSlug}`);
+      throw new Error(`No changed files found for stage: ${stageMeta.id}`);
     }
     run("git", ["add", ...stageFiles], repoRoot);
     run("git", ["commit", "-m", commitMessage], repoRoot);
@@ -210,22 +274,51 @@ function main() {
   }
 
   if (doPr) {
-    const ghArgs = ["pr", "create", "--title", prTitle, "--body", prBody, "--base", "main"];
-    if (isFork) {
-      // For fork workflow: create PR against the upstream repo
-      // gh pr create --repo upstream/repo --head fork-owner:branch
-      ghArgs.push("--repo", upstreamRepo);
-      ghArgs.push("--head", `${originOwner}:${branch}`);
+    const targetRepo = upstreamRepo || originRepo;
+    if (!targetRepo) {
+      throw new Error("Could not determine the GitHub repository for PR creation.");
     }
-    const ghOutput = run("gh", ghArgs, repoRoot);
-    prUrl = ghOutput.trim();
+
+    const prLookup = findExistingPr(repoRoot, targetRepo, branch, originOwner);
+    existingPr = prLookup.openPr;
+    previousPr = prLookup.latestClosedPr;
+
+    if (existingPr) {
+      run(
+        "gh",
+        [
+          "pr",
+          "edit",
+          String(existingPr.number),
+          "--repo",
+          targetRepo,
+          "--title",
+          prTitle,
+          "--body",
+          prBody,
+        ],
+        repoRoot
+      );
+      prUrl = existingPr.url;
+      prAction = "updated_existing";
+    } else {
+      const ghArgs = ["pr", "create", "--title", prTitle, "--body", prBody, "--base", "main"];
+      ghArgs.push("--repo", targetRepo);
+      if (isFork) {
+        ghArgs.push("--head", `${originOwner}:${branch}`);
+      }
+      const ghOutput = run("gh", ghArgs, repoRoot);
+      prUrl = ghOutput.trim();
+      prAction = previousPr ? "created_after_closed_pr" : "created_new";
+    }
   }
 
   process.stdout.write(
     JSON.stringify(
       {
         ok: true,
-        stage: stageSlug,
+        stage: stageMeta.id,
+        stageDir: stageMeta.dir,
         check: JSON.parse(checkOutput),
         changedFiles: gitStatus ? gitStatus.split("\n") : [],
         commitMessage,
@@ -235,7 +328,11 @@ function main() {
         pushed,
         branch,
         isFork,
+        originRepo: originRepo || null,
         upstreamRepo: upstreamRepo || null,
+        prAction,
+        existingPr,
+        previousPr,
         prUrl,
       },
       null,

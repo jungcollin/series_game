@@ -47,16 +47,40 @@
     };
   }
 
-  function pickRandomNext(registry, context) {
+  function getAvailableStages(registry, context) {
     const excluded = new Set(context.history);
     if (context.currentStageId) {
       excluded.add(context.currentStageId);
     }
-    const candidates = registry.filter((entry) => !excluded.has(entry.id));
+    return registry.filter((entry) => !excluded.has(entry.id));
+  }
+
+  function pickSecureRandomIndex(length) {
+    if (length <= 0) {
+      return -1;
+    }
+
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      const maxUint32 = 0x100000000;
+      const threshold = maxUint32 - (maxUint32 % length);
+      const buffer = new Uint32Array(1);
+
+      do {
+        window.crypto.getRandomValues(buffer);
+      } while (buffer[0] >= threshold);
+
+      return buffer[0] % length;
+    }
+
+    return Math.floor(Math.random() * length);
+  }
+
+  function pickRandomNext(registry, context) {
+    const candidates = getAvailableStages(registry, context);
     if (!candidates.length) {
       return null;
     }
-    return candidates[Math.floor(Math.random() * candidates.length)];
+    return candidates[pickSecureRandomIndex(candidates.length)];
   }
 
   function goToRandomNext(registry, currentStageId) {
@@ -111,19 +135,26 @@
     listEl.innerHTML = registry
       .map((entry) => {
         const creator = normalizeCreator(entry.creator);
-        const playedBadge = played.has(entry.id) ? `<span class="card-status">진행함</span>` : "";
+        const hasPlayed = played.has(entry.id);
+        const playedBadge = hasPlayed ? `<span class="card-status">진행함</span>` : "";
         const href = buildStageUrl(entry.path, context, context.previousStageId);
+        const wrapperTag = hasPlayed ? "article" : "a";
+        const wrapperAttrs = hasPlayed
+          ? `class="stage-card stage-card-played" aria-disabled="true"`
+          : `class="stage-card" href="${href}"`;
+        const actionLabel = hasPlayed ? "이미 진행함" : "플레이하기";
+        const actionClass = hasPlayed ? "card-link card-link-disabled" : "card-link";
         return `
-          <a class="stage-card" href="${href}">
+          <${wrapperTag} ${wrapperAttrs}>
             <p class="card-label">${entry.genre}</p>
             <h2>${entry.title}</h2>
             <p class="card-meta">by ${creator.name}</p>
             <p class="card-copy">${entry.clearCondition}</p>
             <div class="card-footer">
-              <span class="card-link">플레이하기</span>
+              <span class="${actionClass}">${actionLabel}</span>
               ${playedBadge}
             </div>
-          </a>
+          </${wrapperTag}>
         `;
       })
       .join("");

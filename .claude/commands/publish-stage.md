@@ -1,27 +1,30 @@
 # /publish-stage
 
-입력은 선택적으로 `stage-slug` 하나다.
+입력은 `stage-slug` 하나를 명시하는 것을 기본으로 한다.
 - 예: `/publish-stage meteor-dodge-run`
-- 생략 시: Git 변경 파일에서 `community-stages/<stage-slug>/...`를 자동 추론한다.
+- 자동 추론도 가능하지만, 다음 제작자 프롬프트에서는 항상 slug를 명시한다.
 
 이 커맨드의 상세 명세는 `relay-tools/publish-stage.md`에 있다.
 
 ## 순서
 
-### 1. 검증 + 브랜치 + 커밋 + 푸시 + PR 한 번에 실행
+### 1. 검증 + 커밋 + 푸시 + PR 생성 또는 기존 PR 업데이트를 한 번에 실행
 
 ```bash
 node relay-tools/scripts/publish_stage.js --stage <stage-slug> --pr --base-url http://127.0.0.1:4173
 ```
 
 `--pr` 플래그는 아래를 자동 수행한다:
-1. `check_stage.js` 재실행 (검증 통과 필수)
-2. 브랜치 생성: `stage/<stage-slug>` (이미 있으면 그대로 사용)
-3. 관련 파일 스테이징: `community-stages/<slug>/`, `community-stages/registry.js`
-4. 커밋: `feat: add relay stage <slug>`
-5. 푸시: `git push -u origin stage/<stage-slug>`
-6. PR 생성 (fork/direct 자동 감지)
-7. PR URL 출력
+1. `sync_registry.js` 실행으로 registry를 메타 기준으로 갱신
+2. `check_stage.js` 재실행 (검증 통과 필수)
+3. 현재 브랜치가 `main`이면 `stage/<stage-slug>` 브랜치를 새로 만든다
+4. 현재 브랜치가 이미 feature branch면 그 브랜치를 그대로 사용한다
+5. 관련 파일 스테이징: `community-stages/<slug>/`, `community-stages/registry.js`
+6. 커밋: `feat: add relay stage <slug>`
+7. 현재 작업 브랜치를 `origin`에 push
+8. 현재 브랜치에 열린 PR이 있으면 그 PR을 그대로 업데이트한다
+9. 이전 PR이 이미 merged 또는 closed 상태면 새 PR을 만든다
+10. PR URL 출력
 
 ### 2. Fork vs Direct 워크플로우 (자동 감지)
 
@@ -50,7 +53,7 @@ python3 -m http.server 4173 &
 
 - 검증 결과 (pass/fail)
 - 변경된 파일 목록
-- 커밋 해시
+- PR 처리 방식 (기존 PR 업데이트 또는 새 PR 생성)
 - fork 여부
 - PR URL
 
@@ -60,4 +63,4 @@ PR URL을 사용자에게 최종 출력한다.
 
 - `--pr` 없이 실행하면 기존처럼 JSON 출력만 한다 (dry-run 용도).
 - 검증(check_stage.js)이 실패하면 PR 생성을 중단하고 실패 원인을 출력한다.
-- main 브랜치에서 직접 푸시하지 않는다. 반드시 `stage/<slug>` 브랜치를 사용한다.
+- main 브랜치에서 직접 푸시하지 않는다. 이미 feature branch에서 작업 중이면 그 브랜치를 유지한다.

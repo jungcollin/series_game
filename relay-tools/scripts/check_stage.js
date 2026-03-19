@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const { checkRegistrySync, findStageMeta, stagePathForDir } = require("./stage_metadata");
 
 function loadPlaywright() {
   try {
@@ -90,26 +91,39 @@ function resolveStageSlug(args, repoRoot) {
 async function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
-  const stageSlug = resolveStageSlug(args, repoRoot);
-  const registryPath = path.join(repoRoot, "community-stages/registry.js");
+  const stageCandidate = resolveStageSlug(args, repoRoot);
+  const stageMeta = findStageMeta(repoRoot, stageCandidate);
   const outputDir = path.join(repoRoot, "output", "relay-tools");
   const baseUrl = (args["base-url"] || "http://series-game.localhost:1355").replace(/\/$/, "");
 
-  const registryText = fs.readFileSync(registryPath, "utf8");
-  if (!registryText.includes(`id: "${stageSlug}"`)) {
-    throw new Error(`Registry entry missing for stage: ${stageSlug}`);
+  if (!stageMeta) {
+    throw new Error(`Stage metadata not found for: ${stageCandidate}`);
   }
-  const entryMatch = registryText.match(
-    new RegExp(
-      `id: "${stageSlug}"[\\s\\S]*?title: "([^"]+)"[\\s\\S]*?path: "\\./([^"]+)/index\\.html"`
-    )
-  );
-  const stageDir = entryMatch ? entryMatch[2] : stageSlug;
-  const stagePath = path.join(repoRoot, "community-stages", stageDir, "index.html");
+
+  const registryStatus = checkRegistrySync(repoRoot);
+  if (!registryStatus.ok) {
+    throw new Error(
+      "community-stages/registry.js is out of sync with stage metadata. Run node relay-tools/scripts/sync_registry.js."
+    );
+  }
+
+  const stagePath = stagePathForDir(repoRoot, stageMeta.dir);
   if (!fs.existsSync(stagePath)) {
     throw new Error(`Stage file not found: ${path.relative(repoRoot, stagePath)}`);
   }
-  const stageTitle = entryMatch ? entryMatch[1] : stageSlug;
+
+  const stageSource = fs.readFileSync(stagePath, "utf8");
+  for (const field of [
+    { label: "clearCondition", value: stageMeta.clearCondition },
+    { label: "failCondition", value: stageMeta.failCondition },
+    { label: "controls", value: stageMeta.controls },
+  ]) {
+    if (!stageSource.includes(field.value)) {
+      throw new Error(
+        `Stage source must include the exact ${field.label} text from meta.json: ${field.value}`
+      );
+    }
+  }
 
   fs.mkdirSync(outputDir, { recursive: true });
 
@@ -124,10 +138,13 @@ async function main() {
 
   const launcherUrl = `${baseUrl}/community-stages/index.html`;
   await page.goto(launcherUrl, { waitUntil: "networkidle" });
-  const launcherCount = await page.locator(`text=${stageTitle}`).count();
-  await page.screenshot({ path: path.join(outputDir, `${stageSlug}-launcher.png`), fullPage: true });
+  const launcherCount = await page.locator(`text=${stageMeta.title}`).count();
+  await page.screenshot({
+    path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
+    fullPage: true,
+  });
 
-  const stageUrl = `${baseUrl}/community-stages/${stageDir}/index.html`;
+  const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
   await page.goto(stageUrl, { waitUntil: "networkidle" });
   await page.waitForTimeout(300);
   const directChecks = await page.evaluate(() => ({
@@ -143,16 +160,37 @@ async function main() {
     meta: window.relayStageMeta || null,
     result: window.relayStageResult || null,
   }));
-  await page.screenshot({ path: path.join(outputDir, `${stageSlug}-direct.png`), fullPage: true });
+  await page.screenshot({
+    path: path.join(outputDir, `${stageMeta.dir}-direct.png`),
+    fullPage: true,
+  });
 
   if (!launcherCount) {
-    throw new Error(`Launcher card not found for stage: ${stageSlug}`);
+    throw new Error(`Launcher card not found for stage: ${stageMeta.id}`);
   }
   if (!directChecks.hasRender || !directChecks.hasAdvance || !directChecks.hasMeta || !directChecks.hasResult) {
-    throw new Error(`Required relay interface missing for stage: ${stageSlug}`);
+    throw new Error(`Required relay interface missing for stage: ${stageMeta.id}`);
   }
   if (!directChecks.hasDebug) {
-    throw new Error(`relayStageDebug.forceClear/forceFail missing for stage: ${stageSlug}`);
+    throw new Error(`relayStageDebug.forceClear/forceFail missing for stage: ${stageMeta.id}`);
+  }
+  if (directChecks.meta?.id !== stageMeta.id) {
+    throw new Error(`window.relayStageMeta.id does not match meta.json for stage: ${stageMeta.id}`);
+  }
+  if (directChecks.meta?.title !== stageMeta.title) {
+    throw new Error(
+      `window.relayStageMeta.title does not match meta.json for stage: ${stageMeta.id}`
+    );
+  }
+  if (directChecks.meta?.genre !== stageMeta.genre) {
+    throw new Error(
+      `window.relayStageMeta.genre does not match meta.json for stage: ${stageMeta.id}`
+    );
+  }
+  if (directChecks.meta?.clearCondition !== stageMeta.clearCondition) {
+    throw new Error(
+      `window.relayStageMeta.clearCondition does not match meta.json for stage: ${stageMeta.id}`
+    );
   }
 
   const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -165,7 +203,7 @@ async function main() {
 
   async function runHostCase(iframeId, actionName) {
     await hostPage.evaluate(
-      ({ stageSlug, iframeId }) => {
+      ({ stageDir, iframeId }) => {
         window.__relayHostEvents = [];
         window.RelayHost = {
           onStageReady(meta) {
@@ -178,9 +216,9 @@ async function main() {
             window.__relayHostEvents.push({ type: "failed", payload });
           },
         };
-        document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageSlug}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
+        document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
       },
-      { stageSlug: stageDir, iframeId }
+      { stageDir: stageMeta.dir, iframeId }
     );
 
     const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
@@ -195,7 +233,10 @@ async function main() {
   const clearEvents = await runHostCase("stage-clear", "forceClear");
   const failEvents = await runHostCase("stage-fail", "forceFail");
 
-  await hostPage.screenshot({ path: path.join(outputDir, `${stageSlug}-host.png`), fullPage: true });
+  await hostPage.screenshot({
+    path: path.join(outputDir, `${stageMeta.dir}-host.png`),
+    fullPage: true,
+  });
   await browser.close();
 
   const hasClearEvent = clearEvents.some((event) => event.type === "cleared");
@@ -203,26 +244,27 @@ async function main() {
   const hasReadyEvent = clearEvents.some((event) => event.type === "ready") && failEvents.some((event) => event.type === "ready");
 
   if (!hasReadyEvent || !hasClearEvent || !hasFailEvent) {
-    throw new Error(`Host callback contract failed for stage: ${stageSlug}`);
+    throw new Error(`Host callback contract failed for stage: ${stageMeta.id}`);
   }
   if (consoleErrors.length) {
-    throw new Error(`Console errors detected for stage: ${stageSlug}\n${consoleErrors.join("\n")}`);
+    throw new Error(`Console errors detected for stage: ${stageMeta.id}\n${consoleErrors.join("\n")}`);
   }
 
   process.stdout.write(
     JSON.stringify(
       {
         ok: true,
-        stage: stageSlug,
+        stage: stageMeta.id,
+        stageDir: stageMeta.dir,
         directChecks,
         host: {
           clearEvents,
           failEvents,
         },
         screenshots: [
-          path.relative(repoRoot, path.join(outputDir, `${stageSlug}-launcher.png`)),
-          path.relative(repoRoot, path.join(outputDir, `${stageSlug}-direct.png`)),
-          path.relative(repoRoot, path.join(outputDir, `${stageSlug}-host.png`)),
+          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-launcher.png`)),
+          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-direct.png`)),
+          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-host.png`)),
         ],
       },
       null,
