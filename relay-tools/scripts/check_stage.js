@@ -18,8 +18,6 @@ function loadPlaywright() {
   }
 }
 
-const { chromium } = loadPlaywright();
-
 function parseArgs(argv) {
   const result = {};
   for (let index = 2; index < argv.length; index += 1) {
@@ -69,6 +67,20 @@ function parseChangedStageSlugs(gitStatus) {
   return Array.from(stageSlugs);
 }
 
+function assertStageSourceIncludesMetaText(stageSource, stageMeta) {
+  for (const field of [
+    { label: "clearCondition", value: stageMeta.clearCondition },
+    { label: "failCondition", value: stageMeta.failCondition },
+    { label: "controls", value: stageMeta.controls },
+  ]) {
+    if (!stageSource.includes(field.value)) {
+      throw new Error(
+        `Stage source must include the exact ${field.label} text from meta.json: ${field.value}`
+      );
+    }
+  }
+}
+
 function resolveStageSlug(args, repoRoot) {
   if (args.stage) {
     return args.stage;
@@ -89,6 +101,7 @@ function resolveStageSlug(args, repoRoot) {
 }
 
 async function main() {
+  const { chromium } = loadPlaywright();
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
   const stageCandidate = resolveStageSlug(args, repoRoot);
@@ -113,17 +126,7 @@ async function main() {
   }
 
   const stageSource = fs.readFileSync(stagePath, "utf8");
-  for (const field of [
-    { label: "clearCondition", value: stageMeta.clearCondition },
-    { label: "failCondition", value: stageMeta.failCondition },
-    { label: "controls", value: stageMeta.controls },
-  ]) {
-    if (!stageSource.includes(field.value)) {
-      throw new Error(
-        `Stage source must include the exact ${field.label} text from meta.json: ${field.value}`
-      );
-    }
-  }
+  assertStageSourceIncludesMetaText(stageSource, stageMeta);
 
   fs.mkdirSync(outputDir, { recursive: true });
 
@@ -273,7 +276,16 @@ async function main() {
   );
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.message}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`${error.message}\n`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  assertStageSourceIncludesMetaText,
+  parseArgs,
+  parseChangedStageSlugs,
+  resolveStageSlug,
+};

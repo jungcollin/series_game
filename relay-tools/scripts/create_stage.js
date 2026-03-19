@@ -67,54 +67,64 @@ function readOptionalNumber(args, names) {
   return null;
 }
 
-function main() {
-  const args = parseArgs(process.argv);
-  const repoRoot = path.resolve(__dirname, "../..");
-  const templatePath = path.join(repoRoot, "relay-tools/templates/stage-template.html");
-
+function resolveStageConfig(args) {
   const description = (args.description || args.desc || args.title || "").trim();
-  const slug = slugify(args.slug || args.id || args.title || description);
-  if (!slug) {
+  const directory = slugify(args.slug || args.id || args.title || description);
+  if (!directory) {
     throw new Error("Missing stage slug. Pass --slug, --title, or --description.");
   }
 
-  const title = args.title || titleCaseFromSlug(slug);
-  const stageId = args.id || slug;
-  const creatorName = readRequiredArg(args, ["creator"], "creator name");
-  const creatorAvatar = args["creator-avatar"] || null;
-  const creatorGithub = args["creator-github"] || null;
-  const genre = readRequiredArg(args, ["genre"], "stage genre");
-  const clearCondition = readRequiredArg(
-    args,
-    ["clear-condition", "clear"],
-    "clear condition"
-  );
-  const failCondition = readRequiredArg(
-    args,
-    ["fail-condition", "fail"],
-    "fail condition"
-  );
-  const controls = readRequiredArg(args, ["controls"], "player controls");
-  const estimatedSeconds = readOptionalNumber(args, ["estimated-seconds"]);
-  const stageDir = path.join(repoRoot, "community-stages", slug);
-  const stagePath = stagePathForDir(repoRoot, slug);
-  const metaPath = metaPathForDir(repoRoot, slug);
+  const title = args.title || titleCaseFromSlug(directory);
+  const stageId = args.id || directory;
+  return {
+    description,
+    directory,
+    title,
+    stageId,
+    creatorName: readRequiredArg(args, ["creator"], "creator name"),
+    creatorAvatar: args["creator-avatar"] || null,
+    creatorGithub: args["creator-github"] || null,
+    genre: readRequiredArg(args, ["genre"], "stage genre"),
+    clearCondition: readRequiredArg(
+      args,
+      ["clear-condition", "clear"],
+      "clear condition"
+    ),
+    failCondition: readRequiredArg(
+      args,
+      ["fail-condition", "fail"],
+      "fail condition"
+    ),
+    controls: readRequiredArg(args, ["controls"], "player controls"),
+    estimatedSeconds: readOptionalNumber(args, ["estimated-seconds"]),
+  };
+}
+
+function renderStageTemplate(template, config) {
+  return template
+    .replace(/__STAGE_ID__/g, config.stageId)
+    .replace(/__TITLE__/g, escapeTemplate(config.title))
+    .replace(/__CREATOR__/g, escapeTemplate(config.creatorName))
+    .replace(/__GENRE__/g, escapeTemplate(config.genre))
+    .replace(/__CLEAR_CONDITION__/g, escapeTemplate(config.clearCondition))
+    .replace(/__FAIL_CONDITION__/g, escapeTemplate(config.failCondition))
+    .replace(/__CONTROLS__/g, escapeTemplate(config.controls))
+    .replace(/__DESCRIPTION__/g, escapeTemplate(config.description || config.title));
+}
+
+function createStageInRepo({ repoRoot, args }) {
+  const templatePath = path.join(repoRoot, "relay-tools/templates/stage-template.html");
+  const config = resolveStageConfig(args);
+  const stageDir = path.join(repoRoot, "community-stages", config.directory);
+  const stagePath = stagePathForDir(repoRoot, config.directory);
+  const metaPath = metaPathForDir(repoRoot, config.directory);
 
   if ((fs.existsSync(stagePath) || fs.existsSync(metaPath)) && !args.force) {
-    throw new Error(`Stage already exists: community-stages/${slug}`);
+    throw new Error(`Stage already exists: community-stages/${config.directory}`);
   }
 
   const template = fs.readFileSync(templatePath, "utf8");
-  const rendered = template
-    .replace(/__STAGE_ID__/g, stageId)
-    .replace(/__TITLE__/g, escapeTemplate(title))
-    .replace(/__CREATOR__/g, escapeTemplate(creatorName))
-    .replace(/__GENRE__/g, escapeTemplate(genre))
-    .replace(/__CLEAR_CONDITION__/g, escapeTemplate(clearCondition))
-    .replace(/__FAIL_CONDITION__/g, escapeTemplate(failCondition))
-    .replace(/__CONTROLS__/g, escapeTemplate(controls))
-    .replace(/__DESCRIPTION__/g, escapeTemplate(description || title))
-    ;
+  const rendered = renderStageTemplate(template, config);
 
   fs.mkdirSync(stageDir, { recursive: true });
   fs.writeFileSync(stagePath, rendered);
@@ -122,19 +132,19 @@ function main() {
     metaPath,
     `${JSON.stringify(
       {
-        id: stageId,
-        title,
-        description: description || title,
+        id: config.stageId,
+        title: config.title,
+        description: config.description || config.title,
         creator: {
-          name: creatorName,
-          avatar: creatorAvatar,
-          github: creatorGithub,
+          name: config.creatorName,
+          avatar: config.creatorAvatar,
+          github: config.creatorGithub,
         },
-        genre,
-        clearCondition,
-        failCondition,
-        controls,
-        estimatedSeconds,
+        genre: config.genre,
+        clearCondition: config.clearCondition,
+        failCondition: config.failCondition,
+        controls: config.controls,
+        estimatedSeconds: config.estimatedSeconds,
       },
       null,
       2
@@ -143,25 +153,41 @@ function main() {
 
   syncRegistry(repoRoot);
 
-  process.stdout.write(
-    JSON.stringify(
-      {
-        stagePath: path.relative(repoRoot, stagePath),
-        metaPath: path.relative(repoRoot, metaPath),
-        registryPath: "community-stages/registry.js",
-        slug: stageId,
-        directory: slug,
-        title,
-      },
-      null,
-      2
-    ) + "\n"
-  );
+  return {
+    stagePath: path.relative(repoRoot, stagePath),
+    metaPath: path.relative(repoRoot, metaPath),
+    registryPath: "community-stages/registry.js",
+    slug: config.stageId,
+    directory: config.directory,
+    title: config.title,
+  };
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`${error.message}\n`);
-  process.exit(1);
+function main() {
+  const args = parseArgs(process.argv);
+  const repoRoot = path.resolve(__dirname, "../..");
+  const output = createStageInRepo({ repoRoot, args });
+
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exit(1);
+  }
+}
+
+module.exports = {
+  createStageInRepo,
+  escapeTemplate,
+  parseArgs,
+  readOptionalNumber,
+  readRequiredArg,
+  renderStageTemplate,
+  resolveStageConfig,
+  slugify,
+  titleCaseFromSlug,
+};
