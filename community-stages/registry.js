@@ -16,6 +16,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./lightning-dodge/index.html",
   },
   {
+    id: "jump-hurdle",
+    title: "Jump Hurdle",
+    creator: "Contributor",
+    genre: "Platformer",
+    clearCondition: "30초 동안 장애물을 피하고 문에 도달하면 클리어",
+    path: "./jump-hurdle/index.html",
+  },
+  {
     id: "galaxy-boss",
     title: "Galaxy Boss",
     creator: "Codex",
@@ -36,7 +44,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     title: "Poop Rain 60",
     creator: "Codex",
     genre: "Arcade survival",
-    clearCondition: "60초 동안 하늘에서 떨어지는 똥을 피하세요.",
+    clearCondition: "60초 동안 하늘에서 떨어지는 벥을 피하세요.",
     path: "./poop-rain/index.html",
   },
 ];
