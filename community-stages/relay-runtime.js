@@ -1,4 +1,13 @@
 (function relayRuntimeBootstrap() {
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function parseList(value) {
     if (!value) {
       return [];
@@ -141,15 +150,15 @@
         const wrapperTag = hasPlayed ? "article" : "a";
         const wrapperAttrs = hasPlayed
           ? `class="stage-card stage-card-played" aria-disabled="true"`
-          : `class="stage-card" href="${href}"`;
+          : `class="stage-card" href="${href}" aria-label="${escapeHtml(entry.title)} 플레이하기"`;
         const actionLabel = hasPlayed ? "이미 진행함" : "플레이하기";
         const actionClass = hasPlayed ? "card-link card-link-disabled" : "card-link";
         return `
           <${wrapperTag} ${wrapperAttrs}>
-            <p class="card-label">${entry.genre}</p>
-            <h2>${entry.title}</h2>
-            <p class="card-meta">by ${creator.name}</p>
-            <p class="card-copy">${entry.clearCondition}</p>
+            <p class="card-label">${escapeHtml(entry.genre)}</p>
+            <h2>${escapeHtml(entry.title)}</h2>
+            <p class="card-meta">by ${escapeHtml(creator.name)}</p>
+            <p class="card-copy">${escapeHtml(entry.clearCondition)}</p>
             <div class="card-footer">
               <span class="${actionClass}">${actionLabel}</span>
               ${playedBadge}

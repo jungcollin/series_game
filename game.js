@@ -32,6 +32,10 @@ const promptModalEl = document.querySelector("#prompt-modal");
 const openLeaderboardBtn = document.querySelector("#open-leaderboard");
 const closeLeaderboardBtn = document.querySelector("#close-leaderboard");
 const leaderboardModalEl = document.querySelector("#leaderboard-modal");
+const modalFocusState = {
+  prompt: null,
+  leaderboard: null,
+};
 
 const state = {
   runId: "",
@@ -108,6 +112,9 @@ function setLeaderboardStatus(text) {
   if (leaderboardStatusEl) {
     leaderboardStatusEl.textContent = text;
   }
+  if (leaderboardListEl) {
+    leaderboardListEl.setAttribute("aria-busy", text.includes("불러오는 중") ? "true" : "false");
+  }
 }
 
 function renderLeaderboard(entries = []) {
@@ -183,7 +190,7 @@ async function supabaseRequest(path, options = {}) {
 }
 
 async function loadLeaderboard() {
-  setLeaderboardStatus("랭킹을 불러오는 중...");
+  setLeaderboardStatus("랭킹을 불러오는 중…");
   try {
     const rows = await supabaseRequest(
       `${SUPABASE_TABLE}?select=player_name,clear_count,duration_sec,finished_all_clear,created_at&limit=${LEADERBOARD_FETCH_LIMIT}`
@@ -211,6 +218,7 @@ function hideRankingSavePanel() {
   }
   if (rankingSaveButtonEl) {
     rankingSaveButtonEl.disabled = false;
+    rankingSaveButtonEl.dataset.loading = "false";
     rankingSaveButtonEl.textContent = "랭킹 저장";
   }
 }
@@ -223,12 +231,13 @@ function showRankingSavePanel() {
   rankingPlayerNameEl.value = getSavedPlayerName();
   if (rankingSaveButtonEl) {
     rankingSaveButtonEl.disabled = state.saveState === "saved";
+    rankingSaveButtonEl.dataset.loading = "false";
     rankingSaveButtonEl.textContent = state.saveState === "saved" ? "저장 완료" : "랭킹 저장";
   }
   if (rankingSaveStatusEl) {
     rankingSaveStatusEl.textContent = state.saveState === "saved"
       ? "이 런 기록은 이미 저장했습니다."
-      : "런 종료 후 닉네임으로 기록을 저장할 수 있습니다.";
+      : "닉네임으로 기록을 저장할 수 있습니다.";
   }
 }
 
@@ -272,10 +281,10 @@ async function saveCurrentRunToLeaderboard(event) {
   state.saveState = "saving";
   if (rankingSaveButtonEl) {
     rankingSaveButtonEl.disabled = true;
-    rankingSaveButtonEl.textContent = "저장 중...";
+    rankingSaveButtonEl.dataset.loading = "true";
   }
   if (rankingSaveStatusEl) {
-    rankingSaveStatusEl.textContent = "랭킹에 기록을 저장하는 중...";
+    rankingSaveStatusEl.textContent = "랭킹에 기록을 저장하는 중…";
   }
 
   try {
@@ -297,6 +306,7 @@ async function saveCurrentRunToLeaderboard(event) {
     state.saveState = "saved";
     if (rankingSaveButtonEl) {
       rankingSaveButtonEl.disabled = true;
+      rankingSaveButtonEl.dataset.loading = "false";
       rankingSaveButtonEl.textContent = "저장 완료";
     }
     if (rankingSaveStatusEl) {
@@ -307,6 +317,7 @@ async function saveCurrentRunToLeaderboard(event) {
     state.saveState = "idle";
     if (rankingSaveButtonEl) {
       rankingSaveButtonEl.disabled = false;
+      rankingSaveButtonEl.dataset.loading = "false";
       rankingSaveButtonEl.textContent = "랭킹 저장";
     }
     if (rankingSaveStatusEl) {
@@ -338,22 +349,101 @@ function normalizeStagePath(path) {
       : `./community-stages/${path}`;
 }
 
-function setPromptModal(open) {
+function getModalSheet(modalEl) {
+  return modalEl?.querySelector('[role="dialog"]') || null;
+}
+
+function getFocusableElements(container) {
+  if (!container) {
+    return [];
+  }
+
+  return Array.from(
+    container.querySelectorAll(
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true");
+}
+
+function trapFocusInModal(event, modalEl) {
+  const sheet = getModalSheet(modalEl);
+  const focusable = getFocusableElements(sheet);
+  if (!sheet || !focusable.length) {
+    event.preventDefault();
+    sheet?.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+
+  if (!sheet.contains(active)) {
+    event.preventDefault();
+    first.focus();
+    return;
+  }
+
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+    return;
+  }
+
+  if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function setPromptModal(open, options = {}) {
+  const { restoreFocus = true, triggerEl = null } = options;
   if (!promptModalEl) {
     return;
+  }
+  if (open) {
+    modalFocusState.prompt = triggerEl || document.activeElement;
   }
   promptModalEl.dataset.open = open ? "true" : "false";
   promptModalEl.setAttribute("aria-hidden", open ? "false" : "true");
   syncModalBodyState();
+  const sheet = getModalSheet(promptModalEl);
+  if (open) {
+    window.requestAnimationFrame(() => {
+      const focusable = getFocusableElements(sheet);
+      (focusable[0] || sheet)?.focus();
+    });
+  } else if (restoreFocus && modalFocusState.prompt instanceof HTMLElement) {
+    modalFocusState.prompt.focus();
+    modalFocusState.prompt = null;
+  } else if (!open) {
+    modalFocusState.prompt = null;
+  }
 }
 
-function setLeaderboardModal(open) {
+function setLeaderboardModal(open, options = {}) {
+  const { restoreFocus = true, triggerEl = null } = options;
   if (!leaderboardModalEl) {
     return;
+  }
+  if (open) {
+    modalFocusState.leaderboard = triggerEl || document.activeElement;
   }
   leaderboardModalEl.dataset.open = open ? "true" : "false";
   leaderboardModalEl.setAttribute("aria-hidden", open ? "false" : "true");
   syncModalBodyState();
+  const sheet = getModalSheet(leaderboardModalEl);
+  if (open) {
+    window.requestAnimationFrame(() => {
+      const focusable = getFocusableElements(sheet);
+      (focusable[0] || sheet)?.focus();
+    });
+  } else if (restoreFocus && modalFocusState.leaderboard instanceof HTMLElement) {
+    modalFocusState.leaderboard.focus();
+    modalFocusState.leaderboard = null;
+  } else if (!open) {
+    modalFocusState.leaderboard = null;
+  }
 }
 
 function syncModalBodyState() {
@@ -363,8 +453,8 @@ function syncModalBodyState() {
 }
 
 function openPromptModal() {
-  setLeaderboardModal(false);
-  setPromptModal(true);
+  setLeaderboardModal(false, { restoreFocus: false });
+  setPromptModal(true, { triggerEl: openPromptBtn });
 }
 
 function closePromptModal() {
@@ -372,8 +462,8 @@ function closePromptModal() {
 }
 
 function openLeaderboardModal() {
-  setPromptModal(false);
-  setLeaderboardModal(true);
+  setPromptModal(false, { restoreFocus: false });
+  setLeaderboardModal(true, { triggerEl: openLeaderboardBtn });
 }
 
 function closeLeaderboardModal() {
@@ -410,6 +500,8 @@ function hideOverlay() {
   hideRankingSavePanel();
   if (relaySecondaryActionBtn) {
     relaySecondaryActionBtn.hidden = true;
+    relaySecondaryActionBtn.style.display = "none";
+    relaySecondaryActionBtn.setAttribute("aria-hidden", "true");
     relaySecondaryActionBtn.textContent = "";
   }
   relayOverlayEl.hidden = true;
@@ -434,8 +526,12 @@ function showOverlay({
     if (secondaryButtonLabel) {
       relaySecondaryActionBtn.textContent = secondaryButtonLabel;
       relaySecondaryActionBtn.hidden = false;
+      relaySecondaryActionBtn.style.display = "";
+      relaySecondaryActionBtn.setAttribute("aria-hidden", "false");
     } else {
       relaySecondaryActionBtn.hidden = true;
+      relaySecondaryActionBtn.style.display = "none";
+      relaySecondaryActionBtn.setAttribute("aria-hidden", "true");
       relaySecondaryActionBtn.textContent = "";
     }
   }
@@ -446,7 +542,7 @@ function updateRunHeader() {
   runClearCountEl.textContent = `${state.clearCount}개 클리어`;
 
   if (state.status === "loading") {
-    runStageTitleEl.textContent = "랜덤 스테이지를 불러오는 중...";
+    runStageTitleEl.textContent = "랜덤 스테이지를 불러오는 중…";
     return;
   }
 
@@ -470,7 +566,7 @@ function updateRunHeader() {
     return;
   }
 
-  runStageTitleEl.textContent = "랜덤 스테이지를 고르는 중...";
+  runStageTitleEl.textContent = "랜덤 스테이지를 고르는 중…";
 }
 
 function clearTransitionTimer() {
@@ -721,6 +817,16 @@ leaderboardModalEl?.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Tab" && promptModalEl?.dataset.open === "true") {
+    trapFocusInModal(event, promptModalEl);
+    return;
+  }
+
+  if (event.key === "Tab" && leaderboardModalEl?.dataset.open === "true") {
+    trapFocusInModal(event, leaderboardModalEl);
+    return;
+  }
+
   if (event.key === "Escape" && promptModalEl?.dataset.open === "true") {
     closePromptModal();
     return;

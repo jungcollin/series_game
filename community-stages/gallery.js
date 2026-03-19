@@ -1,10 +1,12 @@
 (function galleryBootstrap() {
   var entries = window.COMMUNITY_STAGE_REGISTRY || [];
   var gridEl = document.querySelector("#gallery-grid");
+  var feedbackEl = document.querySelector("#gallery-feedback");
   var sortButtons = document.querySelectorAll(".sort-btn");
   var voteScores = new Map(); // stageId -> { score, upvotes, downvotes }
   var myVotes = {}; // stageId -> 1 | -1
   var currentSort = "popular";
+  var hasLoadedVoteScores = false;
 
   var GENRE_STYLES = {
     "Luck & Speed": { bg: "#f3c677", icon: "\uD83C\uDFB0" },
@@ -57,21 +59,30 @@
     return s ? s.score : 0;
   }
 
+  function announceFeedback(message) {
+    if (feedbackEl) {
+      feedbackEl.textContent = message || "";
+    }
+  }
+
   function renderCard(entry) {
     var creator = normalizeCreator(entry.creator);
     var genre = getGenreStyle(entry.genre);
     var score = getScore(entry.id);
     var myVote = myVotes[entry.id] || 0;
+    var playHref = "./play.html?stage=" + encodeURIComponent(entry.id);
 
     return (
       '<article class="stage-card" data-stage-id="' + escapeHtml(entry.id) + '">' +
+      '<a class="stage-card-media-link" href="' + playHref + '" aria-label="' + escapeHtml(entry.title) + ' 플레이 페이지로 이동">' +
       '<div class="stage-card-thumb" style="background:' + genre.bg + '">' +
       '<span class="stage-card-thumb-icon">' + genre.icon + "</span>" +
       '<span class="stage-card-genre">' + escapeHtml(entry.genre) + "</span>" +
       '<span class="stage-card-heart" data-stage-id="' + escapeHtml(entry.id) + '">\u2764\uFE0F <span class="vote-score">' + score + "</span></span>" +
       "</div>" +
+      "</a>" +
       '<div class="stage-card-body">' +
-      '<h3 class="stage-card-title">' + escapeHtml(entry.title) + "</h3>" +
+      '<h3 class="stage-card-title"><a class="stage-card-title-link" href="' + playHref + '">' + escapeHtml(entry.title) + "</a></h3>" +
       '<p class="stage-card-condition">' + escapeHtml(entry.clearCondition) + "</p>" +
       '<div class="stage-card-creator">' +
       renderCreatorAvatar(entry.creator) +
@@ -102,6 +113,10 @@
 
   function renderGrid() {
     if (!gridEl) return;
+    if (currentSort === "popular" && !hasLoadedVoteScores) {
+      gridEl.innerHTML = '<p class="gallery-status" role="status">인기순을 불러오는 중…</p>';
+      return;
+    }
     var sorted = getSortedEntries();
     if (!sorted.length) {
       gridEl.innerHTML = '<p class="gallery-empty">등록된 스테이지가 없습니다.</p>';
@@ -159,6 +174,7 @@
 
     window.LikesClient.castVote(stageId, voteValue)
       .then(function () {
+        announceFeedback("");
         upBtn.disabled = false;
         downBtn.disabled = false;
       })
@@ -170,6 +186,7 @@
         downBtn.dataset.active = (oldVote === -1).toString();
         s.score = oldScore;
         voteScores.set(stageId, s);
+        announceFeedback("투표를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.");
         upBtn.disabled = false;
         downBtn.disabled = false;
       });
@@ -181,21 +198,16 @@
     var sort = btn.dataset.sort;
     if (sort === currentSort) return;
     currentSort = sort;
-    sortButtons.forEach(function (b) { b.dataset.active = b.dataset.sort === sort ? "true" : "false"; });
+    sortButtons.forEach(function (b) {
+      var isActive = b.dataset.sort === sort;
+      b.dataset.active = isActive ? "true" : "false";
+      b.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
     renderGrid();
-  }
-
-  function handleCardClick(event) {
-    if (event.target.closest(".vote-btn") || event.target.closest(".play-link")) return;
-    var card = event.target.closest(".stage-card");
-    if (!card) return;
-    var stageId = card.dataset.stageId;
-    if (stageId) window.location.href = "./play.html?stage=" + encodeURIComponent(stageId);
   }
 
   if (gridEl) {
     gridEl.addEventListener("click", handleVoteClick);
-    gridEl.addEventListener("click", handleCardClick);
   }
   sortButtons.forEach(function (btn) { btn.addEventListener("click", handleSortClick); });
 
@@ -209,6 +221,7 @@
     window.LikesClient.fetchVoteScores().catch(function () { return new Map(); }),
     window.LikesClient.fetchMyVotes(visitorId).catch(function () { return {}; }),
   ]).then(function (results) {
+    hasLoadedVoteScores = true;
     voteScores = results[0];
     myVotes = results[1];
     renderGrid();

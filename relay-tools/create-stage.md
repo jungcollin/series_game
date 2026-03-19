@@ -20,6 +20,8 @@
 3. 가능하면 아래 스크립트로 기본 골격을 만든다.
    - `node relay-tools/scripts/create_stage.js --slug <stage-slug> --title "<title>" --creator "<creator>" --genre "<genre>" --clear-condition "<clear-condition>" --fail-condition "<fail-condition>" --controls "<controls>" --description "<description>"`
 4. 생성된 HTML을 실제 게임으로 완성한다.
+   - 기본 템플릿에 들어 있는 `skip-link`, 숨김 조작 설명, `canvas` 포커스 스타일, `prefers-reduced-motion` 대응은 유지한다.
+   - 이 규칙은 접근성과 진입성을 위한 최소선이다. 색상, 레이아웃, HUD, 연출, 게임 구조는 자유롭게 바꿔도 된다.
 5. 아래 계약을 지킨다.
    - `window.render_game_to_text()`
    - `window.advanceTime(ms)`
