@@ -78,32 +78,15 @@ function resolveStageSlug(args, repoRoot) {
   );
 }
 
-function collectStageFiles(repoRoot, stageDir) {
+function stageAndVerify(repoRoot, stageDir) {
+  const stageDirPath = `community-stages/${stageDir}`;
   const registryPath = "community-stages/registry.js";
-  const gitStatus = run("git", ["status", "--short"], repoRoot);
-  const lines = String(gitStatus || "").split("\n").filter(Boolean);
-  const files = [];
-  let hasRegistry = false;
-  for (const line of lines) {
-    let changedPath = line.slice(3).trim();
-    if (changedPath.includes(" -> ")) {
-      changedPath = changedPath.split(" -> ").pop().trim();
-    }
-    if (changedPath.startsWith(`community-stages/${stageDir}/`)) {
-      files.push(changedPath);
-    }
-    if (changedPath === registryPath) {
-      hasRegistry = true;
-      files.push(changedPath);
-    }
+  run("git", ["add", stageDirPath, registryPath], repoRoot);
+  const staged = run("git", ["diff", "--cached", "--name-only"], repoRoot);
+  if (!staged.trim()) {
+    throw new Error(`No changes staged for stage directory: ${stageDirPath}`);
   }
-  // Always include registry.js — syncRegistry() runs before this function,
-  // so the file on disk is correct. git status may miss it depending on
-  // branch-switch timing, so include it unconditionally.
-  if (!hasRegistry) {
-    files.push(registryPath);
-  }
-  return files;
+  return staged.trim().split("\n");
 }
 
 function ensureBranch(repoRoot, stageSlug) {
@@ -261,11 +244,7 @@ function main() {
       branch = ensureBranch(repoRoot, stageMeta.dir);
     }
 
-    const stageFiles = collectStageFiles(repoRoot, stageMeta.dir);
-    if (stageFiles.length === 0) {
-      throw new Error(`No changed files found for stage: ${stageMeta.id}`);
-    }
-    run("git", ["add", ...stageFiles], repoRoot);
+    stageAndVerify(repoRoot, stageMeta.dir);
     run("git", ["commit", "-m", commitMessage], repoRoot);
     committed = true;
   }
