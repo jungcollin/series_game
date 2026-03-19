@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lightning Dodge</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #020617;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #020617;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="960" height="540" aria-label="Lightning Dodge" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const SURVIVAL_TIME = 35;
+      const GROUND_Y = 450;
+      const PLAYER_WIDTH = 48;
+      const PLAYER_HEIGHT = 66;
+      const PLAYER_SPEED = 360;
+      const STRIKE_BASE_WIDTH = 84;
+      const STRIKE_GAP_MIN = 150;
+      const relayContext = window.RelayRuntime?.readContext("lightning-dodge") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const input = {
+        left: false,
+        right: false,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        player: createPlayer(),
+        stormBands: createStormBands(),
+        warnings: [],
+        sparks: [],
+        rainOffset: 0,
+        spawnTimer: 0.9,
+        spawnInterval: 1.1,
+        strikeCounter: 0,
+        flashAlpha: 0,
+        shake: 0,
+        lastReason: "",
+      };
+
+      function createPlayer() {
+        return {
+          x: VIEW.width / 2 - PLAYER_WIDTH / 2,
+          y: GROUND_Y - PLAYER_HEIGHT,
+          width: PLAYER_WIDTH,
+          height: PLAYER_HEIGHT,
+          bob: 0,
+        };
+      }
+
+      function createStormBands() {
+        return Array.from({ length: 4 }, (_, index) => ({
+          x: index * 260,
+          y: 74 + index * 28,
+          width: 260 + index * 40,
+          speed: 10 + index * 8,
+          alpha: 0.12 + index * 0.04,
+        }));
+      }
+
+      function resetRun() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.player = createPlayer();
+        state.warnings = [];
+        state.sparks = [];
+        state.rainOffset = 0;
+        state.spawnTimer = 0.65;
+        state.spawnInterval = 1.1;
+        state.strikeCounter = 0;
+        state.flashAlpha = 0;
+        state.shake = 0;
+        state.lastReason = "";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "lightning_hit") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function failRun(reason = "lightning_hit") {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.flashAlpha = 0.95;
+        state.shake = 18;
+        state.lastReason = reason;
+        spawnBurst(state.player.x + state.player.width / 2, state.player.y + 20, "#f8fafc", 18);
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearRun() {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        state.flashAlpha = 0.65;
+        state.shake = 0;
+        for (let index = 0; index < 28; index += 1) {
+          spawnBurst(120 + (index % 7) * 120, 120 + Math.floor(index / 7) * 48, "#fde68a", 6);
+        }
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function spawnBurst(x, y, color, count) {
+        for (let index = 0; index < count; index += 1) {
+          const angle = (Math.PI * 2 * index) / count + Math.random() * 0.45;
+          const speed = 40 + Math.random() * 180;
+          state.sparks.push({
+            x,
+            y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 0.3 + Math.random() * 0.35,
+            color,
+            size: 2 + Math.random() * 3,
+          });
+        }
+      }
+
+      function randomX(seed, left, right) {
+        const raw = Math.sin(seed * 91.73 + 12.37) * 43758.5453;
+        const normalized = raw - Math.floor(raw);
+        return left + normalized * (right - left);
+      }
+
+      function pickSpawnCenters(count) {
+        const centers = [];
+        const halfWidth = STRIKE_BASE_WIDTH / 2;
+        const minX = 80 + halfWidth;
+        const maxX = VIEW.width - 80 - halfWidth;
+
+        for (let attempts = 0; attempts < 64 && centers.length < count; attempts += 1) {
+          const candidate = randomX(state.strikeCounter + attempts + state.elapsed * 10, minX, maxX);
+          let valid = true;
+          for (const existing of centers) {
+            if (Math.abs(existing - candidate) < STRIKE_GAP_MIN) {
+              valid = false;
+              break;
+            }
+          }
+          if (valid) {
+            centers.push(candidate);
+          }
+        }
+
+        while (centers.length < count) {
+          centers.push(minX + ((centers.length + 1) / (count + 1)) * (maxX - minX));
+        }
+
+        return centers;
+      }
+
+      function spawnStrikeSet() {
+        state.strikeCounter += 1;
+        const progress = Math.min(1, state.elapsed / SURVIVAL_TIME);
+        const strikeCount = progress > 0.72 && state.strikeCounter % 3 === 0 ? 2 : 1;
+        const warningDuration = Math.max(0.48, 0.95 - progress * 0.3);
+        const impactDuration = 0.18 + progress * 0.04;
+        const centers = pickSpawnCenters(strikeCount);
+
+        for (const center of centers) {
+          state.warnings.push({
+            centerX: center,
+            width: STRIKE_BASE_WIDTH,
+            phase: "warning",
+            timer: warningDuration,
+            warningDuration,
+            impactDuration,
+            impactTimer: impactDuration,
+          });
+        }
+      }
+
+      function updateStorm(dt) {
+        state.rainOffset = (state.rainOffset + dt * 320) % 34;
+        state.flashAlpha = Math.max(0, state.flashAlpha - dt * 2.4);
+        state.shake = Math.max(0, state.shake - dt * 36);
+
+        for (const band of state.stormBands) {
+          band.x += band.speed * dt;
+          if (band.x > VIEW.width + 160) {
+            band.x = -band.width - 40;
+          }
+        }
+
+        state.sparks = state.sparks.filter((spark) => {
+          spark.x += spark.vx * dt;
+          spark.y += spark.vy * dt;
+          spark.life -= dt;
+          spark.vy += dt * 120;
+          return spark.life > 0;
+        });
+      }
+
+      function updatePlayer(dt) {
+        const direction = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+        state.player.x += direction * PLAYER_SPEED * dt;
+        state.player.x = clamp(state.player.x, 28, VIEW.width - state.player.width - 28);
+        state.player.bob += dt * (direction === 0 ? 2 : 10);
+      }
+
+      function updateWarnings(dt) {
+        const playerRect = {
+          x: state.player.x,
+          y: state.player.y,
+          w: state.player.width,
+          h: state.player.height,
+        };
+        const aliveWarnings = [];
+
+        for (const warning of state.warnings) {
+          if (warning.phase === "warning") {
+            warning.timer -= dt;
+            if (warning.timer <= 0) {
+              warning.phase = "impact";
+              warning.impactTimer = warning.impactDuration;
+              state.flashAlpha = Math.max(state.flashAlpha, 0.55);
+              state.shake = Math.max(state.shake, 10);
+              spawnBurst(warning.centerX, 86, "#fef3c7", 9);
+            }
+            aliveWarnings.push(warning);
+            continue;
+          }
+
+          warning.impactTimer -= dt;
+          const strikeRect = {
+            x: warning.centerX - warning.width / 2,
+            y: 86,
+            w: warning.width,
+            h: GROUND_Y - 60,
+          };
+          if (rectOverlap(playerRect, strikeRect)) {
+            failRun("lightning_hit");
+          }
+          if (warning.impactTimer > 0) {
+            aliveWarnings.push(warning);
+          }
+        }
+
+        state.warnings = aliveWarnings;
+      }
+
+      function update(dt) {
+        updateStorm(dt);
+
+        if (state.mode !== "running") {
+          return;
+        }
+
+        state.elapsed += dt;
+        state.spawnInterval = Math.max(0.42, 1.1 - state.elapsed * 0.015);
+        state.spawnTimer -= dt;
+        while (state.spawnTimer <= 0) {
+          spawnStrikeSet();
+          state.spawnTimer += state.spawnInterval;
+        }
+
+        updatePlayer(dt);
+        updateWarnings(dt);
+
+        if (state.mode === "running" && state.elapsed >= SURVIVAL_TIME) {
+          clearRun();
+        }
+      }
+
+      function drawBackground() {
+        const gradient = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        gradient.addColorStop(0, "#050816");
+        gradient.addColorStop(0.58, "#0f1b35");
+        gradient.addColorStop(1, "#12263c");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(226, 232, 240, 0.05)";
+        for (const band of state.stormBands) {
+          ctx.beginPath();
+          ctx.ellipse(band.x, band.y, band.width * 0.45, 34, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(band.x + 60, band.y + 18, band.width * 0.35, 26, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.strokeStyle = "rgba(191, 219, 254, 0.16)";
+        ctx.lineWidth = 2;
+        for (let x = -40; x < VIEW.width + 40; x += 28) {
+          ctx.beginPath();
+          ctx.moveTo(x, 110 + ((x / 28) % 2) * 6);
+          ctx.lineTo(x - 18, VIEW.height + state.rainOffset);
+          ctx.stroke();
+        }
+      }
+
+      function drawArena() {
+        ctx.fillStyle = "#1d4d3c";
+        ctx.fillRect(0, GROUND_Y, VIEW.width, VIEW.height - GROUND_Y);
+
+        ctx.fillStyle = "#264653";
+        ctx.fillRect(0, GROUND_Y - 18, VIEW.width, 18);
+
+        ctx.fillStyle = "#415a77";
+        for (let index = 0; index < 24; index += 1) {
+          ctx.fillRect(index * 44, GROUND_Y - 24, 18, 4);
+        }
+      }
+
+      function drawWarnings() {
+        for (const warning of state.warnings) {
+          const left = warning.centerX - warning.width / 2;
+          if (warning.phase === "warning") {
+            const pulse = 0.45 + 0.35 * Math.sin((warning.timer / warning.warningDuration) * Math.PI * 8);
+            ctx.fillStyle = `rgba(250, 204, 21, ${0.18 + pulse * 0.3})`;
+            ctx.fillRect(left, 84, warning.width, GROUND_Y - 70);
+
+            ctx.strokeStyle = "rgba(253, 224, 71, 0.94)";
+            ctx.lineWidth = 3;
+            ctx.setLineDash([12, 10]);
+            ctx.strokeRect(left + 2, 88, warning.width - 4, GROUND_Y - 78);
+            ctx.setLineDash([]);
+            continue;
+          }
+
+          const t = warning.impactTimer / warning.impactDuration;
+          const alpha = 0.55 + (1 - t) * 0.4;
+          const gradient = ctx.createLinearGradient(warning.centerX, 84, warning.centerX, GROUND_Y);
+          gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
+          gradient.addColorStop(0.3, `rgba(191,219,254,${alpha})`);
+          gradient.addColorStop(1, "rgba(59,130,246,0.08)");
+          ctx.fillStyle = gradient;
+          ctx.fillRect(left, 84, warning.width, GROUND_Y - 66);
+
+          ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+          ctx.lineWidth = 5;
+          ctx.beginPath();
+          ctx.moveTo(warning.centerX, 84);
+          ctx.lineTo(warning.centerX - 18, 180);
+          ctx.lineTo(warning.centerX + 12, 266);
+          ctx.lineTo(warning.centerX - 10, 360);
+          ctx.lineTo(warning.centerX + 8, GROUND_Y - 6);
+          ctx.stroke();
+        }
+      }
+
+      function drawPlayer() {
+        const bob = Math.sin(state.player.bob) * 1.8;
+        const x = state.player.x;
+        const y = state.player.y + bob;
+
+        ctx.fillStyle = "#e2e8f0";
+        roundRect(ctx, x + 8, y + 6, 32, 40, 12);
+        ctx.fill();
+
+        ctx.fillStyle = "#f97316";
+        roundRect(ctx, x + 10, y + 12, 28, 12, 6);
+        ctx.fill();
+
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(x + 14, y + 46, 8, 18);
+        ctx.fillRect(x + 28, y + 46, 8, 18);
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillRect(x + 16, y + 20, 6, 6);
+        ctx.fillRect(x + 28, y + 20, 6, 6);
+      }
+
+      function drawHud() {
+        ctx.fillStyle = "rgba(8, 15, 27, 0.72)";
+        roundRect(ctx, 28, 26, 232, 92, 18);
+        ctx.fill();
+
+        ctx.fillStyle = "#f59e0b";
+        ctx.font = "700 14px Trebuchet MS";
+        ctx.fillText("LIGHTNING DODGE", 48, 52);
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 28px Trebuchet MS";
+        ctx.fillText(`${Math.max(0, SURVIVAL_TIME - state.elapsed).toFixed(1)}s`, 48, 84);
+
+        ctx.font = "600 16px Trebuchet MS";
+        ctx.fillStyle = "rgba(226, 232, 240, 0.88)";
+        ctx.fillText("좌우 이동으로 예고선을 피하세요", 48, 108);
+      }
+
+      function drawSparks() {
+        for (const spark of state.sparks) {
+          ctx.fillStyle = spark.color;
+          ctx.globalAlpha = Math.max(0, spark.life * 1.9);
+          ctx.fillRect(spark.x, spark.y, spark.size, spark.size);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawOverlay() {
+        if (state.mode === "running") {
+          return;
+        }
+
+        if (state.mode === "menu") {
+          renderCard("Lightning Dodge", [
+            "좌우 이동으로 예고선을 보고 낙뢰를 피하세요.",
+            "클리어 조건: 35초 생존",
+            "실패 조건: 번개에 한 번이라도 맞으면 즉시 종료",
+            "Enter로 시작, 방향키 또는 A/D로 이동",
+          ], "#f59e0b");
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("RUN OVER", [
+            "낙뢰에 맞았습니다.",
+            `버틴 시간 ${state.lastRunTime.toFixed(1)}초`,
+            "Enter로 다시 도전할 수 있습니다.",
+          ], "#ef4444");
+          return;
+        }
+
+        renderCard("ALL CLEAR", [
+          "폭풍을 모두 버텼습니다.",
+          `생존 시간 ${state.lastRunTime.toFixed(1)}초`,
+          "다음 스테이지로 이어집니다.",
+        ], "#22c55e");
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(3, 7, 18, 0.7)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.96)";
+        roundRect(ctx, 140, 96, 680, 320, 28);
+        ctx.fill();
+
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        roundRect(ctx, 140, 96, 680, 320, 28);
+        ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = accent;
+        ctx.font = "700 44px Trebuchet MS";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 228 + index * 44);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function renderFlash() {
+        if (state.flashAlpha <= 0) {
+          return;
+        }
+        ctx.fillStyle = `rgba(255,255,255,${state.flashAlpha * 0.5})`;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+      }
+
+      function render() {
+        ctx.save();
+        if (state.shake > 0 && state.mode !== "menu") {
+          const offset = Math.sin(state.elapsed * 60) * state.shake * 0.2;
+          ctx.translate(offset, 0);
+        }
+
+        drawBackground();
+        drawArena();
+        drawWarnings();
+        drawPlayer();
+        drawHud();
+        drawSparks();
+        renderFlash();
+        drawOverlay();
+        ctx.restore();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "origin top-left, x right, y down, units in pixels",
+          mode: state.mode,
+          player: {
+            x: Math.round(state.player.x),
+            y: Math.round(state.player.y),
+            w: state.player.width,
+            h: state.player.height,
+          },
+          time_remaining: Number(Math.max(0, SURVIVAL_TIME - state.elapsed).toFixed(1)),
+          warnings: state.warnings.slice(0, 4).map((warning) => ({
+            phase: warning.phase,
+            x: Math.round(warning.centerX),
+            width: warning.width,
+            time_to_impact:
+              warning.phase === "warning"
+                ? Number(Math.max(0, warning.timer).toFixed(2))
+                : 0,
+          })),
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+            resetRun();
+          }
+          return;
+        }
+
+        if (event.key === "ArrowLeft" || event.key.toLowerCase() === "a") {
+          input.left = true;
+        }
+        if (event.key === "ArrowRight" || event.key.toLowerCase() === "d") {
+          input.right = true;
+        }
+      }
+
+      function onKeyUp(event) {
+        if (event.key === "ArrowLeft" || event.key.toLowerCase() === "a") {
+          input.left = false;
+        }
+        if (event.key === "ArrowRight" || event.key.toLowerCase() === "d") {
+          input.right = false;
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      function rectOverlap(a, b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      }
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function roundRect(context, x, y, width, height, radius) {
+        context.beginPath();
+        context.moveTo(x + radius, y);
+        context.arcTo(x + width, y, x + width, y + height, radius);
+        context.arcTo(x + width, y + height, x, y + height, radius);
+        context.arcTo(x, y + height, x, y, radius);
+        context.arcTo(x, y, x + width, y, radius);
+        context.closePath();
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "lightning-dodge",
+        title: "Lightning Dodge",
+        creator: "Codex",
+        genre: "Arcade survival",
+        clearCondition: "35초 동안 번개 예고선을 보고 모든 낙뢰를 피하기",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          resetRun();
+          clearRun();
+          render();
+        },
+        forceFail() {
+          resetRun();
+          failRun("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
