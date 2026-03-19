@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { loadAllStageMetas } = require("./stage_metadata");
@@ -109,6 +110,28 @@ function runStageChecks(repoRoot, stageSlugs, baseUrl) {
   });
 }
 
+function shouldRunHostUiCheck(changedFiles) {
+  const hostUiFiles = new Set([
+    "index.html",
+    "styles.css",
+    "game.js",
+    "community-stages/gallery.html",
+    "community-stages/gallery.css",
+    "community-stages/gallery.js",
+    "community-stages/play.html",
+  ]);
+  return changedFiles.some((file) => hostUiFiles.has(file));
+}
+
+function runHostUiCheck(repoRoot, baseUrl) {
+  const output = run(
+    "node",
+    ["relay-tools/scripts/check_host_flow.js", "--base-url", baseUrl, "--mobile"],
+    repoRoot
+  );
+  return JSON.parse(output);
+}
+
 function buildSummary(report) {
   const lines = [];
   lines.push(`Checked stages: ${report.stageSlugs.join(", ") || "none"}`);
@@ -119,6 +142,9 @@ function buildSummary(report) {
     lines.push(
       `Risk findings: ${report.risks.map((entry) => `${entry.file} (${entry.risk})`).join(", ")}`
     );
+  }
+  if (report.hostUiCheck) {
+    lines.push("Host mobile UI check: passed");
   }
   return lines.join("\n");
 }
@@ -136,13 +162,20 @@ function main() {
   const nonStageFiles = collectNonStageFiles(changedFiles, registryEntries, stageSlugs);
   const risks = scanStageRisks(repoRoot, registryEntries, stageSlugs, changedFiles);
   const checks = stageSlugs.length ? runStageChecks(repoRoot, stageSlugs, baseUrl) : [];
+  const hostUiCheck = shouldRunHostUiCheck(changedFiles)
+    ? runHostUiCheck(repoRoot, baseUrl)
+    : null;
 
-  const ok = stageSlugs.length > 0 && checks.every((entry) => entry.ok);
+  const ok =
+    stageSlugs.length > 0 &&
+    checks.every((entry) => entry.ok) &&
+    (!hostUiCheck || hostUiCheck.ok);
   const safeToApprove =
     ok &&
     stageSlugs.length === 1 &&
     nonStageFiles.length === 0 &&
-    risks.length === 0;
+    risks.length === 0 &&
+    (!hostUiCheck || hostUiCheck.ok);
 
   const report = {
     ok,
@@ -154,6 +187,7 @@ function main() {
     nonStageFiles,
     risks,
     checks,
+    hostUiCheck,
   };
   report.summary = buildSummary(report);
 

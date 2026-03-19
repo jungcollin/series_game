@@ -14,7 +14,8 @@
    - `node relay-tools/scripts/publish_stage.js --stage <stage-slug> --pr --base-url http://127.0.0.1:4173`
 3. `--pr` 플래그는 아래를 자동 수행한다.
    - `sync_registry.js` 실행으로 registry를 메타 기준으로 갱신
-   - `check_stage.js` 재실행 (검증 통과 필수)
+   - `check_stage.js` 재실행 (검증 통과 필수, 설명 없는 플레이 썸네일 `community-stages/<slug>/thumbnail.png` 자동 갱신 포함)
+   - 위 검증에는 모바일 `menu / running / failed` 스크린샷 생성과 모바일 가로 오버플로 검사도 포함된다.
    - 현재 브랜치가 `main`이면 `stage/<stage-slug>` 브랜치를 새로 만든다.
    - 현재 브랜치가 이미 feature branch면 그 브랜치를 그대로 사용한다.
    - 관련 파일 스테이징: `community-stages/<slug>/`, `community-stages/registry.js`

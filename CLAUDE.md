@@ -22,4 +22,6 @@ Custom commands are registered in `.claude/commands/`:
 - For `/publish-stage`, if the current branch already has an open PR, push new commits to that same PR. If the earlier PR for that branch is already merged or closed, create a new PR.
 - Before declaring success, run `node relay-tools/scripts/check_stage.js --stage <stage-slug>`.
 - `/check-stage` 시 반드시 로컬 HTTP 서버(`python3 -m http.server 4173`)를 기동하여 브라우저에서 확인 가능하게 한다.
+- `/check-stage`는 모바일 `menu / running / failed` 스크린샷 생성과 모바일 가로 오버플로 검사를 포함한다.
+- `index.html`, `styles.css`, `game.js`, `community-stages/gallery.*`, `community-stages/play.html`를 바꿨으면 `node relay-tools/scripts/check_host_flow.js --base-url http://127.0.0.1:4173 --mobile`도 함께 실행한다.
 - `/publish-stage` 시 `--pr` 플래그로 PR까지 한 번에 완료한다.

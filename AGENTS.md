@@ -12,6 +12,7 @@ If the user message starts with one of these commands, follow the mapped documen
   - Read `relay-tools/check-stage.md` (repo root relative)
   - Start local server first: `python3 -m http.server 4173 &`
   - Run `node relay-tools/scripts/check_stage.js --stage <stage-slug> --base-url http://127.0.0.1:4173`
+  - This now captures mobile `menu / running / failed` screenshots and rejects horizontal overflow on mobile
   - Give the user browser URLs to verify visually
 - `/publish-stage ...`
   - Read `relay-tools/publish-stage.md` (repo root relative)
@@ -24,6 +25,7 @@ Rules:
 - Prefer the shared scripts and template under `relay-tools/`.
 - Always prefer explicit stage slugs over git-change inference in handoff prompts.
 - For stage verification, always run the local check script before saying a stage is ready.
+- If changing `index.html`, `styles.css`, `game.js`, `community-stages/gallery.*`, or `community-stages/play.html`, also run `node relay-tools/scripts/check_host_flow.js --base-url http://127.0.0.1:4173 --mobile` before handoff.
 
 ## Frontend UI Rules
 
@@ -44,5 +46,6 @@ Apply these rules to `index.html`, `styles.css`, `game.js`, and everything under
 - UI must handle empty, dense, error, and very long-content states without breaking layout.
 - Long text in cards and flex rows must be constrained deliberately with truncation, wrapping, or `min-w-0` as needed.
 - Check responsive behavior on mobile and desktop whenever changing gallery, launcher, or play screens.
+- Mobile review must include overlay/modal/error states, not just the default loaded screen.
 - Locale-aware formatting is required for dates, times, and numbers shown to users.
 - For larger lists, avoid unnecessary re-renders and consider virtualization once the list size is meaningfully large.

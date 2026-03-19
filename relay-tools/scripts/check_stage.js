@@ -81,6 +81,22 @@ function assertStageSourceIncludesMetaText(stageSource, stageMeta) {
   }
 }
 
+function assertStageSourceIncludesMobileSupport(stageSource, stageMeta) {
+  const hasMobileInputHook = /touchstart|pointerdown/.test(stageSource);
+  const hasTouchCopy = /화면\s*터치|터치\s*또는|터치로|화면\s*버튼|모바일/.test(stageSource);
+
+  if (!hasMobileInputHook) {
+    throw new Error(
+      `Stage source must include touchstart or pointerdown mobile input for stage: ${stageMeta.id}`
+    );
+  }
+  if (!hasTouchCopy) {
+    throw new Error(
+      `Stage source must mention touch/mobile controls in stage copy for stage: ${stageMeta.id}`
+    );
+  }
+}
+
 function resolveStageSlug(args, repoRoot) {
   if (args.stage) {
     return args.stage;
@@ -98,6 +114,294 @@ function resolveStageSlug(args, repoRoot) {
   throw new Error(
     "Missing --stage and could not infer stage from git changes. Pass --stage <stage-slug>."
   );
+}
+
+function parseStageRenderText(renderedText) {
+  if (typeof renderedText !== "string" || !renderedText.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(renderedText);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function findOverflowingElements(elements, viewportWidth, tolerance = 4) {
+  return (elements || []).filter((entry) => {
+    if (!entry) {
+      return false;
+    }
+    return (
+      Number(entry.left) < -tolerance ||
+      Number(entry.right) > viewportWidth + tolerance ||
+      Number(entry.width) > viewportWidth + tolerance
+    );
+  });
+}
+
+function assertMobileLayoutMetrics(layoutMetrics, stageMeta, label) {
+  if (!layoutMetrics || !layoutMetrics.viewport) {
+    throw new Error(`Missing mobile layout metrics for stage: ${stageMeta.id} (${label})`);
+  }
+
+  const viewportWidth = Number(layoutMetrics.viewport.width) || 0;
+  const viewportHeight = Number(layoutMetrics.viewport.height) || 0;
+  const documentScrollWidth = Number(layoutMetrics.documentScrollWidth) || 0;
+  const overflowingElements = findOverflowingElements(
+    layoutMetrics.elements,
+    viewportWidth
+  );
+
+  if (documentScrollWidth > viewportWidth + 4) {
+    throw new Error(
+      `Mobile layout overflows horizontally in ${label} state for stage: ${stageMeta.id} (scrollWidth ${documentScrollWidth} > viewport ${viewportWidth})`
+    );
+  }
+
+  if (overflowingElements.length) {
+    const sample = overflowingElements
+      .slice(0, 4)
+      .map((entry) => entry.label || entry.tag || "unknown")
+      .join(", ");
+    throw new Error(
+      `Mobile layout has overflowing elements in ${label} state for stage: ${stageMeta.id} (${sample})`
+    );
+  }
+
+  const canvas = layoutMetrics.canvas;
+  if (!canvas) {
+    throw new Error(`Mobile canvas metrics missing for stage: ${stageMeta.id} (${label})`);
+  }
+
+  if (Number(canvas.width) < viewportWidth * 0.75) {
+    throw new Error(
+      `Mobile canvas is too narrow in ${label} state for stage: ${stageMeta.id}`
+    );
+  }
+
+  if (Number(canvas.height) < Math.min(220, viewportHeight * 0.35)) {
+    throw new Error(
+      `Mobile canvas is too short in ${label} state for stage: ${stageMeta.id}`
+    );
+  }
+}
+
+function stageThumbnailPath(repoRoot, stageDir) {
+  return path.join(repoRoot, "community-stages", stageDir, "thumbnail.png");
+}
+
+async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta }) {
+  await page.goto(stageUrl, { waitUntil: "networkidle" });
+  await page.waitForTimeout(150);
+
+  const canvas = page.locator("#game");
+  if ((await canvas.count()) === 0) {
+    throw new Error(`Stage canvas #game not found for thumbnail capture: ${stageMeta.id}`);
+  }
+
+  const readSnapshot = async () =>
+    parseStageRenderText(
+      await page.evaluate(() =>
+        typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null
+      )
+    );
+
+  const startStage = async (frames) => {
+    await canvas.click({ position: { x: 24, y: 24 } }).catch(() => {});
+    await page.keyboard.press("Enter").catch(() => {});
+    await page.waitForTimeout(80);
+    await page.evaluate((frameCount) => {
+      if (typeof window.advanceTime === "function") {
+        for (let index = 0; index < frameCount; index += 1) {
+          window.advanceTime(1000 / 60);
+        }
+      }
+    }, frames);
+    await page.waitForTimeout(40);
+  };
+
+  let snapshot = await readSnapshot();
+  if (!snapshot || snapshot.mode === "menu") {
+    await startStage(6);
+    snapshot = await readSnapshot();
+  }
+
+  if (!snapshot || snapshot.mode === "menu") {
+    await startStage(1);
+    snapshot = await readSnapshot();
+  }
+
+  if (!snapshot || snapshot.mode !== "running") {
+    throw new Error(
+      `Auto thumbnail capture requires a running gameplay scene, but stage stayed in "${snapshot?.mode || "unknown"}": ${stageMeta.id}`
+    );
+  }
+
+  const thumbnailPath = stageThumbnailPath(repoRoot, stageMeta.dir);
+  await canvas.screenshot({ path: thumbnailPath });
+  return thumbnailPath;
+}
+
+async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta, consoleErrors }) {
+  const mobilePage = await browser.newPage({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  mobilePage.on("console", (msg) => {
+    if (msg.type() === "error") {
+      consoleErrors.push(msg.text());
+    }
+  });
+
+  const readLayoutMetrics = async () =>
+    mobilePage.evaluate(() => {
+      const viewport = {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      };
+      const canvas = document.querySelector("#game");
+      const canvasRect = canvas
+        ? (() => {
+            const rect = canvas.getBoundingClientRect();
+            return {
+              left: Number(rect.left.toFixed(1)),
+              right: Number(rect.right.toFixed(1)),
+              top: Number(rect.top.toFixed(1)),
+              bottom: Number(rect.bottom.toFixed(1)),
+              width: Number(rect.width.toFixed(1)),
+              height: Number(rect.height.toFixed(1)),
+            };
+          })()
+        : null;
+      const elements = Array.from(document.querySelectorAll("body *"))
+        .filter((element) => {
+          if (element.classList?.contains("sr-only")) {
+            return false;
+          }
+          const style = window.getComputedStyle(element);
+          if (style.display === "none" || style.visibility === "hidden") {
+            return false;
+          }
+          const rect = element.getBoundingClientRect();
+          if (rect.width < 1 || rect.height < 1) {
+            return false;
+          }
+          if (rect.bottom < -4 || rect.top > window.innerHeight + 4) {
+            return false;
+          }
+          return true;
+        })
+        .slice(0, 80)
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          const id = element.id ? `#${element.id}` : "";
+          const className = typeof element.className === "string"
+            ? element.className
+                .split(/\s+/)
+                .filter(Boolean)
+                .slice(0, 2)
+                .map((name) => `.${name}`)
+                .join("")
+            : "";
+          return {
+            tag: String(element.tagName || "").toLowerCase(),
+            label: `${String(element.tagName || "").toLowerCase()}${id}${className}`,
+            left: Number(rect.left.toFixed(1)),
+            right: Number(rect.right.toFixed(1)),
+            top: Number(rect.top.toFixed(1)),
+            bottom: Number(rect.bottom.toFixed(1)),
+            width: Number(rect.width.toFixed(1)),
+            height: Number(rect.height.toFixed(1)),
+          };
+        });
+
+      return {
+        viewport,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        canvas: canvasRect,
+        elements,
+      };
+    });
+
+  await mobilePage.goto(stageUrl, { waitUntil: "networkidle" });
+  const canvas = mobilePage.locator("#game");
+  await canvas.waitFor({ state: "visible" });
+
+  const readSnapshot = async () =>
+    parseStageRenderText(
+      await mobilePage.evaluate(() =>
+        typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null
+      )
+    );
+
+  const tapToStart = async (frames) => {
+    await canvas.tap({ position: { x: 24, y: 24 } }).catch(() => {});
+    await mobilePage.waitForTimeout(90);
+    await mobilePage.evaluate((frameCount) => {
+      if (typeof window.advanceTime === "function") {
+        for (let index = 0; index < frameCount; index += 1) {
+          window.advanceTime(1000 / 60);
+        }
+      }
+    }, frames);
+    await mobilePage.waitForTimeout(40);
+  };
+
+  const menuScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-menu.png`);
+  await mobilePage.screenshot({ path: menuScreenshotPath, fullPage: true });
+  const menuLayout = await readLayoutMetrics();
+  assertMobileLayoutMetrics(menuLayout, stageMeta, "menu");
+
+  let snapshot = await readSnapshot();
+  if (!snapshot || snapshot.mode === "menu") {
+    await tapToStart(6);
+    snapshot = await readSnapshot();
+  }
+  if (!snapshot || snapshot.mode === "menu") {
+    await tapToStart(1);
+    snapshot = await readSnapshot();
+  }
+
+  if (!snapshot || snapshot.mode !== "running") {
+    throw new Error(
+      `Mobile touch start failed to enter running state for stage: ${stageMeta.id} (got "${snapshot?.mode || "unknown"}")`
+    );
+  }
+
+  const runningScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-running.png`);
+  await mobilePage.screenshot({ path: runningScreenshotPath, fullPage: true });
+  const runningLayout = await readLayoutMetrics();
+  assertMobileLayoutMetrics(runningLayout, stageMeta, "running");
+
+  await mobilePage.evaluate(() => {
+    window.relayStageDebug?.forceFail?.();
+  });
+  await mobilePage.waitForTimeout(120);
+
+  const failedSnapshot = await readSnapshot();
+  if (!failedSnapshot || failedSnapshot.mode !== "failed") {
+    throw new Error(`Mobile forceFail did not enter failed state for stage: ${stageMeta.id}`);
+  }
+
+  const failedScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-failed.png`);
+  await mobilePage.screenshot({ path: failedScreenshotPath, fullPage: true });
+  const failedLayout = await readLayoutMetrics();
+  assertMobileLayoutMetrics(failedLayout, stageMeta, "failed");
+
+  await mobilePage.close();
+
+  return {
+    text: JSON.stringify(snapshot),
+    layouts: {
+      menu: menuLayout,
+      running: runningLayout,
+      failed: failedLayout,
+    },
+    screenshotPaths: [menuScreenshotPath, runningScreenshotPath, failedScreenshotPath],
+  };
 }
 
 async function main() {
@@ -127,6 +431,7 @@ async function main() {
 
   const stageSource = fs.readFileSync(stagePath, "utf8");
   assertStageSourceIncludesMetaText(stageSource, stageMeta);
+  assertStageSourceIncludesMobileSupport(stageSource, stageMeta);
 
   fs.mkdirSync(outputDir, { recursive: true });
 
@@ -166,6 +471,19 @@ async function main() {
   await page.screenshot({
     path: path.join(outputDir, `${stageMeta.dir}-direct.png`),
     fullPage: true,
+  });
+  const thumbnailPath = await captureGameplayThumbnail({
+    page,
+    stageUrl,
+    repoRoot,
+    stageMeta,
+  });
+  const mobileChecks = await captureMobileStageState({
+    browser,
+    stageUrl,
+    outputDir,
+    stageMeta,
+    consoleErrors,
   });
 
   if (!launcherCount) {
@@ -260,6 +578,10 @@ async function main() {
         stage: stageMeta.id,
         stageDir: stageMeta.dir,
         directChecks,
+        mobileChecks: {
+          text: mobileChecks.text,
+          layouts: mobileChecks.layouts,
+        },
         host: {
           clearEvents,
           failEvents,
@@ -267,8 +589,10 @@ async function main() {
         screenshots: [
           path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-launcher.png`)),
           path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-direct.png`)),
+          ...mobileChecks.screenshotPaths.map((screenshotPath) => path.relative(repoRoot, screenshotPath)),
           path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-host.png`)),
         ],
+        thumbnail: path.relative(repoRoot, thumbnailPath),
       },
       null,
       2
@@ -284,8 +608,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertMobileLayoutMetrics,
+  assertStageSourceIncludesMobileSupport,
   assertStageSourceIncludesMetaText,
+  findOverflowingElements,
   parseArgs,
   parseChangedStageSlugs,
+  parseStageRenderText,
   resolveStageSlug,
+  stageThumbnailPath,
 };

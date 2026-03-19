@@ -10,6 +10,13 @@ const REQUIRED_STAGE_FIELDS = [
   "failCondition",
   "controls",
 ];
+const THUMBNAIL_FILE_NAMES = [
+  "thumbnail.png",
+  "thumbnail.jpg",
+  "thumbnail.jpeg",
+  "thumbnail.webp",
+  "thumbnail.avif",
+];
 
 function communityStagesRoot(repoRoot) {
   return path.join(repoRoot, "community-stages");
@@ -74,7 +81,42 @@ function normalizeEstimatedSeconds(value) {
   return parsed;
 }
 
-function normalizeStageMeta(rawMeta, dir) {
+function normalizeThumbnail(rawThumbnail, dir) {
+  const normalized = normalizeOptionalString(rawThumbnail);
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized.startsWith("http://") ||
+    normalized.startsWith("https://") ||
+    normalized.startsWith("data:")
+  ) {
+    return normalized;
+  }
+  if (
+    normalized.startsWith(`./${dir}/`) ||
+    normalized.startsWith("../") ||
+    normalized.startsWith("/")
+  ) {
+    return normalized;
+  }
+  if (normalized.startsWith("./")) {
+    return `./${dir}/${normalized.slice(2)}`;
+  }
+  return `./${dir}/${normalized.replace(/^\/+/, "")}`;
+}
+
+function inferThumbnailPath(repoRoot, dir) {
+  const stageDir = path.join(communityStagesRoot(repoRoot), dir);
+  for (const fileName of THUMBNAIL_FILE_NAMES) {
+    if (fs.existsSync(path.join(stageDir, fileName))) {
+      return `./${dir}/${fileName}`;
+    }
+  }
+  return null;
+}
+
+function normalizeStageMeta(rawMeta, dir, repoRoot) {
   const normalized = {
     id: ensureNonEmptyString("id", rawMeta.id),
     title: ensureNonEmptyString("title", rawMeta.title),
@@ -85,6 +127,7 @@ function normalizeStageMeta(rawMeta, dir) {
     controls: ensureNonEmptyString("controls", rawMeta.controls),
     creator: normalizeCreator(rawMeta.creator),
     estimatedSeconds: normalizeEstimatedSeconds(rawMeta.estimatedSeconds),
+    thumbnail: normalizeThumbnail(rawMeta.thumbnail, dir) || inferThumbnailPath(repoRoot, dir),
     dir,
     path: `./${dir}/index.html`,
   };
@@ -103,7 +146,7 @@ function readStageMetaFile(repoRoot, dir) {
   }
 
   const rawMeta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
-  return normalizeStageMeta(rawMeta, dir);
+  return normalizeStageMeta(rawMeta, dir, repoRoot);
 }
 
 function loadAllStageMetas(repoRoot) {
@@ -173,6 +216,7 @@ function buildRegistrySource(metas) {
       }, github: ${meta.creator.github === null ? "null" : escapeJs(meta.creator.github)} },
     genre: ${escapeJs(meta.genre)},
     clearCondition: ${escapeJs(meta.clearCondition)},
+    thumbnail: ${meta.thumbnail === null ? "null" : escapeJs(meta.thumbnail)},
     path: ${escapeJs(meta.path)},
   }`
     )

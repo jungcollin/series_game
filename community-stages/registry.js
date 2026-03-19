@@ -5,6 +5,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "zero4uu", avatar: null, github: "zero4uu" },
     genre: "Arcade survival",
     clearCondition: "30초 동안 영철에 닿지 않고 생존하기",
+    thumbnail: "./slither-worm/thumbnail.png",
     path: "./slither-worm/index.html",
   },
   {
@@ -13,6 +14,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "김우진", avatar: null, github: "ogq-bobby" },
     genre: "Luck & Speed",
     clearCondition: "사라지기 전에 통과 선택지를 고르세요",
+    thumbnail: "./vanishing-picks/thumbnail.png",
     path: "./vanishing-picks/index.html",
   },
   {
@@ -21,6 +23,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade survival",
     clearCondition: "35초 동안 번개 예고선을 보고 모든 낙뢰를 피하기",
+    thumbnail: "./lightning-dodge/thumbnail.png",
     path: "./lightning-dodge/index.html",
   },
   {
@@ -29,6 +32,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "지현정", avatar: null, github: "jyeonjeeong" },
     genre: "Platformer",
     clearCondition: "30초 동안 장애물을 피하고 문에 도달하면 클리어",
+    thumbnail: "./jump-hurdle/thumbnail.png",
     path: "./jump-hurdle/index.html",
   },
   {
@@ -37,22 +41,16 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade shooter",
     clearCondition: "보스 체력을 모두 깎아 격추하기",
+    thumbnail: "./galaxy-boss/thumbnail.png",
     path: "./galaxy-boss/index.html",
   },
   {
-    id: "quick-plus-3",
-    title: "Quick Plus 3",
-    creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
-    genre: "Math quiz",
-    clearCondition: "쉬운 더하기 3문제를 모두 맞히기",
-    path: "./quick-plus-3/index.html",
-  },
-  {
     id: "poop-rain-60",
-    title: "Poop Rain 60",
+    title: "Poop Rain 15",
     creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade survival",
-    clearCondition: "60초 동안 하늘에서 떨어지는 똥을 피하기",
+    clearCondition: "15초 동안 하늘에서 떨어지는 똥을 피하기",
+    thumbnail: "./poop-rain/thumbnail.png",
     path: "./poop-rain/index.html",
   },
   {
@@ -61,6 +59,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "김우진", avatar: null, github: "ogq-bobby" },
     genre: "Arcade",
     clearCondition: "30초 안에 두더지 20마리 이상 잡으면 클리어",
+    thumbnail: "./whack-a-mole/thumbnail.png",
     path: "./whack-a-mole/index.html",
   }
 ];

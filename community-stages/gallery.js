@@ -44,6 +44,14 @@
     return GENRE_STYLES[genre] || DEFAULT_GENRE;
   }
 
+  function getStageThumbnailUrl(entry) {
+    if (!entry || !entry.thumbnail) {
+      return null;
+    }
+    var url = String(entry.thumbnail).trim();
+    return url || null;
+  }
+
   function renderCreatorAvatar(creator) {
     var c = normalizeCreator(creator);
     var url = getAvatarUrl(creator);
@@ -59,6 +67,31 @@
     return s ? s.score : 0;
   }
 
+  function getScoreState(score) {
+    if (score <= -5) return "negative-strong";
+    if (score < 0) return "negative";
+    if (score >= 10) return "positive-strong";
+    if (score > 0) return "positive";
+    return "neutral";
+  }
+
+  function getScoreHeartIcon(score) {
+    var state = getScoreState(score);
+    if (state === "negative" || state === "negative-strong") return "\uD83D\uDDA4";
+    if (state === "neutral") return "\uD83E\uDD0D";
+    return "\u2764\uFE0F";
+  }
+
+  function setScoreVisual(el, score) {
+    if (!el) return;
+    el.dataset.scoreState = getScoreState(score);
+    var iconEl = el.querySelector(".heart-icon");
+    if (iconEl) {
+      iconEl.textContent = getScoreHeartIcon(score);
+    }
+    el.setAttribute("aria-label", "좋아요 점수 " + score);
+  }
+
   function announceFeedback(message) {
     if (feedbackEl) {
       feedbackEl.textContent = message || "";
@@ -68,17 +101,27 @@
   function renderCard(entry) {
     var creator = normalizeCreator(entry.creator);
     var genre = getGenreStyle(entry.genre);
+    var thumbnailUrl = getStageThumbnailUrl(entry);
     var score = getScore(entry.id);
     var myVote = myVotes[entry.id] || 0;
+    var scoreState = getScoreState(score);
+    var heartIcon = getScoreHeartIcon(score);
     var playHref = "./play.html?stage=" + encodeURIComponent(entry.id);
+    var thumbnailMarkup = thumbnailUrl
+      ? '<img class="stage-card-thumb-image" src="' + escapeHtml(thumbnailUrl) + '" alt="" loading="lazy" decoding="async" onerror="this.remove()" />'
+      : "";
+    var genreIconMarkup = thumbnailUrl
+      ? ""
+      : '<span class="stage-card-thumb-icon">' + genre.icon + "</span>";
 
     return (
       '<article class="stage-card" data-stage-id="' + escapeHtml(entry.id) + '">' +
       '<a class="stage-card-media-link" href="' + playHref + '" aria-label="' + escapeHtml(entry.title) + ' 플레이 페이지로 이동">' +
-      '<div class="stage-card-thumb" style="background:' + genre.bg + '">' +
-      '<span class="stage-card-thumb-icon">' + genre.icon + "</span>" +
+      '<div class="stage-card-thumb" data-has-image="' + (thumbnailUrl ? "true" : "false") + '" style="background:' + genre.bg + '">' +
+      thumbnailMarkup +
+      genreIconMarkup +
       '<span class="stage-card-genre">' + escapeHtml(entry.genre) + "</span>" +
-      '<span class="stage-card-heart" data-stage-id="' + escapeHtml(entry.id) + '">\u2764\uFE0F <span class="vote-score">' + score + "</span></span>" +
+      '<span class="stage-card-heart" data-stage-id="' + escapeHtml(entry.id) + '" data-score-state="' + scoreState + '" aria-label="좋아요 점수 ' + score + '"><span class="heart-icon" aria-hidden="true">' + heartIcon + '</span> <span class="vote-score">' + score + "</span></span>" +
       "</div>" +
       "</a>" +
       '<div class="stage-card-body">' +
@@ -142,6 +185,7 @@
     var upBtn = group.querySelector(".vote-up");
     var downBtn = group.querySelector(".vote-down");
     var scoreEl = card.querySelector(".vote-score");
+    var heartEl = card.querySelector(".stage-card-heart");
     var oldScore = parseInt(scoreEl.textContent, 10) || 0;
     var oldVote = myVotes[stageId] || 0;
 
@@ -164,6 +208,7 @@
 
     myVotes[stageId] = newVote;
     scoreEl.textContent = newScore;
+    setScoreVisual(heartEl, newScore);
     upBtn.dataset.active = (newVote === 1).toString();
     downBtn.dataset.active = (newVote === -1).toString();
 
@@ -182,6 +227,7 @@
         // Rollback
         myVotes[stageId] = oldVote;
         scoreEl.textContent = oldScore;
+        setScoreVisual(heartEl, oldScore);
         upBtn.dataset.active = (oldVote === 1).toString();
         downBtn.dataset.active = (oldVote === -1).toString();
         s.score = oldScore;
