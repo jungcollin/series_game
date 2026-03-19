@@ -34,6 +34,7 @@ node relay-tools/scripts/check_stage.js --stage <stage-slug> --base-url http://1
 - `meta.json` 필수 필드 존재
 - `registry.js`와 메타 동기화 여부
 - 시작 화면의 조작법/클리어 조건/실패 조건 문구 반영
+- 템플릿 기본 접근성 셸(`skip-link`, 설명 연결, `canvas` 포커스 가능 상태)이 훼손되지 않았는지 육안으로 함께 확인
 - relay 인터페이스 및 host 콜백 계약
 
 ### 3. 결과 판정

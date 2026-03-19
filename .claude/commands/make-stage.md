@@ -11,6 +11,8 @@
 3. 위 값이 하나라도 비어 있으면 `create_stage.js`를 실행하지 말고 먼저 사용자에게 물어본다.
 4. `node relay-tools/scripts/create_stage.js --slug <stage-slug> --title "<title>" --creator "<creator>" --creator-github "<github>" --genre "<genre>" --clear-condition "<clear-condition>" --fail-condition "<fail-condition>" --controls "<controls>" --description "<description>"` 로 골격 생성.
 5. 생성된 HTML을 실제 게임으로 완성한다.
+   - 기본 템플릿에 들어 있는 `skip-link`, 숨김 조작 설명, `canvas` 포커스 스타일, `prefers-reduced-motion` 대응은 유지한다.
+   - 이 기본 규칙은 접근성과 진입성을 위한 최소선이다. 색상, 레이아웃, HUD, 연출, 게임 구조는 자유롭게 바꿔도 된다.
 6. 릴레이 계약(render_game_to_text, advanceTime, relayStageMeta, relayStageResult, relayStageDebug, RelayHost 콜백)을 지킨다.
 7. 시작 화면에 조작법, 클리어 조건, 실패 조건을 적는다.
 8. 추가 목숨, continue, checkpoint respawn, save restore는 넣지 않는다.

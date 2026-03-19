@@ -23,4 +23,6 @@ Rules:
 - Keep all workflow logic inside this repository.
 - Prefer the shared scripts in `relay-tools/scripts/`.
 - Do not depend on global config or global skills.
+- For `/make-stage`, keep the template's minimal accessibility shell (`skip-link`, hidden instructions, focusable canvas, reduced-motion support`) unless an equivalent repo-local replacement is provided.
+- Those defaults are only a baseline; visual style, HUD, layout, and game structure stay flexible.
 - Verify a stage with `node relay-tools/scripts/check_stage.js` before handing it off.

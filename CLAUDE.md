@@ -16,6 +16,8 @@ Custom commands are registered in `.claude/commands/`:
 - Use the scripts in `relay-tools/scripts/` when possible.
 - Do not rely on global prompts or global skills.
 - For `/make-stage`, do not run `create_stage.js` until `creator`, `genre`, `controls`, `clear-condition`, and `fail-condition` are all fixed.
+- For `/make-stage`, keep the template's minimal accessibility shell (`skip-link`, hidden instructions, focusable canvas, reduced-motion support`) unless there is a repo-local reason to replace it with an equivalent.
+- For `/make-stage`, treat those defaults as a minimum baseline only; visual style, HUD, layout, and game structure remain fully flexible.
 - For `/check-stage` and `/publish-stage`, always prefer explicit `stage-slug` over git-change inference.
 - For `/publish-stage`, if the current branch already has an open PR, push new commits to that same PR. If the earlier PR for that branch is already merged or closed, create a new PR.
 - Before declaring success, run `node relay-tools/scripts/check_stage.js --stage <stage-slug>`.
