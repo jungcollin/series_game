@@ -79,5 +79,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "선생님한테 안 걸리고 주먹밥을 모두 먹으면 클리어",
     thumbnail: "./secret-riceball/thumbnail.png",
     path: "./secret-riceball/index.html",
+  },
+  {
+    id: "home-run-relay",
+    title: "Home Run Relay",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "sports / precision batting",
+    clearCondition: "총 5구 안에 홈런 3개를 치면 클리어",
+    thumbnail: "./home-run-relay/thumbnail.png",
+    path: "./home-run-relay/index.html",
   }
 ];
