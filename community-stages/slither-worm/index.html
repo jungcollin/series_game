@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Slither Worm</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0a0e1a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0a0e1a;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="960" height="540" aria-label="Slither Worm" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const SURVIVAL_TIME = 30;
+      const WORM_SPEED = 150;
+      const WORM_SEGMENT_SIZE = 10;
+      const WORM_INIT_LENGTH = 8;
+      const PELLET_COUNT = 6;
+      const DEVIL_COUNT_INITIAL = 2;
+      const DEVIL_SPEED = 70;
+      const DEVIL_SIZE = 18;
+      const PELLET_RADIUS = 7;
+      const ARENA_MARGIN = 30;
+      const MIN_LENGTH_TO_FAIL = 3;
+      const DEVIL_SPAWN_INTERVAL = 6;
+      const MAX_DEVILS = 6;
+
+      const relayContext = window.RelayRuntime?.readContext("slither-worm") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const input = { up: false, down: false, left: false, right: false };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        worm: [],
+        wormDir: { x: 1, y: 0 },
+        wormMoveAccum: 0,
+        pellets: [],
+        devils: [],
+        particles: [],
+        maxLength: WORM_INIT_LENGTH,
+        bestLength: WORM_INIT_LENGTH,
+        devilSpawnTimer: DEVIL_SPAWN_INTERVAL,
+        gridPulse: 0,
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "worm_too_short") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function randomInArena() {
+        return {
+          x: ARENA_MARGIN + Math.random() * (VIEW.width - ARENA_MARGIN * 2),
+          y: ARENA_MARGIN + Math.random() * (VIEW.height - ARENA_MARGIN * 2),
+        };
+      }
+
+      function dist(a, b) {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return Math.sqrt(dx * dx + dy * dy);
+      }
+
+      function spawnPellet() {
+        const pos = randomInArena();
+        return {
+          x: pos.x,
+          y: pos.y,
+          pulse: Math.random() * Math.PI * 2,
+          hue: 50 + Math.random() * 40,
+        };
+      }
+
+      function spawnDevil() {
+        const edge = Math.floor(Math.random() * 4);
+        let x, y;
+        if (edge === 0) { x = ARENA_MARGIN; y = ARENA_MARGIN + Math.random() * (VIEW.height - ARENA_MARGIN * 2); }
+        else if (edge === 1) { x = VIEW.width - ARENA_MARGIN; y = ARENA_MARGIN + Math.random() * (VIEW.height - ARENA_MARGIN * 2); }
+        else if (edge === 2) { x = ARENA_MARGIN + Math.random() * (VIEW.width - ARENA_MARGIN * 2); y = ARENA_MARGIN; }
+        else { x = ARENA_MARGIN + Math.random() * (VIEW.width - ARENA_MARGIN * 2); y = VIEW.height - ARENA_MARGIN; }
+        const angle = Math.random() * Math.PI * 2;
+        return {
+          x,
+          y,
+          vx: Math.cos(angle) * DEVIL_SPEED,
+          vy: Math.sin(angle) * DEVIL_SPEED,
+          bobPhase: Math.random() * Math.PI * 2,
+        };
+      }
+
+      function spawnParticles(x, y, color, count) {
+        for (let i = 0; i < count; i++) {
+          const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+          const speed = 30 + Math.random() * 100;
+          state.particles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 0.3 + Math.random() * 0.3,
+            color,
+            size: 2 + Math.random() * 3,
+          });
+        }
+      }
+
+      function resetRun() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.wormMoveAccum = 0;
+        state.maxLength = WORM_INIT_LENGTH;
+        state.bestLength = WORM_INIT_LENGTH;
+        state.devilSpawnTimer = DEVIL_SPAWN_INTERVAL;
+        state.gridPulse = 0;
+        state.particles = [];
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+
+        const cx = VIEW.width / 2;
+        const cy = VIEW.height / 2;
+        state.worm = [];
+        for (let i = 0; i < WORM_INIT_LENGTH; i++) {
+          state.worm.push({ x: cx - i * WORM_SEGMENT_SIZE, y: cy });
+        }
+        state.wormDir = { x: 1, y: 0 };
+
+        state.pellets = [];
+        for (let i = 0; i < PELLET_COUNT; i++) {
+          state.pellets.push(spawnPellet());
+        }
+
+        state.devils = [];
+        for (let i = 0; i < DEVIL_COUNT_INITIAL; i++) {
+          state.devils.push(spawnDevil());
+        }
+      }
+
+      function failRun(reason = "worm_too_short") {
+        if (state.mode !== "running") return;
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        if (state.worm.length > 0) {
+          spawnParticles(state.worm[0].x, state.worm[0].y, "#ef4444", 20);
+        }
+        reportFailedToHost(reason);
+      }
+
+      function clearRun() {
+        if (state.mode !== "running") return;
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        for (let i = 0; i < 30; i++) {
+          const pos = randomInArena();
+          spawnParticles(pos.x, pos.y, "#fde68a", 5);
+        }
+        reportClearedToHost();
+      }
+
+      function updateWorm(dt) {
+        let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+        let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+        if (dx !== 0 || dy !== 0) {
+          const len = Math.sqrt(dx * dx + dy * dy);
+          state.wormDir.x = dx / len;
+          state.wormDir.y = dy / len;
+        }
+
+        state.wormMoveAccum += WORM_SPEED * dt;
+        while (state.wormMoveAccum >= WORM_SEGMENT_SIZE) {
+          state.wormMoveAccum -= WORM_SEGMENT_SIZE;
+          const head = state.worm[0];
+          let nx = head.x + state.wormDir.x * WORM_SEGMENT_SIZE;
+          let ny = head.y + state.wormDir.y * WORM_SEGMENT_SIZE;
+
+          // Wrap around
+          if (nx < 0) nx += VIEW.width;
+          if (nx > VIEW.width) nx -= VIEW.width;
+          if (ny < 0) ny += VIEW.height;
+          if (ny > VIEW.height) ny -= VIEW.height;
+
+          state.worm.unshift({ x: nx, y: ny });
+          while (state.worm.length > state.maxLength) {
+            state.worm.pop();
+          }
+        }
+      }
+
+      function updatePellets() {
+        const head = state.worm[0];
+        if (!head) return;
+
+        for (let i = state.pellets.length - 1; i >= 0; i--) {
+          const p = state.pellets[i];
+          if (dist(head, p) < PELLET_RADIUS + WORM_SEGMENT_SIZE * 0.6) {
+            state.maxLength += 3;
+            if (state.maxLength > state.bestLength) {
+              state.bestLength = state.maxLength;
+            }
+            spawnParticles(p.x, p.y, `hsl(${p.hue}, 100%, 70%)`, 8);
+            state.pellets.splice(i, 1);
+            state.pellets.push(spawnPellet());
+          }
+        }
+      }
+
+      function updateDevils(dt) {
+        const head = state.worm[0];
+
+        for (const devil of state.devils) {
+          // Move toward worm with some wandering
+          if (head) {
+            const dx = head.x - devil.x;
+            const dy = head.y - devil.y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d > 1) {
+              const chase = 0.3;
+              devil.vx += (dx / d) * DEVIL_SPEED * chase * dt;
+              devil.vy += (dy / d) * DEVIL_SPEED * chase * dt;
+            }
+          }
+
+          // Limit speed
+          const spd = Math.sqrt(devil.vx * devil.vx + devil.vy * devil.vy);
+          const maxSpd = DEVIL_SPEED * (1 + state.elapsed / SURVIVAL_TIME * 0.8);
+          if (spd > maxSpd) {
+            devil.vx = (devil.vx / spd) * maxSpd;
+            devil.vy = (devil.vy / spd) * maxSpd;
+          }
+
+          devil.x += devil.vx * dt;
+          devil.y += devil.vy * dt;
+          devil.bobPhase += dt * 5;
+
+          // Bounce off walls
+          if (devil.x < ARENA_MARGIN) { devil.x = ARENA_MARGIN; devil.vx = Math.abs(devil.vx); }
+          if (devil.x > VIEW.width - ARENA_MARGIN) { devil.x = VIEW.width - ARENA_MARGIN; devil.vx = -Math.abs(devil.vx); }
+          if (devil.y < ARENA_MARGIN) { devil.y = ARENA_MARGIN; devil.vy = Math.abs(devil.vy); }
+          if (devil.y > VIEW.height - ARENA_MARGIN) { devil.y = VIEW.height - ARENA_MARGIN; devil.vy = -Math.abs(devil.vy); }
+
+          // Check collision with worm body (skip head, check body segments)
+          for (let i = 2; i < state.worm.length; i++) {
+            const seg = state.worm[i];
+            if (dist(devil, seg) < DEVIL_SIZE * 0.5 + WORM_SEGMENT_SIZE * 0.5) {
+              // Cut worm from this segment onward
+              const removed = state.worm.splice(i);
+              state.maxLength = state.worm.length;
+              spawnParticles(seg.x, seg.y, "#f87171", 12);
+
+              if (state.worm.length < MIN_LENGTH_TO_FAIL) {
+                failRun("worm_too_short");
+                return;
+              }
+              break;
+            }
+          }
+        }
+
+        // Spawn more devils over time
+        state.devilSpawnTimer -= dt;
+        if (state.devilSpawnTimer <= 0 && state.devils.length < MAX_DEVILS) {
+          state.devils.push(spawnDevil());
+          state.devilSpawnTimer = DEVIL_SPAWN_INTERVAL;
+        }
+      }
+
+      function updateParticles(dt) {
+        state.particles = state.particles.filter((p) => {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 60 * dt;
+          p.life -= dt;
+          return p.life > 0;
+        });
+      }
+
+      function update(dt) {
+        state.gridPulse += dt;
+        updateParticles(dt);
+
+        if (state.mode !== "running") return;
+
+        state.elapsed += dt;
+        updateWorm(dt);
+        updatePellets();
+        updateDevils(dt);
+
+        if (state.mode === "running" && state.elapsed >= SURVIVAL_TIME) {
+          clearRun();
+        }
+      }
+
+      // --- Drawing ---
+
+      function drawBackground() {
+        const gradient = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        gradient.addColorStop(0, "#060a14");
+        gradient.addColorStop(1, "#0d1424");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // Grid lines
+        ctx.strokeStyle = "rgba(100, 200, 255, 0.04)";
+        ctx.lineWidth = 1;
+        const gridSize = 40;
+        const offset = (state.gridPulse * 8) % gridSize;
+        for (let x = -offset; x < VIEW.width + gridSize; x += gridSize) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, VIEW.height);
+          ctx.stroke();
+        }
+        for (let y = -offset; y < VIEW.height + gridSize; y += gridSize) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(VIEW.width, y);
+          ctx.stroke();
+        }
+      }
+
+      function drawPellets() {
+        for (const p of state.pellets) {
+          p.pulse += 0.05;
+          const glow = 0.6 + 0.4 * Math.sin(p.pulse);
+          const r = PELLET_RADIUS + glow * 3;
+
+          // Glow
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r + 6, 0, Math.PI * 2);
+          ctx.fillStyle = `hsla(${p.hue}, 100%, 70%, ${0.15 * glow})`;
+          ctx.fill();
+
+          // Core
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = `hsl(${p.hue}, 100%, ${60 + glow * 20}%)`;
+          ctx.fill();
+
+          // Shine
+          ctx.beginPath();
+          ctx.arc(p.x - 2, p.y - 2, r * 0.4, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+          ctx.fill();
+        }
+      }
+
+      function drawWorm() {
+        if (state.worm.length === 0) return;
+
+        for (let i = state.worm.length - 1; i >= 0; i--) {
+          const seg = state.worm[i];
+          const t = i / state.worm.length;
+          const size = WORM_SEGMENT_SIZE * (0.5 + 0.5 * (1 - t));
+          const hue = 120 + t * 40;
+          const lightness = 45 + (1 - t) * 20;
+
+          ctx.beginPath();
+          ctx.arc(seg.x, seg.y, size, 0, Math.PI * 2);
+          ctx.fillStyle = `hsl(${hue}, 80%, ${lightness}%)`;
+          ctx.fill();
+        }
+
+        // Head
+        const head = state.worm[0];
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, WORM_SEGMENT_SIZE * 1.1, 0, Math.PI * 2);
+        ctx.fillStyle = "#4ade80";
+        ctx.fill();
+
+        // Eyes
+        const ex = state.wormDir.x * 4;
+        const ey = state.wormDir.y * 4;
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(head.x + ex - 3, head.y + ey - 3, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(head.x + ex + 3, head.y + ey - 3, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.arc(head.x + ex - 2.5, head.y + ey - 3, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(head.x + ex + 3.5, head.y + ey - 3, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawDevils() {
+        for (const devil of state.devils) {
+          const bob = Math.sin(devil.bobPhase) * 3;
+          const x = devil.x;
+          const y = devil.y + bob;
+          const s = DEVIL_SIZE;
+
+          // Body
+          ctx.fillStyle = "#dc2626";
+          ctx.beginPath();
+          ctx.arc(x, y, s * 0.55, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Horns
+          ctx.fillStyle = "#991b1b";
+          ctx.beginPath();
+          ctx.moveTo(x - 6, y - s * 0.4);
+          ctx.lineTo(x - 10, y - s * 0.9);
+          ctx.lineTo(x - 2, y - s * 0.5);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(x + 6, y - s * 0.4);
+          ctx.lineTo(x + 10, y - s * 0.9);
+          ctx.lineTo(x + 2, y - s * 0.5);
+          ctx.fill();
+
+          // Eyes
+          ctx.fillStyle = "#fef08a";
+          ctx.beginPath();
+          ctx.arc(x - 3, y - 2, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(x + 3, y - 2, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Pupils
+          ctx.fillStyle = "#000";
+          ctx.beginPath();
+          ctx.arc(x - 3, y - 1.5, 1.2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(x + 3, y - 1.5, 1.2, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Mouth
+          ctx.strokeStyle = "#fca5a5";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(x, y + 3, 4, 0.1 * Math.PI, 0.9 * Math.PI);
+          ctx.stroke();
+
+          // Tail
+          ctx.strokeStyle = "#dc2626";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x, y + s * 0.5);
+          ctx.quadraticCurveTo(x + 8, y + s * 0.8, x + 4 + Math.sin(devil.bobPhase * 2) * 4, y + s);
+          ctx.stroke();
+
+          // Tail tip (triangle)
+          const tx = x + 4 + Math.sin(devil.bobPhase * 2) * 4;
+          const ty = y + s;
+          ctx.fillStyle = "#dc2626";
+          ctx.beginPath();
+          ctx.moveTo(tx, ty - 3);
+          ctx.lineTo(tx + 5, ty + 2);
+          ctx.lineTo(tx - 5, ty + 2);
+          ctx.fill();
+        }
+      }
+
+      function drawParticles() {
+        for (const p of state.particles) {
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = Math.max(0, p.life * 2);
+          ctx.fillRect(p.x, p.y, p.size, p.size);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHud() {
+        ctx.fillStyle = "rgba(8, 15, 27, 0.75)";
+        roundRect(ctx, 20, 16, 260, 74, 14);
+        ctx.fill();
+
+        ctx.fillStyle = "#4ade80";
+        ctx.font = "700 13px Trebuchet MS";
+        ctx.fillText("SLITHER WORM", 36, 38);
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 24px Trebuchet MS";
+        const remaining = Math.max(0, SURVIVAL_TIME - state.elapsed);
+        ctx.fillText(`${remaining.toFixed(1)}s`, 36, 66);
+
+        ctx.fillStyle = "rgba(226, 232, 240, 0.8)";
+        ctx.font = "600 14px Trebuchet MS";
+        ctx.fillText(`길이: ${state.worm.length}`, 130, 66);
+
+        ctx.fillText(`최고: ${state.bestLength}`, 200, 66);
+
+        ctx.fillStyle = "rgba(226, 232, 240, 0.6)";
+        ctx.font = "500 12px Trebuchet MS";
+        ctx.fillText("방향키로 이동 · 알갱이를 먹어 성장 · 악마를 피하세요", 36, 84);
+      }
+
+      function roundRect(context, x, y, w, h, r) {
+        context.beginPath();
+        context.moveTo(x + r, y);
+        context.arcTo(x + w, y, x + w, y + h, r);
+        context.arcTo(x + w, y + h, x, y + h, r);
+        context.arcTo(x, y + h, x, y, r);
+        context.arcTo(x, y, x + w, y, r);
+        context.closePath();
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(3, 7, 18, 0.75)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.96)";
+        roundRect(ctx, 140, 80, 680, 380, 28);
+        ctx.fill();
+
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        roundRect(ctx, 140, 80, 680, 380, 28);
+        ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = accent;
+        ctx.font = "700 44px Trebuchet MS";
+        ctx.fillText(title, VIEW.width / 2, 150);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 210 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        drawBackground();
+
+        if (state.mode === "menu") {
+          renderCard("Slither Worm", [
+            "방향키로 지렁이를 조종해 빛나는 알갱이를 먹고 성장!",
+            "작은 악마에 몸이 닿으면 꼬리부터 잘려갑니다.",
+            "클리어: 30초 생존  |  실패: 몸 길이가 3 미만",
+            "Enter로 시작, 방향키로 이동",
+          ], "#4ade80");
+          return;
+        }
+
+        if (state.mode === "running" || state.mode === "cleared" || state.mode === "failed") {
+          drawPellets();
+          drawWorm();
+          drawDevils();
+          drawParticles();
+          drawHud();
+        }
+
+        if (state.mode === "failed") {
+          renderCard("GAME OVER", [
+            "악마에게 몸이 너무 많이 잘렸습니다!",
+            `버틴 시간: ${state.lastRunTime.toFixed(1)}초  |  최고 길이: ${state.bestLength}`,
+            "Enter로 다시 도전",
+          ], "#ef4444");
+        }
+
+        if (state.mode === "cleared") {
+          renderCard("CLEAR!", [
+            "30초 동안 생존에 성공했습니다!",
+            `최종 길이: ${state.worm.length}  |  최고 길이: ${state.bestLength}`,
+            "다음 스테이지로 이어집니다.",
+          ], "#22c55e");
+        }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "origin top-left, x right, y down, units in pixels",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          time_remaining: Number(Math.max(0, SURVIVAL_TIME - state.elapsed).toFixed(1)),
+          worm_length: state.worm.length,
+          best_length: state.bestLength,
+          head: state.worm.length > 0 ? { x: Math.round(state.worm[0].x), y: Math.round(state.worm[0].y) } : null,
+          pellet_count: state.pellets.length,
+          devil_count: state.devils.length,
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+            resetRun();
+          }
+          return;
+        }
+        if (event.key === "ArrowLeft" || event.key.toLowerCase() === "a") { input.left = true; event.preventDefault(); }
+        if (event.key === "ArrowRight" || event.key.toLowerCase() === "d") { input.right = true; event.preventDefault(); }
+        if (event.key === "ArrowUp" || event.key.toLowerCase() === "w") { input.up = true; event.preventDefault(); }
+        if (event.key === "ArrowDown" || event.key.toLowerCase() === "s") { input.down = true; event.preventDefault(); }
+      }
+
+      function onKeyUp(event) {
+        if (event.key === "ArrowLeft" || event.key.toLowerCase() === "a") input.left = false;
+        if (event.key === "ArrowRight" || event.key.toLowerCase() === "d") input.right = false;
+        if (event.key === "ArrowUp" || event.key.toLowerCase() === "w") input.up = false;
+        if (event.key === "ArrowDown" || event.key.toLowerCase() === "s") input.down = false;
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "slither-worm",
+        title: "Slither Worm",
+        creator: "Contributor",
+        genre: "Arcade survival",
+        clearCondition: "30초 동안 지렁이를 키우며 악마를 피해 생존하기",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          resetRun();
+          clearRun();
+          render();
+        },
+        forceFail() {
+          resetRun();
+          failRun("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
