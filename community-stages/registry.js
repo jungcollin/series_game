@@ -1,5 +1,21 @@
 window.COMMUNITY_STAGE_REGISTRY = [
   {
+    id: "vanishing-picks",
+    title: "Vanishing Picks",
+    creator: "Contributor",
+    genre: "Luck & Speed",
+    clearCondition: "사라지기 전에 통과 선택지를 고르세요",
+    path: "./vanishing-picks/index.html",
+  },
+  {
+    id: "lightning-dodge",
+    title: "Lightning Dodge",
+    creator: "Codex",
+    genre: "Arcade survival",
+    clearCondition: "35초 동안 번개 예고선을 보고 모든 낙뢰를 피하기",
+    path: "./lightning-dodge/index.html",
+  },
+  {
     id: "jump-hurdle",
     title: "Jump Hurdle",
     creator: "Contributor",
