@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const path = require("path");
 
 const {
   assertMobileLayoutMetrics,
@@ -10,6 +11,11 @@ const {
   parseStageRenderText,
   stageThumbnailPath,
 } = require("../scripts/check_stage.js");
+
+function loadStageKitExports() {
+  const stageKitPath = path.resolve(__dirname, "../../community-stages/stage-kit.js");
+  return require(stageKitPath);
+}
 
 test("parseChangedStageSlugs finds changed stage dirs, handles renames, and deduplicates", () => {
   const gitStatus = [
@@ -149,4 +155,94 @@ test("stageThumbnailPath points at the stage-local thumbnail.png file", () => {
     stageThumbnailPath("/tmp/repo", "meteor-dodge"),
     "/tmp/repo/community-stages/meteor-dodge/thumbnail.png"
   );
+});
+
+test("normalizeControlLayout returns tap_only defaults when layout is omitted", () => {
+  const stageKit = loadStageKitExports();
+  assert.equal(typeof stageKit.normalizeControlLayout, "function");
+
+  assert.deepEqual(stageKit.normalizeControlLayout(), {
+    preset: "tap_only",
+    labels: {},
+  });
+});
+
+test("buildControlPreset creates move2_action button definitions with overrides", () => {
+  const stageKit = loadStageKitExports();
+  assert.equal(typeof stageKit.buildControlPreset, "function");
+
+  assert.deepEqual(
+    stageKit.buildControlPreset({
+      preset: "move2_action",
+      labels: {
+        action: "대시",
+      },
+    }),
+    [
+      { action: "left", text: "◀", ariaLabel: "왼쪽으로 이동" },
+      { action: "right", text: "▶", ariaLabel: "오른쪽으로 이동" },
+      { action: "action", text: "대시", ariaLabel: "대시" },
+    ]
+  );
+});
+
+test("createAdvanceTimeRunner steps fixed dt, renders, and returns serialized output", () => {
+  const stageKit = loadStageKitExports();
+  assert.equal(typeof stageKit.createAdvanceTimeRunner, "function");
+
+  const calls = [];
+  const runAdvanceTime = stageKit.createAdvanceTimeRunner({
+    fixedDt: 1 / 60,
+    update(dt) {
+      calls.push(["update", dt]);
+    },
+    render() {
+      calls.push(["render"]);
+    },
+    serialize() {
+      calls.push(["serialize"]);
+      return "snapshot";
+    },
+  });
+
+  assert.equal(runAdvanceTime(16.67), "snapshot");
+  assert.deepEqual(calls, [
+    ["update", 1 / 60],
+    ["render"],
+    ["serialize"],
+  ]);
+});
+
+test("injectBaseStyles inserts the shared stylesheet before later stage-specific styles", () => {
+  const stageKit = loadStageKitExports();
+  assert.equal(typeof stageKit.injectBaseStyles, "function");
+
+  const existingStyle = { id: "stage-style" };
+  const headChildren = [existingStyle];
+  const head = {
+    firstChild: existingStyle,
+    insertBefore(node, before) {
+      headChildren.unshift(node);
+      this.firstChild = headChildren[0];
+      this.inserted = { node, before };
+    },
+  };
+  const doc = {
+    head,
+    getElementById() {
+      return null;
+    },
+    createElement(tagName) {
+      return {
+        tagName,
+        id: "",
+        textContent: "",
+      };
+    },
+  };
+
+  const styleNode = stageKit.injectBaseStyles(doc);
+  assert.equal(styleNode.id, "stage-kit-base-styles");
+  assert.equal(head.inserted.before, existingStyle);
+  assert.equal(headChildren[0], styleNode);
 });

@@ -24,7 +24,7 @@ function makeRepoFixture() {
   return repoRoot;
 }
 
-test("createStageInRepo scaffolds the minimal accessibility shell and metadata", () => {
+test("createStageInRepo scaffolds the Stage Kit shell with inferred control layout", () => {
   const repoRoot = makeRepoFixture();
   const output = createStageInRepo({
     repoRoot,
@@ -34,7 +34,7 @@ test("createStageInRepo scaffolds the minimal accessibility shell and metadata",
       creator: "Tester",
       "creator-github": "tester",
       genre: "arcade",
-      controls: "방향키",
+      controls: "좌우 이동, 화면 버튼으로 점프",
       "clear-condition": "10초 버티기",
       "fail-condition": "벽에 닿기",
       description: "테스트 설명",
@@ -53,15 +53,20 @@ test("createStageInRepo scaffolds the minimal accessibility shell and metadata",
   assert.match(stageHtml, /id="stage-instructions"/);
   assert.match(stageHtml, /aria-describedby="stage-instructions"/);
   assert.match(stageHtml, /tabindex="0"/);
-  assert.match(stageHtml, /canvas:focus-visible/);
-  assert.match(stageHtml, /function startFromTouch/);
+  assert.match(stageHtml, /<script src="\.\.\/stage-kit\.js"><\/script>/);
+  assert.match(stageHtml, /window\.StageKit\.create\(/);
+  assert.match(stageHtml, /creator:\s*\{\s*name: "Tester",\s*avatar: null,\s*github: "tester"\s*\}/s);
+  assert.match(
+    stageHtml,
+    /controlsLayout:\s*\{\s*preset: "move2_action",\s*labels: \{\s*action: "점프"\s*\}\s*\}/s
+  );
+  assert.match(stageHtml, /ctx\.installKeyboard\(\s*\{\s*Enter: "start"/s);
+  assert.match(stageHtml, /ctx\.installTouchStart/);
   assert.match(stageHtml, /touchstart/);
   assert.match(stageHtml, /모바일에서는 화면 터치나 버튼 조작도 함께 제공해야 합니다/);
   assert.match(stageHtml, /390픽셀 폭 모바일에서도 가로로 넘치지 않게 유지해야 합니다/);
-  assert.match(stageHtml, /\.mobile-controls__row\s*\{[\s\S]*flex-wrap:\s*wrap/);
-  assert.match(stageHtml, /@media \(max-width: 420px\)/);
-  assert.match(stageHtml, /prefers-reduced-motion: reduce/);
-  assert.match(stageHtml, /조작: 방향키/);
+  assert.match(stageHtml, /const CONTROLS = "좌우 이동, 화면 버튼으로 점프";/);
+  assert.match(stageHtml, /`조작: \$\{CONTROLS\}`/);
 
   const meta = JSON.parse(
     fs.readFileSync(path.join(repoRoot, "community-stages", "access-test", "meta.json"), "utf8")
@@ -71,7 +76,7 @@ test("createStageInRepo scaffolds the minimal accessibility shell and metadata",
   assert.equal(meta.creator.github, "tester");
   assert.equal(meta.clearCondition, "10초 버티기");
   assert.equal(meta.failCondition, "벽에 닿기");
-  assert.equal(meta.controls, "방향키");
+  assert.equal(meta.controls, "좌우 이동, 화면 버튼으로 점프");
 
   const registry = fs.readFileSync(path.join(repoRoot, "community-stages", "registry.js"), "utf8");
   assert.match(registry, /id: "access-test"/);
@@ -122,4 +127,34 @@ test("syncRegistry picks up a thumbnail file from the stage directory", () => {
 
   const registry = fs.readFileSync(path.join(repoRoot, "community-stages", "registry.js"), "utf8");
   assert.match(registry, /thumbnail: "\.\/thumb-test\/thumbnail\.png"/);
+});
+
+test("createStageInRepo respects an explicit controls preset override", () => {
+  const repoRoot = makeRepoFixture();
+
+  createStageInRepo({
+    repoRoot,
+    args: {
+      slug: "override-test",
+      title: "Override Test",
+      creator: "Tester",
+      genre: "arcade",
+      controls: "화면 터치로 시작",
+      "controls-preset": "move4_action",
+      "controls-action-label": "발사",
+      "clear-condition": "10초 버티기",
+      "fail-condition": "벽에 닿기",
+      description: "프리셋 오버라이드 테스트",
+    },
+  });
+
+  const stageHtml = fs.readFileSync(
+    path.join(repoRoot, "community-stages", "override-test", "index.html"),
+    "utf8"
+  );
+
+  assert.match(
+    stageHtml,
+    /controlsLayout:\s*\{\s*preset: "move4_action",\s*labels: \{\s*action: "발사"\s*\}\s*\}/s
+  );
 });
