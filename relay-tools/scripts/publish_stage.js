@@ -79,20 +79,29 @@ function resolveStageSlug(args, repoRoot) {
 }
 
 function collectStageFiles(repoRoot, stageDir) {
+  const registryPath = "community-stages/registry.js";
   const gitStatus = run("git", ["status", "--short"], repoRoot);
   const lines = String(gitStatus || "").split("\n").filter(Boolean);
   const files = [];
+  let hasRegistry = false;
   for (const line of lines) {
     let changedPath = line.slice(3).trim();
     if (changedPath.includes(" -> ")) {
       changedPath = changedPath.split(" -> ").pop().trim();
     }
-    if (
-      changedPath.startsWith(`community-stages/${stageDir}/`) ||
-      changedPath === "community-stages/registry.js"
-    ) {
+    if (changedPath.startsWith(`community-stages/${stageDir}/`)) {
       files.push(changedPath);
     }
+    if (changedPath === registryPath) {
+      hasRegistry = true;
+      files.push(changedPath);
+    }
+  }
+  // Always include registry.js — syncRegistry() runs before this function,
+  // so the file on disk is correct. git status may miss it depending on
+  // branch-switch timing, so include it unconditionally.
+  if (!hasRegistry) {
+    files.push(registryPath);
   }
   return files;
 }

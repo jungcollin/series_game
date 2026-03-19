@@ -70,5 +70,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 역주행으로 생존하면 클리어",
     thumbnail: "./wrong-way-runner/thumbnail.png",
     path: "./wrong-way-runner/index.html",
+  },
+  {
+    id: "secret-riceball",
+    title: "몰래 주먹밥",
+    creator: { name: "collin", avatar: null, github: "jungcollin" },
+    genre: "Timing",
+    clearCondition: "선생님한테 안 걸리고 주먹밥을 모두 먹으면 클리어",
+    thumbnail: "./secret-riceball/thumbnail.png",
+    path: "./secret-riceball/index.html",
   }
 ];
