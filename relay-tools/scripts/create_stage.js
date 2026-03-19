@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { metaPathForDir, stagePathForDir, syncRegistry } = require("./stage_metadata");
 
 function parseArgs(argv) {
   const result = {};
@@ -42,64 +43,114 @@ function escapeTemplate(value) {
   return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+function readRequiredArg(args, names, label) {
+  for (const name of names) {
+    const value = args[name];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  throw new Error(`Missing required argument: --${names[0]} (${label})`);
+}
+
+function readOptionalNumber(args, names) {
+  for (const name of names) {
+    if (!(name in args)) {
+      continue;
+    }
+    const parsed = Number(args[name]);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`Expected a positive number for --${name}`);
+    }
+    return parsed;
+  }
+  return null;
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
   const templatePath = path.join(repoRoot, "relay-tools/templates/stage-template.html");
-  const registryPath = path.join(repoRoot, "community-stages/registry.js");
 
-  const description = args.description || args.desc || "";
-  const slug = slugify(args.slug || args.title || description);
+  const description = (args.description || args.desc || args.title || "").trim();
+  const slug = slugify(args.slug || args.id || args.title || description);
   if (!slug) {
     throw new Error("Missing stage slug. Pass --slug, --title, or --description.");
   }
 
   const title = args.title || titleCaseFromSlug(slug);
-  const creatorName = args.creator || "Contributor";
+  const stageId = args.id || slug;
+  const creatorName = readRequiredArg(args, ["creator"], "creator name");
   const creatorAvatar = args["creator-avatar"] || null;
   const creatorGithub = args["creator-github"] || null;
-  const creator = creatorName;
-  const genre = args.genre || "Arcade stage";
-  const clearCondition = args["clear-condition"] || args.clear || "스테이지 목표를 달성하기";
-  const failCopy = args["fail-copy"] || "실패 조건에 맞춰 즉시 종료됩니다.";
+  const genre = readRequiredArg(args, ["genre"], "stage genre");
+  const clearCondition = readRequiredArg(
+    args,
+    ["clear-condition", "clear"],
+    "clear condition"
+  );
+  const failCondition = readRequiredArg(
+    args,
+    ["fail-condition", "fail"],
+    "fail condition"
+  );
+  const controls = readRequiredArg(args, ["controls"], "player controls");
+  const estimatedSeconds = readOptionalNumber(args, ["estimated-seconds"]);
   const stageDir = path.join(repoRoot, "community-stages", slug);
-  const stagePath = path.join(stageDir, "index.html");
+  const stagePath = stagePathForDir(repoRoot, slug);
+  const metaPath = metaPathForDir(repoRoot, slug);
 
-  if (fs.existsSync(stagePath) && !args.force) {
-    throw new Error(`Stage already exists: ${path.relative(repoRoot, stagePath)}`);
+  if ((fs.existsSync(stagePath) || fs.existsSync(metaPath)) && !args.force) {
+    throw new Error(`Stage already exists: community-stages/${slug}`);
   }
 
   const template = fs.readFileSync(templatePath, "utf8");
   const rendered = template
-    .replace(/__STAGE_ID__/g, slug)
-    .replace(/__TITLE__/g, title)
-    .replace(/__CREATOR__/g, creator)
-    .replace(/__GENRE__/g, genre)
-    .replace(/__CLEAR_CONDITION__/g, clearCondition)
+    .replace(/__STAGE_ID__/g, stageId)
+    .replace(/__TITLE__/g, escapeTemplate(title))
+    .replace(/__CREATOR__/g, escapeTemplate(creatorName))
+    .replace(/__GENRE__/g, escapeTemplate(genre))
+    .replace(/__CLEAR_CONDITION__/g, escapeTemplate(clearCondition))
+    .replace(/__FAIL_CONDITION__/g, escapeTemplate(failCondition))
+    .replace(/__CONTROLS__/g, escapeTemplate(controls))
     .replace(/__DESCRIPTION__/g, escapeTemplate(description || title))
-    .replace(/__FAIL_COPY__/g, escapeTemplate(failCopy));
+    ;
 
   fs.mkdirSync(stageDir, { recursive: true });
   fs.writeFileSync(stagePath, rendered);
+  fs.writeFileSync(
+    metaPath,
+    `${JSON.stringify(
+      {
+        id: stageId,
+        title,
+        description: description || title,
+        creator: {
+          name: creatorName,
+          avatar: creatorAvatar,
+          github: creatorGithub,
+        },
+        genre,
+        clearCondition,
+        failCondition,
+        controls,
+        estimatedSeconds,
+      },
+      null,
+      2
+    )}\n`
+  );
 
-  const registryText = fs.readFileSync(registryPath, "utf8");
-  if (!registryText.includes(`id: "${slug}"`)) {
-    const avatarStr = creatorAvatar ? `"${creatorAvatar}"` : "null";
-    const githubStr = creatorGithub ? `"${creatorGithub}"` : "null";
-    const entry = `  {\n    id: "${slug}",\n    title: "${title}",\n    creator: { name: "${creatorName}", avatar: ${avatarStr}, github: ${githubStr} },\n    genre: "${genre}",\n    clearCondition: "${clearCondition}",\n    path: "./${slug}/index.html",\n  },\n`;
-    const updated = registryText.replace(
-      /window\.COMMUNITY_STAGE_REGISTRY = \[\n/,
-      `window.COMMUNITY_STAGE_REGISTRY = [\n${entry}`
-    );
-    fs.writeFileSync(registryPath, updated);
-  }
+  syncRegistry(repoRoot);
 
   process.stdout.write(
     JSON.stringify(
       {
         stagePath: path.relative(repoRoot, stagePath),
-        registryPath: path.relative(repoRoot, registryPath),
-        slug,
+        metaPath: path.relative(repoRoot, metaPath),
+        registryPath: "community-stages/registry.js",
+        slug: stageId,
+        directory: slug,
         title,
       },
       null,

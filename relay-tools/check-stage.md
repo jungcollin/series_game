@@ -1,8 +1,8 @@
 # /check-stage
 
-입력은 선택적으로 `stage-slug` 하나다.
+입력은 `stage-slug` 하나를 명시하는 것을 기본으로 한다.
 - 예: `/check-stage meteor-dodge-run`
-- 생략 시: Git 변경 파일에서 `community-stages/<stage-slug>/...`를 자동 추론한다.
+- 자동 추론도 가능하지만, 다음 제작자 프롬프트에서는 항상 slug를 명시한다.
 
 목표:
 - 스테이지가 단독 실행과 호스트 iframe 실행 모두에서 계약을 지키는지 확인한다.
@@ -20,7 +20,10 @@
 3. 통과 기준:
    - `community-stages/index.html`에서 카드가 보임
    - 스테이지 단독 페이지가 열림
+   - `meta.json` 필수 필드가 존재함
+   - `registry.js`가 메타와 동기화되어 있음
    - 필수 전역 인터페이스가 존재함
+   - `meta.json`의 조작법/클리어 조건/실패 조건 문구가 스테이지 소스에 반영되어 있음
    - `window.relayStageDebug.forceClear()`와 `forceFail()`가 동작함
    - same-origin 호스트 하네스에서 `RelayHost` ready/cleared/failed 콜백이 잡힘
    - 콘솔 에러가 없음

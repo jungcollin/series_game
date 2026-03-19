@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const { loadAllStageMetas } = require("./stage_metadata");
 
 function parseArgs(argv) {
   const result = {};
@@ -35,24 +35,6 @@ function listChangedFiles(repoRoot, baseRef, headRef) {
   const diffRange = `${baseRef}...${headRef}`;
   const output = run("git", ["diff", "--name-only", diffRange], repoRoot);
   return output ? output.split("\n").filter(Boolean) : [];
-}
-
-function parseRegistryEntries(repoRoot) {
-  const registryPath = path.join(repoRoot, "community-stages/registry.js");
-  const text = fs.readFileSync(registryPath, "utf8");
-  const entries = [];
-  const pattern =
-    /id: "([^"]+)"[\s\S]*?title: "([^"]+)"[\s\S]*?path: "\.\/([^"]+)\/index\.html"/g;
-  let match = pattern.exec(text);
-  while (match) {
-    entries.push({
-      id: match[1],
-      title: match[2],
-      dir: match[3],
-    });
-    match = pattern.exec(text);
-  }
-  return entries;
 }
 
 function extractStageIds(changedFiles, registryEntries) {
@@ -149,7 +131,7 @@ function main() {
   const baseUrl = args["base-url"] || "http://127.0.0.1:4173";
 
   const changedFiles = listChangedFiles(repoRoot, baseRef, headRef);
-  const registryEntries = parseRegistryEntries(repoRoot);
+  const registryEntries = loadAllStageMetas(repoRoot);
   const stageSlugs = extractStageIds(changedFiles, registryEntries);
   const nonStageFiles = collectNonStageFiles(changedFiles, registryEntries, stageSlugs);
   const risks = scanStageRisks(repoRoot, registryEntries, stageSlugs, changedFiles);

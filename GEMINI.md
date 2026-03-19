@@ -7,15 +7,16 @@ If the user message starts with one of these commands, follow the mapped documen
 - `/make-stage ...`
   - Read `relay-tools/create-stage.md` (repo root relative)
   - Prefer `node relay-tools/scripts/create_stage.js ...`
+  - Do not run the scaffold until `creator`, `genre`, `controls`, `clear-condition`, and `fail-condition` are fixed
 - `/check-stage ...`
   - Read `relay-tools/check-stage.md` (repo root relative)
   - Start local server first: `python3 -m http.server 4173 &`
-  - Run `node relay-tools/scripts/check_stage.js --base-url http://127.0.0.1:4173` (or `--stage <stage-slug>`)
+  - Run `node relay-tools/scripts/check_stage.js --stage <stage-slug> --base-url http://127.0.0.1:4173`
   - Give the user browser URLs to verify visually
 - `/publish-stage ...`
   - Read `relay-tools/publish-stage.md` (repo root relative)
-  - Prefer `node relay-tools/scripts/publish_stage.js --pr` (or `--stage <stage-slug>`)
-  - This creates branch, commits, pushes, and opens a GitHub PR in one step
+  - Prefer `node relay-tools/scripts/publish_stage.js --stage <stage-slug> --pr`
+  - This creates branch if needed, commits, pushes, and either updates the open PR for that branch or creates a new PR
   - Fork workflow is auto-detected (upstream remote = fork, no upstream = direct)
 
 Rules:

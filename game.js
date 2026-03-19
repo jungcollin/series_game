@@ -456,12 +456,12 @@ function updateRunHeader() {
   }
 
   if (state.status === "gameover") {
-    runStageTitleEl.textContent = "런 종료";
+    runStageTitleEl.textContent = "플레이 종료";
     return;
   }
 
   if (state.status === "complete") {
-    runStageTitleEl.textContent = "이번 런의 모든 미플레이 스테이지를 완료했습니다";
+    runStageTitleEl.textContent = "이번 플레이의 모든 미플레이 스테이지를 완료했습니다";
     return;
   }
 
@@ -547,14 +547,14 @@ function handleStageLoadTimeout() {
   clearReadyTimer();
   state.status = "load-error";
   markStageUnavailable(state.currentStage.id);
-  updateRunHeader();
-  showOverlay({
-    kicker: "Stage Error",
-    title: "LOAD FAILED",
-    copy: `${state.currentStage.title} 스테이지가 준비 신호를 보내지 못했습니다. 이번 런에서는 제외하고 다음 스테이지로 건너뛸 수 있습니다.`,
-    buttonLabel: "다음 스테이지로",
-    buttonAction: "skip-stage",
-    secondaryButtonLabel: "처음부터 다시",
+    updateRunHeader();
+    showOverlay({
+      kicker: "Stage Error",
+      title: "LOAD FAILED",
+      copy: `${state.currentStage.title} 스테이지가 준비 신호를 보내지 못했습니다. 이번 플레이에서는 제외하고 다음 스테이지로 건너뛸 수 있습니다.`,
+      buttonLabel: "다음 스테이지로",
+      buttonAction: "skip-stage",
+      secondaryButtonLabel: "처음부터 다시",
     secondaryButtonAction: "restart",
   });
 }
@@ -581,7 +581,7 @@ function startNextRandomStage() {
     showOverlay({
       kicker: "Run Complete",
       title: "ALL CLEAR",
-      copy: `이번 런에서 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
+      copy: `이번 플레이에서 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
       buttonLabel: "처음부터 다시",
     });
     return;

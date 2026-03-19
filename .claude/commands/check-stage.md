@@ -1,8 +1,8 @@
 # /check-stage
 
-입력은 선택적으로 `stage-slug` 하나다.
+입력은 `stage-slug` 하나를 명시하는 것을 기본으로 한다.
 - 예: `/check-stage meteor-dodge-run`
-- 생략 시: Git 변경 파일에서 `community-stages/<stage-slug>/...`를 자동 추론한다.
+- 자동 추론도 가능하지만, 다음 제작자 프롬프트에서는 항상 slug를 명시한다.
 
 이 커맨드의 상세 명세는 `relay-tools/check-stage.md`에 있다.
 
@@ -29,6 +29,12 @@ SERVER_PID=$!
 ```bash
 node relay-tools/scripts/check_stage.js --stage <stage-slug> --base-url http://127.0.0.1:4173
 ```
+
+검증에는 아래가 포함된다:
+- `meta.json` 필수 필드 존재
+- `registry.js`와 메타 동기화 여부
+- 시작 화면의 조작법/클리어 조건/실패 조건 문구 반영
+- relay 인터페이스 및 host 콜백 계약
 
 ### 3. 결과 판정
 

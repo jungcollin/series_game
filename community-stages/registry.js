@@ -4,7 +4,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     title: "영철을 피해라",
     creator: { name: "zero4uu", avatar: null, github: "zero4uu" },
     genre: "Arcade survival",
-    clearCondition: "30초 동안 지렁이를 키우며 영철를 피해 생존하기",
+    clearCondition: "30초 동안 영철에 닿지 않고 생존하기",
     path: "./slither-worm/index.html",
   },
   {
@@ -44,7 +44,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     title: "Quick Plus 3",
     creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Math quiz",
-    clearCondition: "쉬운 더하기 3문제를 모두 맞히세요.",
+    clearCondition: "쉬운 더하기 3문제를 모두 맞히기",
     path: "./quick-plus-3/index.html",
   },
   {
@@ -52,7 +52,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     title: "Poop Rain 60",
     creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade survival",
-    clearCondition: "60초 동안 하늘에서 떨어지는 벡을 피하세요.",
+    clearCondition: "60초 동안 하늘에서 떨어지는 똥을 피하기",
     path: "./poop-rain/index.html",
   },
   {
@@ -62,5 +62,5 @@ window.COMMUNITY_STAGE_REGISTRY = [
     genre: "Arcade",
     clearCondition: "30초 안에 두더지 20마리 이상 잡으면 클리어",
     path: "./whack-a-mole/index.html",
-  },
+  }
 ];
