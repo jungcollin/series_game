@@ -61,5 +61,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 안에 두더지 20마리 이상 잡으면 클리어",
     thumbnail: "./whack-a-mole/thumbnail.png",
     path: "./whack-a-mole/index.html",
+  },
+  {
+    id: "wrong-way-runner",
+    title: "Wrong Way Runner",
+    creator: { name: "collin", avatar: null, github: "collin-gits" },
+    genre: "3D Runner",
+    clearCondition: "20초 동안 역주행으로 생존하면 클리어",
+    thumbnail: "./wrong-way-runner/thumbnail.png",
+    path: "./wrong-way-runner/index.html",
   }
 ];
