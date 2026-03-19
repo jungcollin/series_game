@@ -7,6 +7,9 @@ const relayOverlayKickerEl = document.querySelector("#relay-overlay-kicker");
 const relayOverlayTitleEl = document.querySelector("#relay-overlay-title");
 const relayOverlayCopyEl = document.querySelector("#relay-overlay-copy");
 const relayRestartBtn = document.querySelector("#relay-restart");
+const relaySecondaryActionBtn = document.querySelector("#relay-secondary-action");
+
+const STAGE_READY_TIMEOUT_MS = 4000;
 
 const promptStepCopyButtons = document.querySelectorAll(".prompt-step-copy");
 const openPromptBtn = document.querySelector("#open-prompt");
@@ -17,9 +20,13 @@ const state = {
   runId: "",
   clearCount: 0,
   history: [],
+  unavailableStageIds: [],
   currentStage: null,
   status: "idle",
   transitionTimer: 0,
+  readyTimer: 0,
+  overlayPrimaryAction: "restart",
+  overlaySecondaryAction: "",
 };
 
 function makeRunId() {
@@ -79,22 +86,52 @@ function copyPromptStep(button) {
 }
 
 function hideOverlay() {
+  state.overlayPrimaryAction = "restart";
+  state.overlaySecondaryAction = "";
+  if (relaySecondaryActionBtn) {
+    relaySecondaryActionBtn.hidden = true;
+    relaySecondaryActionBtn.textContent = "";
+  }
   relayOverlayEl.hidden = true;
 }
 
-function showOverlay({ kicker, title, copy, buttonLabel = "다시 시작" }) {
+function showOverlay({
+  kicker,
+  title,
+  copy,
+  buttonLabel = "다시 시작",
+  buttonAction = "restart",
+  secondaryButtonLabel = "",
+  secondaryButtonAction = "",
+}) {
+  state.overlayPrimaryAction = buttonAction;
+  state.overlaySecondaryAction = secondaryButtonAction;
   relayOverlayKickerEl.textContent = kicker;
   relayOverlayTitleEl.textContent = title;
   relayOverlayCopyEl.textContent = copy;
   relayRestartBtn.textContent = buttonLabel;
+  if (relaySecondaryActionBtn) {
+    if (secondaryButtonLabel) {
+      relaySecondaryActionBtn.textContent = secondaryButtonLabel;
+      relaySecondaryActionBtn.hidden = false;
+    } else {
+      relaySecondaryActionBtn.hidden = true;
+      relaySecondaryActionBtn.textContent = "";
+    }
+  }
   relayOverlayEl.hidden = false;
 }
 
 function updateRunHeader() {
-  runClearCountEl.textContent = `${state.clearCount} clears`;
+  runClearCountEl.textContent = `${state.clearCount}개 클리어`;
 
   if (state.status === "loading") {
     runStageTitleEl.textContent = "랜덤 스테이지를 불러오는 중...";
+    return;
+  }
+
+  if (state.status === "load-error") {
+    runStageTitleEl.textContent = "스테이지 로드 실패";
     return;
   }
 
@@ -123,6 +160,20 @@ function clearTransitionTimer() {
   }
 }
 
+function clearReadyTimer() {
+  if (state.readyTimer) {
+    window.clearTimeout(state.readyTimer);
+    state.readyTimer = 0;
+  }
+}
+
+function markStageUnavailable(stageId) {
+  if (!stageId || state.history.includes(stageId) || state.unavailableStageIds.includes(stageId)) {
+    return;
+  }
+  state.unavailableStageIds.push(stageId);
+}
+
 function buildStageUrl(stage) {
   const basePath = normalizeStagePath(stage.path);
   if (!window.RelayRuntime) {
@@ -141,8 +192,9 @@ function pickNextStage() {
     return null;
   }
 
+  const excluded = new Set([...state.history, ...state.unavailableStageIds]);
+
   if (!window.RelayRuntime) {
-    const excluded = new Set(state.history);
     const candidates = COMMUNITY_STAGE_REGISTRY.filter((entry) => !excluded.has(entry.id));
     if (!candidates.length) {
       return null;
@@ -151,17 +203,41 @@ function pickNextStage() {
   }
 
   return window.RelayRuntime.pickRandomNext(COMMUNITY_STAGE_REGISTRY, {
-    history: state.history,
+    history: Array.from(excluded),
     currentStageId: state.currentStage?.id || null,
   });
 }
 
+function handleStageLoadTimeout() {
+  if (!state.currentStage || state.status !== "loading") {
+    return;
+  }
+
+  clearReadyTimer();
+  state.status = "load-error";
+  markStageUnavailable(state.currentStage.id);
+  updateRunHeader();
+  showOverlay({
+    kicker: "Stage Error",
+    title: "LOAD FAILED",
+    copy: `${state.currentStage.title} 스테이지가 준비 신호를 보내지 못했습니다. 이번 런에서는 제외하고 다음 스테이지로 건너뛸 수 있습니다.`,
+    buttonLabel: "다음 스테이지로",
+    buttonAction: "skip-stage",
+    secondaryButtonLabel: "처음부터 다시",
+    secondaryButtonAction: "restart",
+  });
+}
+
 function loadStage(stage) {
+  clearReadyTimer();
   state.currentStage = stage;
   state.status = "loading";
   hideOverlay();
   updateRunHeader();
   relayFrameEl.src = buildStageUrl(stage);
+  state.readyTimer = window.setTimeout(() => {
+    handleStageLoadTimeout();
+  }, STAGE_READY_TIMEOUT_MS);
 }
 
 function startNextRandomStage() {
@@ -184,9 +260,11 @@ function startNextRandomStage() {
 
 function startNewRun() {
   clearTransitionTimer();
+  clearReadyTimer();
   state.runId = makeRunId();
   state.clearCount = 0;
   state.history = [];
+  state.unavailableStageIds = [];
   state.currentStage = null;
   state.status = "loading";
   hideOverlay();
@@ -208,6 +286,7 @@ function handleStageCleared(payload = {}) {
   if (state.status === "gameover" || state.status === "complete") {
     return;
   }
+  clearReadyTimer();
   markCurrentStageCleared();
   state.status = "transition";
   if (payload.stageTitle) {
@@ -223,6 +302,7 @@ function handleStageCleared(payload = {}) {
 
 function handleStageFailed(payload = {}) {
   clearTransitionTimer();
+  clearReadyTimer();
   state.status = "gameover";
   updateRunHeader();
   const stageTitle = payload.stageTitle || state.currentStage?.title || "현재 스테이지";
@@ -231,16 +311,27 @@ function handleStageFailed(payload = {}) {
     title: "GAME OVER",
     copy: `${stageTitle}에서 실패했습니다. 총 ${state.clearCount}개 스테이지를 클리어했습니다.`,
     buttonLabel: "처음부터 다시",
+    buttonAction: "restart",
   });
+}
+
+function performOverlayAction(action) {
+  if (action === "skip-stage") {
+    clearTransitionTimer();
+    clearReadyTimer();
+    startNextRandomStage();
+    return;
+  }
+
+  startNewRun();
 }
 
 window.RelayHost = {
   onStageReady(meta = {}) {
-    if (meta.title && state.currentStage && meta.id === state.currentStage.id) {
+    if (state.status === "loading" && meta.title && state.currentStage && meta.id === state.currentStage.id) {
+      clearReadyTimer();
       state.currentStage = { ...state.currentStage, ...meta };
-      if (state.status === "loading") {
-        state.status = "playing";
-      }
+      state.status = "playing";
       updateRunHeader();
     }
   },
@@ -256,16 +347,18 @@ window.__relayHostDebug = {
   startNewRun,
   handleStageCleared,
   handleStageFailed,
+  handleStageLoadTimeout,
 };
 
 relayFrameEl?.addEventListener("load", () => {
-  if (state.status === "loading") {
-    state.status = "playing";
-    updateRunHeader();
-  }
+  updateRunHeader();
 });
+relayFrameEl?.addEventListener("error", handleStageLoadTimeout);
 
-relayRestartBtn?.addEventListener("click", startNewRun);
+relayRestartBtn?.addEventListener("click", () => performOverlayAction(state.overlayPrimaryAction));
+relaySecondaryActionBtn?.addEventListener("click", () => {
+  performOverlayAction(state.overlaySecondaryAction || "restart");
+});
 
 promptStepCopyButtons.forEach((button) => {
   button.addEventListener("click", () => copyPromptStep(button));
@@ -286,7 +379,7 @@ document.addEventListener("keydown", (event) => {
 
   if (event.key === "Enter" && !relayOverlayEl.hidden) {
     event.preventDefault();
-    startNewRun();
+    performOverlayAction(state.overlayPrimaryAction);
   }
 });
 

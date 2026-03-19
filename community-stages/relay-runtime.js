@@ -85,7 +85,7 @@
     const played = new Set(context.history);
     listEl.innerHTML = registry
       .map((entry) => {
-        const playedBadge = played.has(entry.id) ? `<span class="card-status">Played</span>` : "";
+        const playedBadge = played.has(entry.id) ? `<span class="card-status">진행함</span>` : "";
         const href = buildStageUrl(entry.path, context, context.previousStageId);
         return `
           <a class="stage-card" href="${href}">
