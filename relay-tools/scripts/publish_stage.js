@@ -72,19 +72,80 @@ function resolveStageSlug(args, repoRoot) {
   );
 }
 
+function collectStageFiles(repoRoot, stageSlug) {
+  const gitStatus = run("git", ["status", "--short"], repoRoot);
+  const lines = String(gitStatus || "").split("\n").filter(Boolean);
+  const files = [];
+  for (const line of lines) {
+    let changedPath = line.slice(3).trim();
+    if (changedPath.includes(" -> ")) {
+      changedPath = changedPath.split(" -> ").pop().trim();
+    }
+    if (
+      changedPath.startsWith(`community-stages/${stageSlug}/`) ||
+      changedPath === "community-stages/registry.js"
+    ) {
+      files.push(changedPath);
+    }
+  }
+  return files;
+}
+
+function ensureBranch(repoRoot, stageSlug) {
+  const branchName = `stage/${stageSlug}`;
+  const currentBranch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], repoRoot);
+  if (currentBranch === branchName) {
+    return branchName;
+  }
+  try {
+    run("git", ["checkout", "-b", branchName], repoRoot);
+  } catch (_err) {
+    run("git", ["checkout", branchName], repoRoot);
+  }
+  return branchName;
+}
+
+function detectUpstreamRepo(repoRoot) {
+  // Check if 'upstream' remote exists (fork workflow)
+  try {
+    const upstreamUrl = run("git", ["remote", "get-url", "upstream"], repoRoot);
+    // Extract owner/repo from upstream URL
+    const match = upstreamUrl.match(/github\.com[:/]([^/]+\/[^/.]+)/);
+    if (match) {
+      return match[1].replace(/\.git$/, "");
+    }
+  } catch (_err) {
+    // No upstream remote = working on the original repo directly
+  }
+  return null;
+}
+
+function getOriginOwner(repoRoot) {
+  try {
+    const originUrl = run("git", ["remote", "get-url", "origin"], repoRoot);
+    const match = originUrl.match(/github\.com[:/]([^/]+)\//);
+    if (match) {
+      return match[1];
+    }
+  } catch (_err) {
+    // ignore
+  }
+  return null;
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
   const stageSlug = resolveStageSlug(args, repoRoot);
-  const baseUrl = args["base-url"] || "http://series-game.localhost:1355";
+  const baseUrl = args["base-url"] || "http://127.0.0.1:4173";
   const stageDir = path.join(repoRoot, "community-stages", stageSlug);
   const stagePath = path.join(stageDir, "index.html");
-  const registryPath = path.join(repoRoot, "community-stages/registry.js");
 
   if (!fs.existsSync(stagePath)) {
     throw new Error(`Stage file not found: ${path.relative(repoRoot, stagePath)}`);
   }
 
+  // Run check
   const checkOutput = run("node", ["relay-tools/scripts/check_stage.js", "--stage", stageSlug, "--base-url", baseUrl], repoRoot);
   const gitStatus = run("git", ["status", "--short"], repoRoot);
   const commitMessage = `feat: add relay stage ${stageSlug}`;
@@ -103,23 +164,61 @@ function main() {
     "- Fill in the fail condition here.",
     "",
     "## Test",
-    `- node relay-tools/scripts/check_stage.js --stage ${stageSlug}`,
+    `- \`node relay-tools/scripts/check_stage.js --stage ${stageSlug}\``,
   ].join("\n");
 
-  if (args.commit) {
-    run("git", ["add", `community-stages/${stageSlug}`, "community-stages/registry.js"], repoRoot);
+  // --pr implies --commit and --push, then creates a GitHub PR
+  const doPr = Boolean(args.pr);
+  const doCommit = doPr || Boolean(args.commit);
+  const doPush = doPr || Boolean(args.push);
+
+  let branch = "";
+  let committed = false;
+  let pushed = false;
+  let prUrl = "";
+  let isFork = false;
+
+  // Detect fork vs direct workflow
+  const upstreamRepo = detectUpstreamRepo(repoRoot);
+  const originOwner = getOriginOwner(repoRoot);
+  isFork = Boolean(upstreamRepo);
+
+  if (doCommit) {
+    if (doPr) {
+      branch = ensureBranch(repoRoot, stageSlug);
+    }
+
+    const stageFiles = collectStageFiles(repoRoot, stageSlug);
+    if (stageFiles.length === 0) {
+      throw new Error(`No changed files found for stage: ${stageSlug}`);
+    }
+    run("git", ["add", ...stageFiles], repoRoot);
     run("git", ["commit", "-m", commitMessage], repoRoot);
+    committed = true;
   }
 
-  let pushed = false;
-  let branch = "";
-  if (args.push) {
-    branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], repoRoot);
+  if (doPush) {
+    if (!branch) {
+      branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], repoRoot);
+    }
     if (!branch || branch === "HEAD") {
       throw new Error("Cannot push from detached HEAD.");
     }
-    run("git", ["push", "origin", branch], repoRoot);
+    // Always push to origin (which is the fork for forked repos)
+    run("git", ["push", "-u", "origin", branch], repoRoot);
     pushed = true;
+  }
+
+  if (doPr) {
+    const ghArgs = ["pr", "create", "--title", prTitle, "--body", prBody, "--base", "main"];
+    if (isFork) {
+      // For fork workflow: create PR against the upstream repo
+      // gh pr create --repo upstream/repo --head fork-owner:branch
+      ghArgs.push("--repo", upstreamRepo);
+      ghArgs.push("--head", `${originOwner}:${branch}`);
+    }
+    const ghOutput = run("gh", ghArgs, repoRoot);
+    prUrl = ghOutput.trim();
   }
 
   process.stdout.write(
@@ -132,9 +231,12 @@ function main() {
         commitMessage,
         prTitle,
         prBody,
-        committed: Boolean(args.commit),
+        committed,
         pushed,
         branch,
+        isFork,
+        upstreamRepo: upstreamRepo || null,
+        prUrl,
       },
       null,
       2

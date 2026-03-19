@@ -5,14 +5,17 @@ This repository defines a project-local stage workflow. Do not rely on global sk
 If the user message starts with one of these commands, follow the mapped document in this repo:
 
 - `/make-stage ...`
-  - Read [relay-tools/create-stage.md](/Users/collin/Project/etc/series_game/relay-tools/create-stage.md)
+  - Read `relay-tools/create-stage.md` (repo root relative)
   - Prefer `node relay-tools/scripts/create_stage.js ...`
 - `/check-stage ...`
-  - Read [relay-tools/check-stage.md](/Users/collin/Project/etc/series_game/relay-tools/check-stage.md)
-  - Run `node relay-tools/scripts/check_stage.js` (or `--stage <stage-slug>`)
+  - Read `relay-tools/check-stage.md` (repo root relative)
+  - Start local server first: `python3 -m http.server 4173 &`
+  - Run `node relay-tools/scripts/check_stage.js --base-url http://127.0.0.1:4173` (or `--stage <stage-slug>`)
+  - Give the user browser URLs to verify visually
 - `/publish-stage ...`
-  - Read [relay-tools/publish-stage.md](/Users/collin/Project/etc/series_game/relay-tools/publish-stage.md)
-  - Prefer `node relay-tools/scripts/publish_stage.js` (or `--stage <stage-slug>`)
+  - Read `relay-tools/publish-stage.md` (repo root relative)
+  - Prefer `node relay-tools/scripts/publish_stage.js --pr` (or `--stage <stage-slug>`)
+  - This creates branch, commits, pushes, and opens a GitHub PR in one step
 
 Rules:
 - Keep all workflow files inside this repository only.

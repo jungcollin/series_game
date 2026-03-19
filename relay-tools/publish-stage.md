@@ -5,25 +5,29 @@
 - 생략 시: Git 변경 파일에서 `community-stages/<stage-slug>/...`를 자동 추론한다.
 
 목표:
-- 스테이지를 리뷰 가능한 상태로 정리하고, 필요하면 커밋/푸시까지 준비한다.
+- 스테이지 검증 → 브랜치 생성 → 커밋 → 푸시 → PR 생성을 한 번에 수행한다.
 
 순서:
-1. 먼저 검증을 다시 돌린다.
-   - 기본: `node relay-tools/scripts/publish_stage.js`
-   - 명시: `node relay-tools/scripts/publish_stage.js --stage <stage-slug>`
-2. 이 스크립트는 기본적으로 아래를 수행한다.
-   - `check_stage.js` 재실행
-   - 관련 변경 파일 확인
-   - PR 제목/본문 초안 출력
-   - GitHub PR 자동 검토는 `.github/workflows/relay-pr-review.yml` 에서 별도로 수행된다.
-3. 사용자가 실제 커밋을 원하면 아래 옵션을 붙인다.
-   - 커밋: `--commit`
-   - 푸시: `--push`
-4. 커밋 메시지는 `feat: add relay stage <stage-slug>` 형식을 사용한다.
+1. 로컬 서버가 안 떠 있으면 먼저 기동한다.
+   - `python3 -m http.server 4173 &`
+2. 아래 스크립트를 `--pr` 플래그로 실행한다.
+   - `node relay-tools/scripts/publish_stage.js --stage <stage-slug> --pr --base-url http://127.0.0.1:4173`
+3. `--pr` 플래그는 아래를 자동 수행한다.
+   - `check_stage.js` 재실행 (검증 통과 필수)
+   - 브랜치 생성: `stage/<stage-slug>` (이미 있으면 그대로 사용)
+   - 관련 파일 스테이징: `community-stages/<slug>/`, `community-stages/registry.js`
+   - 커밋: `feat: add relay stage <stage-slug>`
+   - 푸시: `git push -u origin stage/<stage-slug>`
+   - PR 생성: `gh pr create` (fork/direct 자동 감지)
+   - PR URL 출력
+4. Fork vs Direct 워크플로우는 자동 감지된다.
+   - upstream remote가 있으면 fork: origin(fork)에 push → upstream(원본)에 PR
+   - upstream remote가 없으면 direct: origin(원본)에 push → 같은 레포에 PR
+5. 검증이 실패하면 PR 생성을 중단하고 실패 원인을 출력한다.
+6. `--pr` 없이 실행하면 기존처럼 JSON 출력만 한다 (dry-run).
 
 출력:
 - 검증 결과
-- 현재 변경 파일
-- PR 제목
-- PR 본문 초안
-- 커밋/푸시를 실제로 했는지 여부
+- 변경된 파일 목록
+- fork 여부
+- PR URL
