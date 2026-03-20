@@ -88,5 +88,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "총 5구 안에 홈런 3개를 치면 클리어",
     thumbnail: "./home-run-relay/thumbnail.png",
     path: "./home-run-relay/index.html",
+  },
+  {
+    id: "penalty-kick",
+    title: "승부차기",
+    creator: { name: "bobby", avatar: null, github: "ogq-bobby" },
+    genre: "Sports",
+    clearCondition: "7번의 킥 중 4골 이상 성공",
+    thumbnail: "./penalty-kick/thumbnail.png",
+    path: "./penalty-kick/index.html",
   }
 ];
