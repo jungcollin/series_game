@@ -214,5 +214,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "10초 버티기",
     thumbnail: "./shape-dodger-2/thumbnail.png",
     path: "./shape-dodger-2/index.html",
+  },
+  {
+    id: "ninja-jump",
+    title: "닌자 점프",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "Arcade",
+    clearCondition: "15초 동안 수리검을 피해 살아남기",
+    thumbnail: "./ninja-jump/thumbnail.png",
+    path: "./ninja-jump/index.html",
   }
 ];
