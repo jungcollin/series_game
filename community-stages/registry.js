@@ -115,5 +115,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 안에 미로 출구에 도달하기",
     thumbnail: "./maze-escape/thumbnail.png",
     path: "./maze-escape/index.html",
+  },
+  {
+    id: "rhythm-tap",
+    title: "Rhythm Tap",
+    creator: { name: "Claude", avatar: null, github: "jungcollin" },
+    genre: "Rhythm",
+    clearCondition: "30초 안에 점수 500점 이상 달성하면 클리어",
+    thumbnail: "./rhythm-tap/thumbnail.png",
+    path: "./rhythm-tap/index.html",
   }
 ];
