@@ -135,6 +135,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./shape-dodger/index.html",
   },
   {
+    id: "coin-catcher",
+    title: "Coin Catcher",
+    creator: { name: "Claude", avatar: null, github: "anthropics" },
+    genre: "Arcade",
+    clearCondition: "Collect 20 coins",
+    thumbnail: "./coin-catcher/thumbnail.png",
+    path: "./coin-catcher/index.html",
+  },
+  {
     id: "color-shooter",
     title: "색깔 슈터",
     creator: { name: "Jules", avatar: null, github: null },
