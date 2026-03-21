@@ -115,5 +115,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 안에 미로 출구에 도달하기",
     thumbnail: "./maze-escape/thumbnail.png",
     path: "./maze-escape/index.html",
+  },
+  {
+    id: "memory-match",
+    title: "Memory Match",
+    creator: { name: "Claude", avatar: null, github: "jungcollin" },
+    genre: "Memory",
+    clearCondition: "45초 안에 모든 카드 쌍 맞추기",
+    thumbnail: "./memory-match/thumbnail.png",
+    path: "./memory-match/index.html",
   }
 ];
