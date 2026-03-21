@@ -223,5 +223,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "15초 동안 수리검을 피해 살아남기",
     thumbnail: "./ninja-jump/thumbnail.png",
     path: "./ninja-jump/index.html",
+  },
+  {
+    id: "my-new-stage",
+    title: "새로운 스테이지",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./my-new-stage/thumbnail.png",
+    path: "./my-new-stage/index.html",
   }
 ];
