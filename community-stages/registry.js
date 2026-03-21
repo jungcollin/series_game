@@ -187,5 +187,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 사방에서 날아오는 수리검 피하기",
     thumbnail: "./ninja-star-dodge/thumbnail.png",
     path: "./ninja-star-dodge/index.html",
+  },
+  {
+    id: "fly-bird",
+    title: "날아라 새야",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./fly-bird/thumbnail.png",
+    path: "./fly-bird/index.html",
   }
 ];
