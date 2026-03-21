@@ -178,5 +178,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 안에 버블 25개 터뜨리면 클리어",
     thumbnail: "./bubble-pop/thumbnail.png",
     path: "./bubble-pop/index.html",
+  },
+  {
+    id: "fly-bird",
+    title: "날아라 새야",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./fly-bird/thumbnail.png",
+    path: "./fly-bird/index.html",
   }
 ];
