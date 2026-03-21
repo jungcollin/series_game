@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Shape Dodger</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        max-width: 100vw;
+        max-height: 100vh;
+        object-fit: contain;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">Shape Dodger. 캔버스를 터치하거나 Enter로 시작하세요. 방향키로 이동하거나 화면을 터치/드래그하여 빨간 도형을 피하세요. 20초를 버티면 클리어됩니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="Shape Dodger" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: 960, height: 540 };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("shape-dodger") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "Dodge the falling red shapes and survive for 20 seconds to clear the stage.",
+        player: { x: VIEW.width / 2, y: VIEW.height - 60, r: 15, vx: 0, vy: 0, speed: 400 },
+        enemies: [],
+        spawnTimer: 0,
+        keys: { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false },
+        targetX: null,
+        targetY: null,
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number((state.mode === "running" ? state.elapsed : state.lastRunTime).toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number((state.mode === "running" ? state.elapsed : state.lastRunTime).toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.player = { x: VIEW.width / 2, y: VIEW.height - 60, r: 15, vx: 0, vy: 0, speed: 400 };
+        state.enemies = [];
+        state.spawnTimer = 0;
+        state.targetX = null;
+        state.targetY = null;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function update(dt) {
+        if (state.mode === "running") {
+          state.elapsed += dt;
+
+          if (state.elapsed >= 20) {
+            clearStage();
+            return;
+          }
+
+          // Player movement
+          let dx = 0;
+          let dy = 0;
+
+          if (state.keys.ArrowLeft) dx -= 1;
+          if (state.keys.ArrowRight) dx += 1;
+          if (state.keys.ArrowUp) dy -= 1;
+          if (state.keys.ArrowDown) dy += 1;
+
+          if (dx !== 0 || dy !== 0) {
+            // Keyboard control overrides touch target
+            state.targetX = null;
+            state.targetY = null;
+            const len = Math.hypot(dx, dy);
+            state.player.x += (dx / len) * state.player.speed * dt;
+            state.player.y += (dy / len) * state.player.speed * dt;
+          } else if (state.targetX !== null && state.targetY !== null) {
+            // Touch/Mouse control
+            const tx = state.targetX - state.player.x;
+            const ty = state.targetY - state.player.y;
+            const dist = Math.hypot(tx, ty);
+            if (dist > 5) {
+              const moveDist = Math.min(dist, state.player.speed * dt);
+              state.player.x += (tx / dist) * moveDist;
+              state.player.y += (ty / dist) * moveDist;
+            }
+          }
+
+          // Keep player in bounds
+          state.player.x = Math.max(state.player.r, Math.min(VIEW.width - state.player.r, state.player.x));
+          state.player.y = Math.max(state.player.r, Math.min(VIEW.height - state.player.r, state.player.y));
+
+          // Spawn enemies
+          state.spawnTimer += dt;
+          // Spawn rate increases over time
+          const spawnInterval = Math.max(0.1, 0.4 - (state.elapsed / 20) * 0.3);
+
+          if (state.spawnTimer >= spawnInterval) {
+            state.spawnTimer = 0;
+            const type = Math.random();
+            if (type < 0.3) {
+              // Aimed at player
+              const x = Math.random() * VIEW.width;
+              const y = -30;
+              const angle = Math.atan2(state.player.y - y, state.player.x - x);
+              const speed = 200 + Math.random() * 150 + (state.elapsed * 10);
+              state.enemies.push({
+                x, y, r: 12 + Math.random() * 10,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                color: "#ef4444"
+              });
+            } else {
+              // Falling straight down
+              state.enemies.push({
+                x: Math.random() * VIEW.width,
+                y: -30,
+                r: 10 + Math.random() * 15,
+                vx: (Math.random() - 0.5) * 50,
+                vy: 150 + Math.random() * 200 + (state.elapsed * 15),
+                color: "#ef4444"
+              });
+            }
+          }
+
+          // Update enemies
+          for (let i = state.enemies.length - 1; i >= 0; i--) {
+            const e = state.enemies[i];
+            e.x += e.vx * dt;
+            e.y += e.vy * dt;
+
+            // Collision detection
+            const dist = Math.hypot(e.x - state.player.x, e.y - state.player.y);
+            if (dist < e.r + state.player.r - 2) { // Little bit of leniency
+              failStage("touched_red_shape");
+              return;
+            }
+
+            // Remove off-screen enemies
+            if (e.y > VIEW.height + 50 || e.x < -50 || e.x > VIEW.width + 50) {
+              state.enemies.splice(i, 1);
+            }
+          }
+        }
+      }
+
+      function drawTextWithShadow(text, x, y, font, color) {
+        ctx.font = font;
+        ctx.textAlign = "center";
+        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+        ctx.fillText(text, x + 2, y + 2);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        const cardW = Math.min(704, VIEW.width - 40);
+        const cardH = 356;
+        const cardX = (VIEW.width - cardW) / 2;
+        const cardY = (VIEW.height - cardH) / 2;
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(cardX, cardY, cardW, cardH);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(cardX, cardY, cardW, cardH);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, cardY + 70);
+
+        ctx.fillStyle = "#0f172a";
+        const fontSize = cardW < 500 ? 18 : 24;
+        ctx.font = `600 ${fontSize}px Trebuchet MS`;
+
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, cardY + 140 + index * (fontSize + 22));
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        // Clear canvas
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        if (state.mode === "running" || state.mode === "failed" || state.mode === "cleared") {
+          // Draw grid
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+          ctx.lineWidth = 1;
+          for(let i=0; i<VIEW.width; i+=40) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, VIEW.height); ctx.stroke(); }
+          for(let i=0; i<VIEW.height; i+=40) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(VIEW.width, i); ctx.stroke(); }
+
+          // Draw enemies
+          for (const e of state.enemies) {
+            ctx.fillStyle = e.color;
+            ctx.beginPath();
+            ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
+            ctx.fill();
+            // Inner highlight
+            ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
+            ctx.beginPath();
+            ctx.arc(e.x - e.r*0.3, e.y - e.r*0.3, e.r*0.3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // Draw player
+          ctx.fillStyle = "#3b82f6"; // Blue
+          ctx.beginPath();
+          ctx.arc(state.player.x, state.player.y, state.player.r, 0, Math.PI * 2);
+          ctx.fill();
+          // Player highlight
+          ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+          ctx.beginPath();
+          ctx.arc(state.player.x - state.player.r*0.3, state.player.y - state.player.r*0.3, state.player.r*0.3, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Draw HUD
+          drawTextWithShadow(`Time: ${Math.max(0, 20 - state.elapsed).toFixed(1)}s`, VIEW.width / 2, 40, "700 32px Trebuchet MS", "#f8fafc");
+        }
+
+        if (state.mode === "menu") {
+          renderCard("Shape Dodger", [
+            "Dodge the falling red shapes and survive for 20 seconds.",
+            "Controls: Arrow keys or touch/drag (모바일 터치)",
+            "Clear condition: Survive for 20 seconds",
+            "Fail condition: Touch any red shape",
+            "Touch or Enter to start. 모바일 화면 터치 지원."
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "You touched a red shape!",
+            `Time survived: ${state.lastRunTime.toFixed(1)}s`
+          ], "#b91c1c");
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          renderCard("클리어", [
+            "You survived for 20 seconds!",
+            "Great job dodging the shapes!"
+          ], "#15803d");
+        }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "interface-only template stage",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+        }
+        if (state.keys.hasOwnProperty(event.key)) {
+          state.keys[event.key] = true;
+          event.preventDefault();
+        }
+      }
+
+      function onKeyUp(event) {
+        if (state.keys.hasOwnProperty(event.key)) {
+          state.keys[event.key] = false;
+          event.preventDefault();
+        }
+      }
+
+      function handlePointer(event) {
+        if (state.mode !== "running") return;
+        event.preventDefault();
+
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+
+        state.targetX = (event.clientX - rect.left) * scaleX;
+        state.targetY = (event.clientY - rect.top) * scaleY;
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "shape-dodger",
+        title: "Shape Dodger",
+        creator: "Jules",
+        genre: "Dodger",
+        clearCondition: "Survive for 20 seconds",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          state.elapsed = 20;
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        if (state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+        } else {
+          handlePointer(event);
+        }
+      });
+      canvas.addEventListener("pointermove", (event) => {
+        // Only update if pointer is down (for mouse) or always for touch
+        if (event.buttons > 0 || event.pointerType === 'touch') {
+          handlePointer(event);
+        }
+      });
+      canvas.addEventListener("pointerup", (event) => {
+        if (event.pointerType !== 'touch') {
+          state.targetX = null;
+          state.targetY = null;
+        }
+      });
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
