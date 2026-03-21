@@ -124,5 +124,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "45초 안에 모든 카드 쌍 맞추기",
     thumbnail: "./memory-match/thumbnail.png",
     path: "./memory-match/index.html",
+  },
+  {
+    id: "shape-dodger",
+    title: "Shape Dodger",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "Dodger",
+    clearCondition: "Survive for 20 seconds",
+    thumbnail: "./shape-dodger/thumbnail.png",
+    path: "./shape-dodger/index.html",
   }
 ];
