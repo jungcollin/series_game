@@ -160,5 +160,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "15초 안에 같은 색상의 타일을 10번 맞추기",
     thumbnail: "./color-match/thumbnail.png",
     path: "./color-match/index.html",
+  },
+  {
+    id: "fruit-catch",
+    title: "과일 잡기",
+    creator: { name: "AI Agent", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "과일을 10개 잡으세요.",
+    thumbnail: "./fruit-catch/thumbnail.png",
+    path: "./fruit-catch/index.html",
   }
 ];
