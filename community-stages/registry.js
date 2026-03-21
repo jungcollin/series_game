@@ -97,5 +97,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "7번의 킥 중 4골 이상 성공",
     thumbnail: "./penalty-kick/thumbnail.png",
     path: "./penalty-kick/index.html",
+  },
+  {
+    id: "stack-tower",
+    title: "Stack Tower",
+    creator: { name: "Claude", avatar: null, github: null },
+    genre: "Arcade precision",
+    clearCondition: "블록 10개를 성공적으로 쌓으면 클리어",
+    thumbnail: "./stack-tower/thumbnail.png",
+    path: "./stack-tower/index.html",
   }
 ];
