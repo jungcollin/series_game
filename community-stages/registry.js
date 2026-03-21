@@ -124,5 +124,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 안에 점수 500점 이상 달성하면 클리어",
     thumbnail: "./rhythm-tap/thumbnail.png",
     path: "./rhythm-tap/index.html",
+  },
+  {
+    id: "bubble-pop",
+    title: "버블 팝",
+    creator: { name: "Claude", avatar: null, github: "anthropics" },
+    genre: "Arcade",
+    clearCondition: "30초 안에 버블 25개 터뜨리면 클리어",
+    thumbnail: "./bubble-pop/thumbnail.png",
+    path: "./bubble-pop/index.html",
   }
 ];
