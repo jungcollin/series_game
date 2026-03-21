@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "10초 버티기",
     thumbnail: "./fly-bird/thumbnail.png",
     path: "./fly-bird/index.html",
+  },
+  {
+    id: "my-korean-stage",
+    title: "우주 비행사",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./my-korean-stage/thumbnail.png",
+    path: "./my-korean-stage/index.html",
   }
 ];
