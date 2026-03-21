@@ -205,5 +205,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "10초 버티기",
     thumbnail: "./my-korean-stage/thumbnail.png",
     path: "./my-korean-stage/index.html",
+  },
+  {
+    id: "shape-dodger-2",
+    title: "도형 피하기 2",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./shape-dodger-2/thumbnail.png",
+    path: "./shape-dodger-2/index.html",
   }
 ];
