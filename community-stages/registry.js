@@ -142,5 +142,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "Collect 20 coins",
     thumbnail: "./coin-catcher/thumbnail.png",
     path: "./coin-catcher/index.html",
+  },
+  {
+    id: "color-shooter",
+    title: "색깔 슈터",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "Arcade",
+    clearCondition: "20개의 맞는 색상 과녁을 맞추기",
+    thumbnail: "./color-shooter/thumbnail.png",
+    path: "./color-shooter/index.html",
   }
 ];
