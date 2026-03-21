@@ -232,5 +232,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "10초 버티기",
     thumbnail: "./my-new-stage/thumbnail.png",
     path: "./my-new-stage/index.html",
+  },
+  {
+    id: "shape-dodger-3",
+    title: "도형 피하기 3",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "Dodger",
+    clearCondition: "20초 동안 도형 피하기",
+    thumbnail: "./shape-dodger-3/thumbnail.png",
+    path: "./shape-dodger-3/index.html",
   }
 ];
