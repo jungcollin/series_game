@@ -223,5 +223,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "15초 동안 수리검을 피해 살아남기",
     thumbnail: "./ninja-jump/thumbnail.png",
     path: "./ninja-jump/index.html",
+  },
+  {
+    id: "space-meteor-run",
+    title: "우주 운석 피하기",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드 생존",
+    clearCondition: "20초 동안 운석을 피해 생존하기",
+    thumbnail: "./space-meteor-run/thumbnail.png",
+    path: "./space-meteor-run/index.html",
   }
 ];
