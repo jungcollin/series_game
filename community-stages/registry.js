@@ -142,5 +142,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "Collect 20 coins",
     thumbnail: "./coin-catcher/thumbnail.png",
     path: "./coin-catcher/index.html",
+  },
+  {
+    id: "color-match",
+    title: "색깔 맞추기",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "퍼즐/순발력",
+    clearCondition: "15초 안에 같은 색상의 타일을 10번 맞추기",
+    thumbnail: "./color-match/thumbnail.png",
+    path: "./color-match/index.html",
   }
 ];
