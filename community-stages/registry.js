@@ -140,7 +140,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "Claude", avatar: null, github: "anthropics" },
     genre: "Arcade",
     clearCondition: "Collect 20 coins",
-    thumbnail: null,
+    thumbnail: "./coin-catcher/thumbnail.png",
     path: "./coin-catcher/index.html",
   }
 ];
