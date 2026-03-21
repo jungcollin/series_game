@@ -169,5 +169,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과일을 10개 잡으세요.",
     thumbnail: "./fruit-catch/thumbnail.png",
     path: "./fruit-catch/index.html",
+  },
+  {
+    id: "bubble-pop",
+    title: "버블 팝",
+    creator: { name: "Claude", avatar: null, github: "anthropics" },
+    genre: "Arcade",
+    clearCondition: "30초 안에 버블 25개 터뜨리면 클리어",
+    thumbnail: "./bubble-pop/thumbnail.png",
+    path: "./bubble-pop/index.html",
   }
 ];
