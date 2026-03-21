@@ -26,3 +26,4 @@ Custom commands are registered in `.claude/commands/`:
 - `/check-stage`는 모바일 `menu / running / failed` 스크린샷 생성과 모바일 가로 오버플로 검사를 포함한다.
 - `index.html`, `styles.css`, `game.js`, `community-stages/gallery.*`, `community-stages/play.html`를 바꿨으면 `node relay-tools/scripts/check_host_flow.js --base-url http://127.0.0.1:4173 --mobile`도 함께 실행한다.
 - `/publish-stage` 시 `--pr` 플래그로 PR까지 한 번에 완료한다.
+- 게임 설명(`clearCondition`)은 play.html에서 2줄 clamp(0.74rem)으로 표시된다. `/make-stage` 시 `clear-condition` 텍스트는 간결하게 작성한다.
