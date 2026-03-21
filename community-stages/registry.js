@@ -178,5 +178,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 안에 버블 25개 터뜨리면 클리어",
     thumbnail: "./bubble-pop/thumbnail.png",
     path: "./bubble-pop/index.html",
+  },
+  {
+    id: "ninja-star-dodge",
+    title: "수리검 피하기",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드 생존",
+    clearCondition: "20초 동안 사방에서 날아오는 수리검 피하기",
+    thumbnail: "./ninja-star-dodge/thumbnail.png",
+    path: "./ninja-star-dodge/index.html",
   }
 ];
