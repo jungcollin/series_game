@@ -45,6 +45,7 @@ Apply these rules to `index.html`, `styles.css`, `game.js`, and everything under
 - Avoid layout jank. Skeletons and loading states should roughly match final layout, and image or media containers should reserve space to prevent CLS.
 - UI must handle empty, dense, error, and very long-content states without breaking layout.
 - Long text in cards and flex rows must be constrained deliberately with truncation, wrapping, or `min-w-0` as needed.
+- Game descriptions (`clearCondition`, `failCondition`) are displayed with 2-line clamp at 0.74rem in play.html and gallery. Write `clear-condition` and `fail-condition` text concisely so it fits within 2 lines.
 - Check responsive behavior on mobile and desktop whenever changing gallery, launcher, or play screens.
 - Mobile review must include overlay/modal/error states, not just the default loaded screen.
 - Locale-aware formatting is required for dates, times, and numbers shown to users.
