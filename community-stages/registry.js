@@ -466,5 +466,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "모래성 5층을 완성하면 클리어",
     thumbnail: "./sand-castle/thumbnail.png",
     path: "./sand-castle/index.html",
+  },
+  {
+    id: "shadow-dance",
+    title: "그림자 춤",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rhythm stealth",
+    clearCondition: "무대 끝까지 도달하면 클리어",
+    thumbnail: "./shadow-dance/thumbnail.png",
+    path: "./shadow-dance/index.html",
   }
 ];
