@@ -1015,5 +1015,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "역전 구간을 모두 견디고 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
     thumbnail: "./paper-temple-debt-auction-inverse/thumbnail.png",
     path: "./paper-temple-debt-auction-inverse/index.html",
+  },
+  {
+    id: "dream-motel-pulse-fencing-collapse",
+    title: "Dream Motel: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 붕괴하는 라인",
+    clearCondition: "붕괴선보다 먼저 20연속 파형 반사",
+    thumbnail: "./dream-motel-pulse-fencing-collapse/thumbnail.png",
+    path: "./dream-motel-pulse-fencing-collapse/index.html",
   }
 ];
