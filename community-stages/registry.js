@@ -538,5 +538,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "충전을 남기며 코어를 목적 슬롯까지 배달하기",
     thumbnail: "./neon-observatory-gravity-folding-charge/thumbnail.png",
     path: "./neon-observatory-gravity-folding-charge/index.html",
+  },
+  {
+    id: "dusk-subway-orbit-herding-shrink",
+    title: "Dusk Subway: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./dusk-subway-orbit-herding-shrink/thumbnail.png",
+    path: "./dusk-subway-orbit-herding-shrink/index.html",
   }
 ];
