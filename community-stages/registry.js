@@ -340,5 +340,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "축소 구간 끝까지 버티며 서로 다른 패턴 3개로 금고 문을 열면 클리어",
     thumbnail: "./storm-archive-mirror-theft-shrink/thumbnail.png",
     path: "./storm-archive-mirror-theft-shrink/index.html",
+  },
+  {
+    id: "glass-aquarium-mirror-theft-inverse",
+    title: "Glass Aquarium: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./glass-aquarium-mirror-theft-inverse/thumbnail.png",
+    path: "./glass-aquarium-mirror-theft-inverse/index.html",
   }
 ];
