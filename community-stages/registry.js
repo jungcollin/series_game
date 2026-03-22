@@ -306,6 +306,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./crystal-foundry-echo-weaving-shrink/index.html",
   },
   {
+    id: "biomech-theater-gravity-folding-shrink",
+    title: "Biomech Theater: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 코어를 슬롯까지 운반",
+    thumbnail: "./biomech-theater-gravity-folding-shrink/thumbnail.png",
+    path: "./biomech-theater-gravity-folding-shrink/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
