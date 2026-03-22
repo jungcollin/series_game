@@ -511,5 +511,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "무대 끝까지 도달하면 클리어",
     thumbnail: "./shadow-dance/thumbnail.png",
     path: "./shadow-dance/index.html",
+  },
+  {
+    id: "snowman-builder",
+    title: "눈사람 빚기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rolling builder",
+    clearCondition: "눈사람 3단을 완성하면 클리어",
+    thumbnail: "./snowman-builder/thumbnail.png",
+    path: "./snowman-builder/index.html",
   }
 ];
