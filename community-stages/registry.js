@@ -297,6 +297,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./dusk-subway-magnet-braiding-sync/index.html",
   },
   {
+    id: "crystal-foundry-echo-weaving-shrink",
+    title: "Crystal Foundry: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./crystal-foundry-echo-weaving-shrink/thumbnail.png",
+    path: "./crystal-foundry-echo-weaving-shrink/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
