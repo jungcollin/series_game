@@ -540,6 +540,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./neon-observatory-gravity-folding-charge/index.html",
   },
   {
+    id: "storm-archive-magnet-braiding-charge",
+    title: "Storm Archive: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 제한 충전",
+    clearCondition: "충전을 남기며 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./storm-archive-magnet-braiding-charge/thumbnail.png",
+    path: "./storm-archive-magnet-braiding-charge/index.html",
+  },
+  {
     id: "dusk-subway-orbit-herding-shrink",
     title: "Dusk Subway: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
