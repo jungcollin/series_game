@@ -1060,5 +1060,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "콤보를 유지하며 20연속 파형을 반사하면 클리어",
     thumbnail: "./biomech-theater-pulse-fencing-combo/thumbnail.png",
     path: "./biomech-theater-pulse-fencing-combo/index.html",
+  },
+  {
+    id: "glass-aquarium-pulse-fencing-cursed",
+    title: "Glass Aquarium: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 저주 픽업",
+    clearCondition: "저주를 견디며 20연속 파형 반사",
+    thumbnail: "./glass-aquarium-pulse-fencing-cursed/thumbnail.png",
+    path: "./glass-aquarium-pulse-fencing-cursed/index.html",
   }
 ];
