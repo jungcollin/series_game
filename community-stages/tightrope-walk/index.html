@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>줄타기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #FFF4C2; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(200, 140, 80, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(100, 60, 30, 0.92);
+        color: #FFF8E8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #FFF4C2; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(200, 140, 80, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">줄타기. 바람을 이기며 줄 위를 걸어가는 균형 게임. 화면 좌우 터치로 균형 잡기. 줄 끝까지 도달하면 클리어. 균형을 잃고 떨어지면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="줄타기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "tightrope-walk",
+        title: "줄타기",
+        description: "바람을 이기며 줄 위를 걸어가는 균형 게임",
+        creator: "jungcollin",
+        genre: "Balance action",
+        clearCondition: "줄 끝까지 도달하면 클리어",
+        failCondition: "균형을 잃고 떨어지면 실패",
+        controls: "화면 좌우 터치로 균형 잡기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        sky1: "#87CEEB",
+        sky2: "#E8976B",
+        sun: "#FFD700",
+        cloud: "rgba(255, 255, 255, 0.7)",
+        rope: "#8B6914",
+        ropeShadow: "rgba(139, 105, 20, 0.3)",
+        pole: "#6B4E2F",
+        poleCap: "#B8860B",
+        person: "#E8976B",
+        personDark: "#C87050",
+        personHat: "#4A3520",
+        fan: "#D4A574",
+        text: "#4A3520",
+        textLight: "rgba(74, 53, 32, 0.5)",
+        success: "#5A8E5A",
+        fail: "#C85050",
+        windArrow: "rgba(100, 160, 220, 0.6)",
+        balanceGood: "#6BA88E",
+        balanceBad: "#CC6644",
+      };
+
+      // --- Constants ---
+      const ROPE_Y = 340;
+      const ROPE_START_X = 100;
+      const ROPE_END_X = 860;
+      const ROPE_LEN = ROPE_END_X - ROPE_START_X;
+      const MAX_TILT = 60; // degrees — fall threshold
+      const WALK_SPEED = 45; // px/s base
+      const GRAVITY_TILT = 80; // tilt acceleration (deg/s²)
+
+      // --- State ---
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      let tilt = 0; // current tilt in degrees (-MAX_TILT to MAX_TILT)
+      let tiltVel = 0;
+      let posX = 0; // progress along rope (0 to ROPE_LEN)
+      let walkAnim = 0;
+      let wind = 0; // current wind force
+      let windTimer = 0;
+      let windTarget = 0;
+      let gustWarning = 0;
+      let inputDir = 0; // -1=left, 0=none, 1=right
+      let particles = [];
+      let windParticles = [];
+      let fallAnim = 0;
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Particles ---
+      function spawnParticles(x, y, count, color) {
+        if (reducedMotion) count = Math.min(count, 3);
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(30, 100);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 30,
+            life: 1, color, size: rand(2, 5),
+          });
+        }
+      }
+
+      function spawnWindParticles() {
+        if (reducedMotion || Math.abs(wind) < 10) return;
+        const dir = wind > 0 ? 1 : -1;
+        windParticles.push({
+          x: dir > 0 ? -10 : W + 10,
+          y: rand(50, ROPE_Y - 20),
+          vx: dir * rand(80, 160),
+          life: 1,
+          size: rand(1, 3),
+        });
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; shake = 0; flashAlpha = 0; clearAnim = 0; fallAnim = 0;
+        tilt = 0; tiltVel = 0; posX = 0; walkAnim = 0;
+        wind = 0; windTimer = 2; windTarget = 0; gustWarning = 0;
+        inputDir = 0;
+        particles = []; windParticles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running" && mode !== "failed") return;
+        if (mode === "failed") {
+          fallAnim += dt;
+          particles.forEach(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * dt; p.life -= dt * 2; });
+          particles = particles.filter(p => p.life > 0);
+          return;
+        }
+        elapsed += dt;
+
+        // Wind system
+        windTimer -= dt;
+        if (windTimer <= 0) {
+          const progress = posX / ROPE_LEN;
+          const maxWind = lerp(15, 50, progress);
+          windTarget = rand(-maxWind, maxWind);
+          windTimer = rand(1.5, 3.5);
+          if (Math.abs(windTarget) > 30) gustWarning = 1;
+        }
+        wind = lerp(wind, windTarget, dt * 2);
+        gustWarning *= 0.95;
+
+        // Tilt physics
+        const windTorque = wind * 1.2;
+        const inputTorque = inputDir * -120;
+        const dampening = -tiltVel * 2.5;
+        const gravityPull = -tilt * 0.8; // centering
+
+        tiltVel += (windTorque + inputTorque + dampening + gravityPull) * dt;
+        tilt += tiltVel * dt;
+
+        // Walking (only moves forward when reasonably balanced)
+        if (Math.abs(tilt) < 30) {
+          const speedMult = 1 - Math.abs(tilt) / 30 * 0.7;
+          posX += WALK_SPEED * speedMult * dt;
+          walkAnim += dt * 6;
+        }
+
+        // Wind particles
+        if (Math.random() < Math.abs(wind) / 50 * dt * 10) spawnWindParticles();
+
+        // Particles update
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 80 * dt;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+        for (let i = windParticles.length - 1; i >= 0; i--) {
+          const p = windParticles[i];
+          p.x += p.vx * dt;
+          p.life -= dt * 0.8;
+          if (p.life <= 0 || p.x < -20 || p.x > W + 20) windParticles.splice(i, 1);
+        }
+
+        shake *= 0.9;
+        if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+
+        // Win check
+        if (posX >= ROPE_LEN) {
+          mode = "clear";
+          clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          spawnParticles(ROPE_END_X, ROPE_Y - 30, 20, COL.sun);
+        }
+        // Fail check
+        if (Math.abs(tilt) >= MAX_TILT) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("균형 상실");
+          shake = 10;
+          flashAlpha = 0.3;
+          fallAnim = 0;
+          const px = ROPE_START_X + posX;
+          spawnParticles(px, ROPE_Y, 10, COL.personDark);
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient (sunset)
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+        skyGrad.addColorStop(0, COL.sky1);
+        skyGrad.addColorStop(0.6, "#C8B8A0");
+        skyGrad.addColorStop(1, COL.sky2);
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Sun
+        ctx.beginPath();
+        ctx.arc(780, 100, 40, 0, Math.PI * 2);
+        ctx.fillStyle = COL.sun;
+        ctx.fill();
+        if (!reducedMotion) {
+          ctx.beginPath();
+          ctx.arc(780, 100, 55, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(255, 215, 0, 0.15)";
+          ctx.fill();
+        }
+
+        // Clouds
+        ctx.fillStyle = COL.cloud;
+        drawCloud(120, 80, 1);
+        drawCloud(400, 50, 0.8);
+        drawCloud(650, 110, 0.6);
+
+        // Mountains
+        ctx.fillStyle = "rgba(150, 130, 110, 0.4)";
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, 380); ctx.lineTo(150, 300); ctx.lineTo(300, 370);
+        ctx.lineTo(450, 280); ctx.lineTo(600, 350); ctx.lineTo(750, 290);
+        ctx.lineTo(960, 360); ctx.lineTo(960, H);
+        ctx.fill();
+
+        // Ground
+        ctx.fillStyle = "#C8A882";
+        ctx.fillRect(0, ROPE_Y + 60, W, H - ROPE_Y - 60);
+        ctx.fillStyle = "#D4B894";
+        ctx.fillRect(0, ROPE_Y + 55, W, 12);
+
+        // Wind particles
+        drawWindParticles();
+
+        // Rope & poles
+        drawRopeAndPoles();
+
+        // Person
+        if (mode === "running" || mode === "clear") drawPerson();
+        if (mode === "failed") drawFallenPerson();
+
+        // Wind indicator
+        if (mode === "running") drawWindIndicator();
+
+        // Particles
+        drawParticles();
+
+        if (mode === "running") drawHUD();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(200, 80, 80, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed" && fallAnim > 0.5) drawFailed();
+      }
+
+      function drawCloud(x, y, s) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(s, s);
+        ctx.beginPath();
+        ctx.arc(0, 0, 30, 0, Math.PI * 2);
+        ctx.arc(25, -10, 25, 0, Math.PI * 2);
+        ctx.arc(50, 0, 28, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawRopeAndPoles() {
+        // Left pole
+        ctx.fillStyle = COL.pole;
+        ctx.fillRect(ROPE_START_X - 6, ROPE_Y - 80, 12, 140);
+        ctx.fillStyle = COL.poleCap;
+        ctx.fillRect(ROPE_START_X - 8, ROPE_Y - 84, 16, 8);
+
+        // Right pole
+        ctx.fillStyle = COL.pole;
+        ctx.fillRect(ROPE_END_X - 6, ROPE_Y - 80, 12, 140);
+        ctx.fillStyle = COL.poleCap;
+        ctx.fillRect(ROPE_END_X - 8, ROPE_Y - 84, 16, 8);
+
+        // Flag on right pole
+        ctx.fillStyle = COL.sun;
+        ctx.beginPath();
+        ctx.moveTo(ROPE_END_X, ROPE_Y - 80);
+        ctx.lineTo(ROPE_END_X + 25, ROPE_Y - 70);
+        ctx.lineTo(ROPE_END_X, ROPE_Y - 60);
+        ctx.fill();
+
+        // Rope shadow
+        ctx.strokeStyle = COL.ropeShadow;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(ROPE_START_X, ROPE_Y + 4);
+        ctx.lineTo(ROPE_END_X, ROPE_Y + 4);
+        ctx.stroke();
+
+        // Rope
+        ctx.strokeStyle = COL.rope;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(ROPE_START_X, ROPE_Y);
+        // Slight sag
+        const sagMid = ROPE_Y + 8;
+        ctx.quadraticCurveTo(CX, sagMid, ROPE_END_X, ROPE_Y);
+        ctx.stroke();
+
+        // Progress markers
+        for (let i = 1; i < 4; i++) {
+          const mx = ROPE_START_X + (ROPE_LEN * i / 4);
+          ctx.fillStyle = posX >= ROPE_LEN * i / 4 ? COL.success : "rgba(139, 105, 20, 0.3)";
+          ctx.fillRect(mx - 2, ROPE_Y - 3, 4, 6);
+        }
+      }
+
+      function drawPerson() {
+        const px = ROPE_START_X + posX;
+        const py = ROPE_Y;
+
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(tilt * Math.PI / 180);
+
+        // Legs with walk animation
+        const legSwing = Math.sin(walkAnim) * 8;
+        ctx.strokeStyle = COL.personDark;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(0, -5);
+        ctx.lineTo(-4 + legSwing, -25);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, -5);
+        ctx.lineTo(4 - legSwing, -25);
+        ctx.stroke();
+
+        // Body
+        ctx.fillStyle = COL.person;
+        ctx.fillRect(-5, -45, 10, 22);
+
+        // Arms (balance pole!)
+        const armTilt = tilt * 0.5;
+        ctx.strokeStyle = COL.fan;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-35, -38 + armTilt);
+        ctx.lineTo(35, -38 - armTilt);
+        ctx.stroke();
+        // Pole ends
+        ctx.fillStyle = COL.poleCap;
+        ctx.beginPath();
+        ctx.arc(-35, -38 + armTilt, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(35, -38 - armTilt, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Head
+        ctx.beginPath();
+        ctx.arc(0, -52, 8, 0, Math.PI * 2);
+        ctx.fillStyle = COL.person;
+        ctx.fill();
+
+        // Hat
+        ctx.fillStyle = COL.personHat;
+        ctx.fillRect(-10, -62, 20, 4);
+        ctx.fillRect(-6, -68, 12, 8);
+
+        ctx.restore();
+      }
+
+      function drawFallenPerson() {
+        const px = ROPE_START_X + posX;
+        const fallDir = tilt > 0 ? 1 : -1;
+        const fallY = ROPE_Y + fallAnim * 200;
+        const fallX = px + fallDir * fallAnim * 60;
+        const rot = tilt * Math.PI / 180 + fallAnim * fallDir * 3;
+
+        if (fallY > H + 50) return;
+
+        ctx.save();
+        ctx.translate(fallX, fallY);
+        ctx.rotate(rot);
+        ctx.globalAlpha = clamp(1 - fallAnim * 0.5, 0, 1);
+
+        // Simplified fallen person
+        ctx.fillStyle = COL.person;
+        ctx.fillRect(-5, -45, 10, 22);
+        ctx.beginPath();
+        ctx.arc(0, -52, 8, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      function drawWindIndicator() {
+        const arrowX = CX;
+        const arrowY = 30;
+        const arrowLen = clamp(Math.abs(wind), 0, 50) * 1.2;
+        const dir = wind > 0 ? 1 : -1;
+
+        if (arrowLen < 3) return;
+
+        ctx.save();
+        ctx.globalAlpha = gustWarning > 0.1 ? 0.8 : 0.5;
+        ctx.strokeStyle = gustWarning > 0.1 ? COL.balanceBad : COL.windArrow;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(arrowX - dir * arrowLen, arrowY);
+        ctx.lineTo(arrowX + dir * arrowLen, arrowY);
+        ctx.stroke();
+
+        // Arrow head
+        ctx.beginPath();
+        ctx.moveTo(arrowX + dir * arrowLen, arrowY);
+        ctx.lineTo(arrowX + dir * (arrowLen - 8), arrowY - 6);
+        ctx.lineTo(arrowX + dir * (arrowLen - 8), arrowY + 6);
+        ctx.closePath();
+        ctx.fillStyle = gustWarning > 0.1 ? COL.balanceBad : COL.windArrow;
+        ctx.fill();
+
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 12px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("바람", arrowX, arrowY + 18);
+
+        ctx.restore();
+      }
+
+      function drawWindParticles() {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+        for (const p of windParticles) {
+          ctx.globalAlpha = p.life * 0.4;
+          ctx.fillRect(p.x, p.y, p.size * 8, p.size);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        // Progress
+        const prog = clamp(posX / ROPE_LEN, 0, 1);
+        ctx.fillStyle = COL.text;
+        ctx.font = "600 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`진행: ${Math.floor(prog * 100)}%`, 24, 20);
+
+        // Balance meter
+        const meterX = W - 120, meterY = 20, meterW = 96, meterH = 12;
+        ctx.fillStyle = "rgba(74, 53, 32, 0.1)";
+        ctx.fillRect(meterX, meterY, meterW, meterH);
+
+        // Balance indicator
+        const tiltNorm = clamp(tilt / MAX_TILT, -1, 1);
+        const indX = meterX + meterW / 2 + tiltNorm * meterW / 2;
+        const balColor = Math.abs(tiltNorm) > 0.6 ? COL.balanceBad : COL.balanceGood;
+        ctx.fillStyle = balColor;
+        ctx.fillRect(indX - 3, meterY - 2, 6, meterH + 4);
+
+        // Center mark
+        ctx.fillStyle = COL.text;
+        ctx.fillRect(meterX + meterW / 2 - 1, meterY - 1, 2, meterH + 2);
+
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 11px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("균형", meterX + meterW / 2, meterY + meterH + 4);
+
+        // Touch hints
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("← 좌측 터치 | 우측 터치 →", CX, H - 20);
+      }
+
+      // --- Overlay cards ---
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+        ctx.closePath();
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 50 + lines.length * lineH + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(255, 248, 232, 0.96)";
+        roundRect(ctx, cardX, cardY, cardW, cardH, 10);
+        ctx.fill();
+
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 24px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "400 14px 'Segoe UI', sans-serif";
+        ctx.fillStyle = "rgba(74, 53, 32, 0.75)";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("TAP 또는 ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(255, 244, 194, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+
+        drawCard("줄타기", [
+          "바람을 이기며 줄 위를 걸어가세요",
+          "",
+          "조작: 화면 좌우 터치로 균형 잡기",
+          "클리어: 줄 끝까지 도달",
+          "실패: 균형을 잃고 떨어지면 실패",
+        ], COL.sky2);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(255, 248, 232, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+
+        if (clearAnim > 0.3) {
+          drawCard("도착!", [
+            `${Math.ceil(elapsed)}초 만에 완주`,
+          ], COL.success);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(74, 53, 32, 0.25)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("떨어졌다!", [
+          `진행: ${Math.floor(posX / ROPE_LEN * 100)}%`,
+        ], COL.fail);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset();
+          mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        inputDir = p.x < CX ? -1 : 1;
+        canvas.setPointerCapture(e.pointerId);
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running" || inputDir === 0) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        inputDir = p.x < CX ? -1 : 1;
+      });
+
+      canvas.addEventListener("pointerup", () => { inputDir = 0; });
+      canvas.addEventListener("pointercancel", () => { inputDir = 0; });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleStart();
+        }
+        if (mode === "running") {
+          if (e.key === "ArrowLeft" || e.key === "a") inputDir = -1;
+          if (e.key === "ArrowRight" || e.key === "d") inputDir = 1;
+        }
+      });
+
+      canvas.addEventListener("keyup", (e) => {
+        if (e.key === "ArrowLeft" || e.key === "a" || e.key === "ArrowRight" || e.key === "d") {
+          inputDir = 0;
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          tilt: +tilt.toFixed(1),
+          progress: +(posX / ROPE_LEN).toFixed(2),
+          wind: +wind.toFixed(1),
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          posX = ROPE_LEN;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          tilt = MAX_TILT;
+          mode = "failed"; fallAnim = 1;
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail");
+          draw();
+        },
+      };
+
+      // --- Init ---
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
