@@ -234,6 +234,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./paper-temple-orbit-herding-cursed/index.html",
   },
   {
+    id: "crystal-foundry-weather-mixing-combo",
+    title: "Crystal Foundry: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 콤보 임계치",
+    clearCondition: "콤보를 지키며 관측대 3곳에 모두 착륙",
+    thumbnail: "./crystal-foundry-weather-mixing-combo/thumbnail.png",
+    path: "./crystal-foundry-weather-mixing-combo/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
