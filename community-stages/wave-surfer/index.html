@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>파도 서핑</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #40E0D0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(64, 224, 208, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(20, 80, 80, 0.92);
+        color: #E0F8F0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #40E0D0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(255, 127, 127, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">파도 서핑. 밀려오는 파도에 맞춰 서퍼를 점프시켜 파도를 타세요. 화면을 탭하여 점프합니다. 모바일에서는 화면 터치로 플레이할 수 있습니다. 파도 8개를 성공적으로 타면 클리어. 파도에 3번 휩쓸리면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="파도 서핑" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "wave-surfer",
+        title: "파도 서핑",
+        description: "밀려오는 파도에 맞춰 서퍼를 점프시켜 파도를 타세요",
+        creator: "jungcollin",
+        genre: "Wave riding",
+        clearCondition: "파도 8개를 성공적으로 타면 클리어",
+        failCondition: "파도에 3번 휩쓸리면 실패",
+        controls: "탭으로 서퍼를 점프시켜 파도를 타세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        skyTop: "#FF9A8B",
+        skyBot: "#FFDDE1",
+        ocean: "#2EC4B6",
+        oceanDeep: "#1A936F",
+        oceanLight: "#5CE0D2",
+        foam: "rgba(255,255,255,0.7)",
+        sand: "#F5DEB3",
+        sandDark: "#DEC49A",
+        surfer: "#4A2C1A",
+        board: "#FFE066",
+        boardStripe: "#FF6B6B",
+        sun: "#FFD93D",
+        accent: "#FF6B6B",
+        fail: "#C0392B",
+        clear: "#27AE60",
+      };
+
+      // --- Constants ---
+      const TARGET = 8;
+      const MAX_MISS = 3;
+      const SEA_Y = 340;
+      const SURFER_X = 200;
+      const GRAVITY = 800;
+      const JUMP_VEL = -320;
+
+      // --- State ---
+      let mode = "menu";
+      let elapsed = 0;
+      let ridden = 0;
+      let wiped = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      // Surfer
+      let surfer = { y: SEA_Y - 30, vy: 0, grounded: true, riding: false };
+
+      // Waves
+      let waves = [];
+      let waveTimer = 0;
+      let waveSpeed = 150;
+      let waveIdx = 0;
+
+      // Particles & decorations
+      let particles = [];
+      let seaOffset = 0;
+      let splashes = [];
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Waves ---
+      function spawnWave() {
+        const h = rand(50, 90);
+        waves.push({
+          x: W + 100,
+          height: h,
+          width: rand(100, 160),
+          speed: waveSpeed + rand(-20, 20),
+          scored: false,
+          missed: false,
+          crestY: SEA_Y - h,
+        });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(-Math.PI, 0);
+          const speed = rand(50, 150);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 1, color, size: rand(sizeRange[0], sizeRange[1]),
+          });
+        }
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; ridden = 0; wiped = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        surfer = { y: SEA_Y - 30, vy: 0, grounded: true, riding: false };
+        waves = []; waveTimer = 1.5; waveIdx = 0;
+        waveSpeed = 150;
+        particles = []; splashes = [];
+        seaOffset = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+      }
+
+      function jump() {
+        if (mode !== "running") return;
+        if (surfer.grounded || surfer.y >= SEA_Y - 40) {
+          surfer.vy = JUMP_VEL;
+          surfer.grounded = false;
+          surfer.riding = false;
+        }
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        seaOffset += 30 * dt;
+
+        // Wave spawning
+        waveSpeed = lerp(150, 250, Math.min(elapsed / 40, 1));
+        const spawnInterval = lerp(2.5, 1.5, Math.min(elapsed / 30, 1));
+        waveTimer -= dt;
+        if (waveTimer <= 0 && waveIdx < TARGET + 2) {
+          spawnWave();
+          waveIdx++;
+          waveTimer = spawnInterval;
+        }
+
+        // Surfer physics
+        if (!surfer.grounded) {
+          surfer.vy += GRAVITY * dt;
+          surfer.y += surfer.vy * dt;
+        }
+
+        // Sea level (slight bob)
+        const seaLevel = SEA_Y + Math.sin(elapsed * 2) * 4;
+
+        if (surfer.y >= seaLevel - 30 && surfer.vy >= 0) {
+          surfer.y = seaLevel - 30;
+          surfer.vy = 0;
+          surfer.grounded = true;
+        }
+
+        // Update waves
+        for (let i = waves.length - 1; i >= 0; i--) {
+          const w = waves[i];
+          w.x -= w.speed * dt;
+
+          // Check if surfer is riding this wave
+          const waveLeft = w.x - w.width / 2;
+          const waveRight = w.x + w.width / 2;
+          const surferInWaveX = SURFER_X > waveLeft && SURFER_X < waveRight;
+
+          if (surferInWaveX && !w.scored && !w.missed) {
+            const surferBottom = surfer.y + 30;
+            // Surfer is above wave crest = successful ride
+            if (surfer.y < w.crestY + 20 && !surfer.grounded) {
+              w.scored = true;
+              ridden++;
+              surfer.riding = true;
+              spawnParticles(SURFER_X, w.crestY, reducedMotion ? 3 : 8, COL.foam, [3, 7]);
+              if (ridden >= TARGET) {
+                mode = "clear"; clearAnim = 0;
+                window.relayStageResult.status = "cleared";
+                reportCleared();
+                return;
+              }
+            }
+            // Surfer hit by wave (at sea level, didn't jump)
+            else if (surfer.grounded && surferBottom > w.crestY + 15) {
+              w.missed = true;
+              wiped++;
+              shake = 8;
+              flashAlpha = 0.3;
+              spawnParticles(SURFER_X, SEA_Y, reducedMotion ? 4 : 10, COL.ocean, [3, 8]);
+              if (wiped >= MAX_MISS) {
+                mode = "failed";
+                window.relayStageResult.status = "failed";
+                reportFailed("파도에 휩쓸림");
+                return;
+              }
+            }
+          }
+
+          // Remove off-screen waves
+          if (w.x < -w.width) {
+            waves.splice(i, 1);
+          }
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 200 * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.9;
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient (sunset colors)
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, SEA_Y);
+        skyGrad.addColorStop(0, COL.skyTop);
+        skyGrad.addColorStop(1, COL.skyBot);
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, SEA_Y);
+
+        // Sun
+        ctx.fillStyle = COL.sun;
+        ctx.globalAlpha = 0.8;
+        ctx.beginPath();
+        ctx.arc(W - 120, 100, 50, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // Ocean
+        const oceanGrad = ctx.createLinearGradient(0, SEA_Y, 0, H);
+        oceanGrad.addColorStop(0, COL.ocean);
+        oceanGrad.addColorStop(1, COL.oceanDeep);
+        ctx.fillStyle = oceanGrad;
+        ctx.fillRect(0, SEA_Y, W, H - SEA_Y);
+
+        // Sea surface ripple
+        drawSeaRipple();
+
+        // Waves
+        drawWaves();
+
+        // Surfer
+        drawSurfer();
+
+        // Particles
+        drawParticles();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(192,57,43,${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawSeaRipple() {
+        ctx.strokeStyle = COL.oceanLight;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.3;
+        for (let row = 0; row < 5; row++) {
+          const y = SEA_Y + 20 + row * 35;
+          ctx.beginPath();
+          for (let x = 0; x < W; x += 5) {
+            const wy = y + Math.sin((x + seaOffset * (1 + row * 0.3)) * 0.02) * 6;
+            if (x === 0) ctx.moveTo(x, wy);
+            else ctx.lineTo(x, wy);
+          }
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawWaves() {
+        for (const w of waves) {
+          // Wave body
+          ctx.fillStyle = w.scored ? "rgba(46,204,113,0.5)" : w.missed ? "rgba(192,57,43,0.4)" : "rgba(30,147,111,0.6)";
+          ctx.beginPath();
+          ctx.moveTo(w.x - w.width / 2, SEA_Y);
+          // Curve up to crest
+          ctx.quadraticCurveTo(w.x - w.width / 4, w.crestY - 10, w.x, w.crestY);
+          // Curl at top
+          ctx.quadraticCurveTo(w.x + w.width / 6, w.crestY - 5, w.x + w.width / 4, w.crestY + 15);
+          ctx.quadraticCurveTo(w.x + w.width / 3, SEA_Y - 10, w.x + w.width / 2, SEA_Y);
+          ctx.fill();
+
+          // Foam at crest
+          ctx.fillStyle = COL.foam;
+          ctx.beginPath();
+          ctx.ellipse(w.x + 5, w.crestY + 3, w.width * 0.15, 8, 0, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Wave outline
+          ctx.strokeStyle = "rgba(255,255,255,0.3)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(w.x - w.width / 2, SEA_Y);
+          ctx.quadraticCurveTo(w.x - w.width / 4, w.crestY - 10, w.x, w.crestY);
+          ctx.stroke();
+        }
+      }
+
+      function drawSurfer() {
+        const x = SURFER_X;
+        const y = surfer.y;
+
+        // Board
+        ctx.save();
+        ctx.translate(x, y + 22);
+        const tilt = surfer.riding ? -0.1 : surfer.grounded ? 0 : clamp(surfer.vy / 500, -0.3, 0.3);
+        ctx.rotate(tilt);
+        ctx.fillStyle = COL.board;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 28, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = COL.boardStripe;
+        ctx.fillRect(-15, -2, 30, 4);
+        ctx.restore();
+
+        // Body
+        ctx.fillStyle = COL.surfer;
+        // Legs
+        ctx.fillRect(x - 6, y + 10, 4, 12);
+        ctx.fillRect(x + 2, y + 10, 4, 12);
+        // Torso
+        ctx.fillRect(x - 6, y, 12, 12);
+        // Head
+        ctx.beginPath();
+        ctx.arc(x, y - 4, 6, 0, Math.PI * 2);
+        ctx.fill();
+        // Arms
+        if (surfer.riding) {
+          // Arms out celebration
+          ctx.fillRect(x - 14, y + 2, 8, 3);
+          ctx.fillRect(x + 6, y + 2, 8, 3);
+        } else {
+          ctx.fillRect(x - 10, y + 4, 6, 3);
+          ctx.fillRect(x + 4, y + 4, 6, 3);
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = "rgba(255,255,255,0.6)";
+        ctx.fillRect(0, 0, W, 40);
+        ctx.font = "bold 16px 'Trebuchet MS',sans-serif";
+        ctx.textBaseline = "middle";
+
+        ctx.fillStyle = COL.clear;
+        ctx.textAlign = "left";
+        ctx.fillText(`서핑: ${ridden}/${TARGET}`, 20, 20);
+
+        ctx.fillStyle = wiped > 0 ? COL.fail : "#666";
+        ctx.textAlign = "center";
+        const hearts = "🏄".repeat(MAX_MISS - wiped) + "💀".repeat(wiped);
+        ctx.fillText(hearts, CX, 20);
+
+        ctx.fillStyle = "#555";
+        ctx.textAlign = "right";
+        ctx.fillText(`${Math.ceil(elapsed)}초`, W - 20, 20);
+      }
+
+      // --- Overlay cards ---
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 52 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2;
+        const cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 12);
+        ctx.fill();
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+        ctx.fillStyle = "#333";
+        ctx.font = "bold 24px 'Trebuchet MS',sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+        ctx.font = "500 14px 'Trebuchet MS',sans-serif";
+        ctx.fillStyle = "#555";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.font = "400 13px 'Trebuchet MS',sans-serif";
+        ctx.fillText("탭 또는 Enter로 시작", CX, cardY + cardH - 24);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(64,224,208,0.4)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("파도 서핑", [
+          "밀려오는 파도에 맞춰 점프하세요",
+          "",
+          "조작: 탭으로 점프",
+          "클리어: 파도 8개 서핑 성공",
+          "실패: 파도에 3번 휩쓸림",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(255,255,255,${clearAnim * 0.4})`;
+        ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) {
+          drawCard("서핑 성공!", [
+            `${Math.ceil(elapsed)}초 만에 완료`,
+            `실패: ${wiped}번`,
+          ], COL.clear);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("파도에 휩쓸림!", [
+          `파도에 ${wiped}번 휩쓸렸습니다`,
+          `서핑 성공: ${ridden}/${TARGET}`,
+        ], COL.fail);
+      }
+
+      // --- Input ---
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset(); mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        jump();
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") { handleStart(); return; }
+          jump();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT); dt -= FIXED_DT; steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          ridden, wiped,
+          surferY: +surfer.y.toFixed(0),
+          grounded: surfer.grounded,
+          result: window.relayStageResult.status,
+          waveCount: waves.length,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          ridden = TARGET;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          wiped = MAX_MISS;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      // --- Init ---
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
