@@ -21,7 +21,9 @@ Custom commands are registered in `.claude/commands/`:
 - For `/check-stage` and `/publish-stage`, always prefer explicit `stage-slug` over git-change inference.
 - For `/publish-stage`, if the current branch already has an open PR, push new commits to that same PR. If the earlier PR for that branch is already merged or closed, create a new PR.
 - Before declaring success, run `node relay-tools/scripts/check_stage.js --stage <stage-slug>`.
+- `check_stage.js`가 썸네일을 자동 생성하므로, 검증 통과 후 반드시 `node relay-tools/scripts/sync_registry.js`를 다시 실행하여 `registry.js`에 썸네일 경로가 반영되도록 한다. 커밋은 레지스트리 재동기화 이후에 한다.
 - `/check-stage` 시 반드시 로컬 HTTP 서버(`python3 -m http.server 4173`)를 기동하여 브라우저에서 확인 가능하게 한다.
 - `/check-stage`는 모바일 `menu / running / failed` 스크린샷 생성과 모바일 가로 오버플로 검사를 포함한다.
 - `index.html`, `styles.css`, `game.js`, `community-stages/gallery.*`, `community-stages/play.html`를 바꿨으면 `node relay-tools/scripts/check_host_flow.js --base-url http://127.0.0.1:4173 --mobile`도 함께 실행한다.
 - `/publish-stage` 시 `--pr` 플래그로 PR까지 한 번에 완료한다.
+- 게임 설명(`clearCondition`)은 play.html에서 2줄 clamp(0.74rem)으로 표시된다. `/make-stage` 시 `clear-condition` 텍스트는 간결하게 작성한다.

@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>지필묵</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Noto Serif KR", "Palatino Linotype", "Georgia", serif;
+        background: #e8dcc8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(148, 130, 100, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(60, 44, 28, 0.92);
+        color: #f4ece0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #f4ece0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(120, 80, 40, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">지필묵. 타오르는 두루마리 위에서 붓을 움직여 먹의 영혼을 흡수하세요. 마우스 또는 화면 터치 드래그로 붓을 움직입니다. 모바일에서는 화면 터치와 드래그만으로 플레이할 수 있습니다. 20개의 영혼을 흡수하면 봉인 완성. 영혼 3개가 봉인에 도달하면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="지필묵" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "paper-temple-pulse-fencing-shrink",
+        title: "지필묵",
+        description: "타오르는 두루마리 위에서 붓을 움직여 먹의 영혼을 흡수하세요.",
+        creator: "jungcollin",
+        genre: "Meditative action",
+        clearCondition: "20개의 영혼을 흡수하면 봉인 완성",
+        failCondition: "영혼 3개가 봉인에 도달하면 실패",
+        controls: "마우스 또는 터치 드래그로 붓을 움직여 먹 자국을 남기세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        paper: "#f4ece0",
+        paperDark: "#e0d5c3",
+        ink: "#1a1410",
+        inkLight: "rgba(26, 20, 16, 0.35)",
+        seal: "#b83230",
+        sealLight: "rgba(184, 50, 48, 0.15)",
+        ember: "#c8652a",
+        emberGlow: "rgba(200, 101, 42, 0.6)",
+        ash: "#8a7a6a",
+        damage: "#9e2020",
+      };
+
+      // --- State ---
+      const DURATION = 35;
+      const TARGET = 20;
+      const MAX_HITS = 3;
+      const SEAL_RADIUS = 28;
+      const TRAIL_MAX = 48;
+      const BURN_START_RADIUS = 350;
+      const BURN_END_RADIUS = 60;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let absorbed = 0;
+      let sealHits = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let sealPulse = 0;
+      let clearAnim = 0;
+
+      // Brush
+      let brush = { x: CX, y: CY - 80, targetX: CX, targetY: CY - 80 };
+      let trail = []; // [{x, y, age, width}]
+
+      // Spirits
+      let spirits = [];
+      let spawnTimer = 0;
+
+      // Particles
+      let particles = [];
+
+      // Embers (ambient)
+      let embers = [];
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function progress() { return clamp(elapsed / DURATION, 0, 1); }
+      function burnRadius() { return lerp(BURN_START_RADIUS, BURN_END_RADIUS, progress()); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Spawning ---
+      function spawnSpirit() {
+        const br = burnRadius();
+        const angle = rand(0, Math.PI * 2);
+        const spawnR = br + rand(20, 60);
+        const speed = lerp(38, 72, progress()) + rand(-8, 8);
+        spirits.push({
+          x: CX + Math.cos(angle) * spawnR,
+          y: CY + Math.sin(angle) * spawnR,
+          vx: 0, vy: 0,
+          speed,
+          r: rand(6, 10),
+          wobble: rand(0, Math.PI * 2),
+          wobbleSpeed: rand(1.5, 3),
+          alpha: 0,
+          age: 0,
+        });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(40, 140);
+          particles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 1, color,
+            size: rand(sizeRange[0], sizeRange[1]),
+          });
+        }
+      }
+
+      function initEmbers() {
+        embers = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 18; i++) {
+          embers.push({
+            angle: rand(0, Math.PI * 2),
+            rOffset: rand(-20, 20),
+            drift: rand(0.1, 0.4),
+            flicker: rand(0, Math.PI * 2),
+            size: rand(1.5, 3.5),
+          });
+        }
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; absorbed = 0; sealHits = 0;
+        shake = 0; flashAlpha = 0; sealPulse = 0; clearAnim = 0;
+        brush = { x: CX, y: CY - 80, targetX: CX, targetY: CY - 80 };
+        trail = []; spirits = []; particles = [];
+        spawnTimer = 1.2;
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initEmbers();
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Brush movement
+        const lerpSpeed = 12;
+        brush.x = lerp(brush.x, brush.targetX, clamp(lerpSpeed * dt, 0, 1));
+        brush.y = lerp(brush.y, brush.targetY, clamp(lerpSpeed * dt, 0, 1));
+
+        // Trail
+        const speed = dist(brush.x, brush.y, trail.length > 0 ? trail[0].x : brush.x, trail.length > 0 ? trail[0].y : brush.y);
+        const trailWidth = clamp(lerp(2, 8, speed / 12), 2, 8);
+        trail.unshift({ x: brush.x, y: brush.y, age: 0, width: trailWidth });
+        if (trail.length > TRAIL_MAX) trail.pop();
+        for (let i = 0; i < trail.length; i++) trail[i].age += dt;
+        // Fade old trail
+        while (trail.length > 0 && trail[trail.length - 1].age > 1.2) trail.pop();
+
+        // Spawn spirits
+        const spawnInterval = lerp(1.4, 0.5, progress());
+        spawnTimer -= dt;
+        if (spawnTimer <= 0) {
+          spawnSpirit();
+          // Spawn extra spirit in later stages
+          if (progress() > 0.5 && Math.random() < 0.35) spawnSpirit();
+          spawnTimer = spawnInterval;
+        }
+
+        // Update spirits
+        const br = burnRadius();
+        for (let i = spirits.length - 1; i >= 0; i--) {
+          const s = spirits[i];
+          s.age += dt;
+          s.alpha = clamp(s.age * 3, 0, 0.85);
+          s.wobble += s.wobbleSpeed * dt;
+
+          // Move toward center with wobble
+          const dx = CX - s.x, dy = CY - s.y;
+          const d = Math.hypot(dx, dy) || 1;
+          const nx = dx / d, ny = dy / d;
+          const wobbleX = Math.cos(s.wobble) * 18;
+          const wobbleY = Math.sin(s.wobble * 1.3) * 18;
+          s.x += (nx * s.speed + wobbleX) * dt;
+          s.y += (ny * s.speed + wobbleY) * dt;
+
+          // Check trail collision
+          let hit = false;
+          for (let j = 0; j < trail.length - 1; j++) {
+            const t = trail[j];
+            if (t.age > 0.9) continue; // faded trail doesn't absorb
+            if (dist(s.x, s.y, t.x, t.y) < s.r + t.width + 4) {
+              hit = true;
+              break;
+            }
+          }
+
+          if (hit) {
+            // Absorbed!
+            absorbed++;
+            spawnParticles(s.x, s.y, reducedMotion ? 4 : 10, COL.ink, [2, 5]);
+            sealPulse = 1;
+            spirits.splice(i, 1);
+            continue;
+          }
+
+          // Check seal collision
+          if (dist(s.x, s.y, CX, CY) < SEAL_RADIUS + s.r) {
+            sealHits++;
+            shake = 8;
+            flashAlpha = 0.4;
+            spawnParticles(s.x, s.y, reducedMotion ? 3 : 8, COL.damage, [3, 7]);
+            spirits.splice(i, 1);
+            continue;
+          }
+
+          // Remove if inside burn zone center (too close, shouldn't happen normally)
+          if (d < 10) {
+            spirits.splice(i, 1);
+          }
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vx *= 0.94;
+          p.vy *= 0.94;
+          p.life -= dt * 2.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Embers
+        for (const e of embers) {
+          e.angle += e.drift * dt;
+          e.flicker += rand(2, 5) * dt;
+        }
+
+        // Shake decay
+        shake *= 0.88;
+        if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+        sealPulse *= 0.93;
+
+        // Win/lose check
+        if (absorbed >= TARGET) {
+          mode = "clear";
+          clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+        } else if (sealHits >= MAX_HITS) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("봉인 파괴");
+        } else if (elapsed >= DURATION && absorbed < TARGET) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("시간 초과");
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+
+        // Shake offset
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Paper background
+        ctx.fillStyle = COL.paper;
+        ctx.fillRect(0, 0, W, H);
+
+        // Subtle paper grain
+        drawPaperGrain();
+
+        // Burning edge
+        drawBurningEdge();
+
+        // Trail (ink brush strokes)
+        drawTrail();
+
+        // Spirits
+        drawSpirits();
+
+        // Seal
+        drawSeal();
+
+        // Particles
+        drawParticles();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        // Flash overlay
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(158, 32, 32, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        // Overlays (not affected by shake)
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawPaperGrain() {
+        // Minimal texture via subtle spots
+        if (reducedMotion) return;
+        ctx.globalAlpha = 0.03;
+        ctx.fillStyle = "#8a7a6a";
+        const seed = Math.floor(elapsed * 0.5); // slow change
+        for (let i = 0; i < 30; i++) {
+          const px = ((i * 137 + seed * 29) % W);
+          const py = ((i * 211 + seed * 47) % H);
+          ctx.fillRect(px, py, 2, 2);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawBurningEdge() {
+        const br = burnRadius();
+        // Darken outside burn radius
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, W, H);
+        ctx.arc(CX, CY, br, 0, Math.PI * 2, true);
+        ctx.fillStyle = COL.paperDark;
+        ctx.fill();
+
+        // Burn gradient ring
+        const grad = ctx.createRadialGradient(CX, CY, br - 15, CX, CY, br + 25);
+        grad.addColorStop(0, "rgba(200, 101, 42, 0)");
+        grad.addColorStop(0.4, "rgba(200, 101, 42, 0.25)");
+        grad.addColorStop(0.7, "rgba(140, 60, 20, 0.35)");
+        grad.addColorStop(1, "rgba(60, 30, 10, 0.5)");
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.restore();
+
+        // Ember particles along burn edge
+        if (!reducedMotion) {
+          for (const e of embers) {
+            const r = br + e.rOffset;
+            const ex = CX + Math.cos(e.angle) * r;
+            const ey = CY + Math.sin(e.angle) * r;
+            const a = (Math.sin(e.flicker) * 0.3 + 0.5) * 0.6;
+            ctx.beginPath();
+            ctx.arc(ex, ey, e.size, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(200, 101, 42, ${a})`;
+            ctx.fill();
+          }
+        }
+      }
+
+      function drawTrail() {
+        if (trail.length < 2) return;
+        for (let i = 0; i < trail.length - 1; i++) {
+          const t = trail[i];
+          const n = trail[i + 1];
+          const fadeRatio = 1 - clamp(t.age / 1.2, 0, 1);
+          const alpha = fadeRatio * 0.7;
+          if (alpha < 0.01) continue;
+
+          ctx.beginPath();
+          ctx.moveTo(t.x, t.y);
+          ctx.lineTo(n.x, n.y);
+          ctx.strokeStyle = `rgba(26, 20, 16, ${alpha})`;
+          ctx.lineWidth = t.width * fadeRatio;
+          ctx.lineCap = "round";
+          ctx.stroke();
+        }
+
+        // Brush head
+        const bAlpha = mode === "running" ? 0.9 : 0.3;
+        ctx.beginPath();
+        ctx.arc(brush.x, brush.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(26, 20, 16, ${bAlpha})`;
+        ctx.fill();
+      }
+
+      function drawSpirits() {
+        for (const s of spirits) {
+          ctx.save();
+          ctx.globalAlpha = s.alpha;
+
+          // Spirit body — organic ink drop shape
+          ctx.beginPath();
+          const wobbleR = s.r + Math.sin(s.wobble * 2) * 1.5;
+          ctx.arc(s.x, s.y, wobbleR, 0, Math.PI * 2);
+          ctx.fillStyle = COL.ink;
+          ctx.fill();
+
+          // Small ink drip (tail pointing away from center)
+          const dx = s.x - CX, dy = s.y - CY;
+          const d = Math.hypot(dx, dy) || 1;
+          const tailX = s.x + (dx / d) * s.r * 1.5;
+          const tailY = s.y + (dy / d) * s.r * 1.5;
+          ctx.beginPath();
+          ctx.arc(tailX, tailY, wobbleR * 0.4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.restore();
+        }
+      }
+
+      function drawSeal() {
+        // Seal glow when absorbing
+        if (sealPulse > 0.05) {
+          ctx.beginPath();
+          ctx.arc(CX, CY, SEAL_RADIUS + 12 + sealPulse * 8, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(184, 50, 48, ${sealPulse * 0.2})`;
+          ctx.fill();
+        }
+
+        // Main seal circle
+        ctx.beginPath();
+        ctx.arc(CX, CY, SEAL_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = COL.sealLight;
+        ctx.fill();
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = COL.seal;
+        ctx.stroke();
+
+        // Seal character (印)
+        ctx.fillStyle = COL.seal;
+        ctx.font = `bold 22px "Noto Serif KR", serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("印", CX, CY + 1);
+
+        // Damage cracks
+        for (let i = 0; i < sealHits; i++) {
+          const angle = (i / MAX_HITS) * Math.PI * 2 - Math.PI / 2;
+          const crackLen = SEAL_RADIUS + 10;
+          ctx.beginPath();
+          ctx.moveTo(CX, CY);
+          const ex = CX + Math.cos(angle) * crackLen;
+          const ey = CY + Math.sin(angle) * crackLen;
+          ctx.lineTo(ex, ey);
+          ctx.strokeStyle = COL.damage;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = p.life;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        // Top-left: absorbed count
+        ctx.fillStyle = COL.ink;
+        ctx.font = `500 15px "Noto Serif KR", serif`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`${absorbed} / ${TARGET}`, 24, 20);
+
+        // Top-right: time remaining
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.textAlign = "right";
+        ctx.fillText(`${Math.ceil(timeLeft)}`, W - 24, 20);
+
+        // Timer bar (thin line at top)
+        const barW = W - 48;
+        const barX = 24;
+        const barY = 44;
+        ctx.fillStyle = COL.paperDark;
+        ctx.fillRect(barX, barY, barW, 2);
+        ctx.fillStyle = COL.ash;
+        ctx.fillRect(barX, barY, barW * (1 - progress()), 2);
+
+        // Seal health (small dots bottom-center)
+        const dotY = H - 24;
+        for (let i = 0; i < MAX_HITS; i++) {
+          const dotX = CX - (MAX_HITS - 1) * 10 + i * 20;
+          ctx.beginPath();
+          ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
+          if (i < MAX_HITS - sealHits) {
+            ctx.fillStyle = COL.seal;
+          } else {
+            ctx.fillStyle = COL.paperDark;
+          }
+          ctx.fill();
+        }
+      }
+
+      // --- Overlay cards (memory-dodge style) ---
+      function drawCard(title, lines, accent) {
+        const cardW = 320, cardH = 38 + lines.length * 26 + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        // Card background
+        ctx.fillStyle = "rgba(244, 236, 224, 0.95)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 8);
+        ctx.fill();
+
+        // Top accent line
+        ctx.fillStyle = accent || COL.seal;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+
+        // Title
+        ctx.fillStyle = COL.ink;
+        ctx.font = `bold 22px "Noto Serif KR", serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        // Lines
+        ctx.font = `400 14px "Noto Serif KR", serif`;
+        ctx.fillStyle = "rgba(26, 20, 16, 0.7)";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 50 + i * 26);
+        }
+
+        // Action prompt
+        ctx.fillStyle = "rgba(26, 20, 16, 0.4)";
+        ctx.font = `400 13px "Noto Serif KR", serif`;
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 20);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        // Dim background
+        ctx.fillStyle = "rgba(244, 236, 224, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+
+        drawCard("지필묵", [
+          "타오르는 두루마리 위에서",
+          "붓을 움직여 먹의 영혼을 흡수하세요",
+          "",
+          "조작: 드래그로 붓을 움직이기",
+          "클리어: 20개 영혼 흡수",
+          "실패: 영혼 3개가 봉인에 도달",
+        ], COL.seal);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(244, 236, 224, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+
+        if (clearAnim > 0.3) {
+          drawCard("봉인 완성", [
+            `${Math.ceil(elapsed)}초 만에 완료`,
+            `흡수: ${absorbed}개`,
+          ], COL.seal);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(60, 30, 20, 0.3)";
+        ctx.fillRect(0, 0, W, H);
+
+        drawCard("봉인 파괴", [
+          elapsed >= DURATION ? "시간이 다했습니다" : "영혼이 봉인에 도달했습니다",
+          `흡수: ${absorbed} / ${TARGET}`,
+        ], COL.damage);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset();
+          mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        brush.targetX = p.x;
+        brush.targetY = p.y;
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running") return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        brush.targetX = p.x;
+        brush.targetY = p.y;
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleStart();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+
+        // Fixed timestep
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+
+        draw();
+      }
+
+      // --- Debug / test harness ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          absorbed, sealHits, burnRadius: +burnRadius().toFixed(0),
+          result: window.relayStageResult.status,
+          spirits: spirits.length,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          absorbed = TARGET;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          sealHits = MAX_HITS;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail");
+          draw();
+        },
+      };
+
+      // --- Init ---
+      initEmbers();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

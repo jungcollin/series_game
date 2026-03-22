@@ -29,10 +29,33 @@ GitHub 저장소 `https://github.com/jungcollin/series_game`를 fork한 뒤 내 
 - creator github
 - genre
 - controls
-- clear-condition
-- fail-condition
+- clear-condition (한 줄, 약 40자 내외로 간결하게)
+- fail-condition (한 줄, 약 40자 내외로 간결하게)
 이 값이 비면 create_stage.js를 실행하지 말고 먼저 나한테 물어봐.
 그리고 최종으로 선택한 stage-slug를 반드시 마지막에 한 줄로 다시 알려줘.
+```
+
+더 빨리 시작하려면 로컬 브라우저에서 아래 페이지를 연다.
+
+```text
+http://127.0.0.1:4173/relay-tools/make-stage.html
+```
+
+이 페이지는 아이디어와 프리셋만으로 아래 둘을 바로 만들어 준다.
+
+- 실행용 CLI 명령
+- `/make-stage`에 붙여 넣을 프롬프트
+
+또는 터미널에서 바로 초안 스캐폴드를 만들 수 있다.
+
+```bash
+node relay-tools/scripts/create_stage.js --draft --preset platformer --title "Meteor Escape" --description "발판을 밟으며 끝까지 달려가는 스테이지"
+```
+
+사용 가능한 프리셋 확인:
+
+```bash
+node relay-tools/scripts/create_stage.js --list-presets
 ```
 
 예시:

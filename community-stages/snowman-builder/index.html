@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>눈사람 빚기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E0F0FF; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 220, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(40, 80, 120, 0.92);
+        color: #E0F0FF; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E0F0FF; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(255, 140, 66, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">눈사람 빚기. 눈덩이를 굴려 적당한 크기로 만들어 눈사람을 쌓으세요. 화면을 드래그하여 눈덩이를 굴립니다. 모바일에서는 터치 드래그로 플레이할 수 있습니다. 눈사람 3단을 완성하면 클리어. 눈덩이가 장애물에 부딪히면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="눈사람 빚기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "snowman-builder",
+        title: "눈사람 빚기",
+        description: "눈덩이를 굴려 적당한 크기로 만들어 눈사람을 쌓으세요",
+        creator: "jungcollin",
+        genre: "Rolling builder",
+        clearCondition: "눈사람 3단을 완성하면 클리어",
+        failCondition: "눈덩이가 장애물에 부딪히면 실패",
+        controls: "드래그로 눈덩이를 굴려 크기를 맞추세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        skyTop: "#B8D8F8",
+        skyBot: "#E0F0FF",
+        snow: "#F8FAFF",
+        snowShadow: "#D0DCE8",
+        snowDark: "#C0D0E0",
+        ball: "#FFFFFF",
+        ballShadow: "#D8E4F0",
+        carrot: "#FF8C42",
+        coal: "#333333",
+        stick: "#8B6F47",
+        scarf: "#E74C3C",
+        rock: "#7A8B8C",
+        rockDark: "#5A6B6C",
+        tree: "#2E7D32",
+        treeTrunk: "#5D4037",
+        target: "rgba(255,140,66,0.3)",
+        accent: "#FF8C42",
+        fail: "#C0392B",
+        clear: "#27AE60",
+      };
+
+      // --- Constants ---
+      const GROUND_Y = 420;
+      const SNOWMAN_X = CX;
+      const TARGET_SIZES = [55, 40, 28]; // bottom, middle, head
+      const SIZE_TOLERANCE = 8;
+      const GROW_RATE = 25; // px/sec while moving
+      const MAX_BALL_SIZE = 80;
+
+      // --- State ---
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let clearAnim = 0;
+      let shake = 0;
+      let flashAlpha = 0;
+
+      let currentLayer = 0; // 0=bottom, 1=middle, 2=head
+      let placedBalls = []; // [{x, y, r}]
+      let ball = null; // rolling ball {x, y, r, vx, vy}
+      let dragging = false;
+      let obstacles = [];
+      let snowflakes = [];
+      let particles = [];
+      let trees = [];
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function generateObstacles() {
+        obstacles = [];
+        // Rocks scattered around
+        const positions = [
+          { x: 180, y: GROUND_Y - 8, r: 14 },
+          { x: 350, y: GROUND_Y - 6, r: 10 },
+          { x: 620, y: GROUND_Y - 10, r: 16 },
+          { x: 770, y: GROUND_Y - 7, r: 12 },
+        ];
+        for (const p of positions) {
+          obstacles.push({ ...p });
+        }
+      }
+
+      function generateTrees() {
+        trees = [];
+        const treeX = [60, 130, 830, 910];
+        for (const tx of treeX) {
+          trees.push({ x: tx, h: rand(60, 100) });
+        }
+      }
+
+      function initSnowflakes() {
+        snowflakes = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 40; i++) {
+          snowflakes.push({
+            x: rand(0, W), y: rand(0, H),
+            size: rand(1.5, 4),
+            speed: rand(15, 40),
+            drift: rand(-10, 10),
+            alpha: rand(0.3, 0.8),
+          });
+        }
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(30, 80);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - rand(20, 50),
+            life: 1, color, size: rand(sizeRange[0], sizeRange[1]),
+          });
+        }
+      }
+
+      function spawnBall() {
+        ball = {
+          x: 100, y: GROUND_Y - 12,
+          r: 12,
+          targetR: TARGET_SIZES[currentLayer],
+        };
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; clearAnim = 0; shake = 0; flashAlpha = 0;
+        currentLayer = 0; placedBalls = [];
+        ball = null; dragging = false;
+        particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateObstacles(); generateTrees();
+        initSnowflakes();
+        spawnBall();
+      }
+
+      function placeBall() {
+        if (!ball) return;
+        const target = TARGET_SIZES[currentLayer];
+        const diff = Math.abs(ball.r - target);
+        if (diff <= SIZE_TOLERANCE) {
+          // Place it!
+          let py;
+          if (currentLayer === 0) {
+            py = GROUND_Y - ball.r;
+          } else if (currentLayer === 1) {
+            py = placedBalls[0].y - placedBalls[0].r - ball.r + 5;
+          } else {
+            py = placedBalls[1].y - placedBalls[1].r - ball.r + 4;
+          }
+          placedBalls.push({ x: SNOWMAN_X, y: py, r: ball.r });
+          spawnParticles(SNOWMAN_X, py, reducedMotion ? 4 : 10, COL.snow, [3, 6]);
+          currentLayer++;
+
+          if (currentLayer >= 3) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared";
+            reportCleared();
+            ball = null;
+            return;
+          }
+          spawnBall();
+        } else {
+          // Wrong size - shake but let them try again
+          shake = 4;
+          flashAlpha = 0.15;
+          // Reset ball to try again
+          spawnBall();
+        }
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Snowflakes
+        for (const sf of snowflakes) {
+          sf.y += sf.speed * dt;
+          sf.x += sf.drift * dt;
+          if (sf.y > H + 10) { sf.y = -10; sf.x = rand(0, W); }
+          if (sf.x < -10) sf.x = W + 10;
+          if (sf.x > W + 10) sf.x = -10;
+        }
+
+        // Ball rolling
+        if (ball && dragging) {
+          ball.r = Math.min(ball.r + GROW_RATE * dt, MAX_BALL_SIZE);
+          ball.y = GROUND_Y - ball.r;
+
+          // Check obstacle collision
+          for (const obs of obstacles) {
+            if (dist(ball.x, ball.y, obs.x, obs.y) < ball.r + obs.r) {
+              // Hit obstacle!
+              mode = "failed";
+              shake = 10; flashAlpha = 0.4;
+              spawnParticles(ball.x, ball.y, reducedMotion ? 5 : 15, COL.snowShadow, [4, 8]);
+              window.relayStageResult.status = "failed";
+              reportFailed("장애물 충돌");
+              return;
+            }
+          }
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 100 * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.2) shake = 0;
+        flashAlpha *= 0.9;
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.2 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.2 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+        skyGrad.addColorStop(0, COL.skyTop);
+        skyGrad.addColorStop(1, COL.skyBot);
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, GROUND_Y);
+
+        // Snow ground
+        ctx.fillStyle = COL.snow;
+        ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+        // Snow hills
+        ctx.fillStyle = COL.snowShadow;
+        ctx.beginPath();
+        ctx.moveTo(0, GROUND_Y + 10);
+        ctx.quadraticCurveTo(200, GROUND_Y - 5, 400, GROUND_Y + 8);
+        ctx.quadraticCurveTo(600, GROUND_Y + 20, 800, GROUND_Y + 5);
+        ctx.lineTo(W, GROUND_Y + 12);
+        ctx.lineTo(W, H); ctx.lineTo(0, H);
+        ctx.fill();
+
+        // Trees
+        drawTrees();
+
+        // Obstacles
+        drawObstacles();
+
+        // Target zone
+        if (ball && !dragging) {
+          const target = TARGET_SIZES[currentLayer];
+          ctx.strokeStyle = COL.target;
+          ctx.lineWidth = 3;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          ctx.arc(SNOWMAN_X, GROUND_Y - target, target, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          ctx.fillStyle = "rgba(255,140,66,0.6)";
+          ctx.font = "bold 14px 'Trebuchet MS',sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(`목표: ${target}px`, SNOWMAN_X, GROUND_Y - target - target - 10);
+        }
+
+        // Size gauge
+        if (ball) drawSizeGauge();
+
+        // Placed snowman parts
+        drawPlacedBalls();
+
+        // Rolling ball
+        if (ball) drawBall();
+
+        // Snowflakes
+        drawSnowflakes();
+
+        // Particles
+        drawParticles();
+
+        // Snowman decorations (only when complete or partially complete)
+        if (placedBalls.length >= 3) drawSnowmanDecorations();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(192,57,43,${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawTrees() {
+        for (const t of trees) {
+          ctx.fillStyle = COL.treeTrunk;
+          ctx.fillRect(t.x - 4, GROUND_Y - t.h * 0.4, 8, t.h * 0.4);
+          ctx.fillStyle = COL.tree;
+          // Three triangle layers
+          for (let layer = 0; layer < 3; layer++) {
+            const ly = GROUND_Y - t.h + layer * t.h * 0.25;
+            const lw = 18 + layer * 8;
+            ctx.beginPath();
+            ctx.moveTo(t.x, ly);
+            ctx.lineTo(t.x - lw, ly + t.h * 0.35);
+            ctx.lineTo(t.x + lw, ly + t.h * 0.35);
+            ctx.fill();
+          }
+          // Snow on top
+          ctx.fillStyle = COL.snow;
+          ctx.beginPath();
+          ctx.ellipse(t.x, GROUND_Y - t.h + 8, 10, 5, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawObstacles() {
+        for (const obs of obstacles) {
+          ctx.fillStyle = COL.rockDark;
+          ctx.beginPath();
+          ctx.ellipse(obs.x, obs.y + 2, obs.r, obs.r * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = COL.rock;
+          ctx.beginPath();
+          ctx.ellipse(obs.x, obs.y, obs.r, obs.r * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Snow cap
+          ctx.fillStyle = COL.snow;
+          ctx.beginPath();
+          ctx.ellipse(obs.x, obs.y - obs.r * 0.3, obs.r * 0.6, obs.r * 0.25, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawBall() {
+        const x = ball.x, y = ball.y, r = ball.r;
+        // Shadow
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.beginPath();
+        ctx.ellipse(x, GROUND_Y + 2, r * 0.8, r * 0.15, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Ball
+        const grad = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+        grad.addColorStop(0, COL.ball);
+        grad.addColorStop(1, COL.ballShadow);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+        // Shine
+        ctx.fillStyle = "rgba(255,255,255,0.6)";
+        ctx.beginPath();
+        ctx.arc(x - r * 0.25, y - r * 0.25, r * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawPlacedBalls() {
+        for (const b of placedBalls) {
+          const grad = ctx.createRadialGradient(b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.1, b.x, b.y, b.r);
+          grad.addColorStop(0, COL.ball);
+          grad.addColorStop(1, COL.ballShadow);
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(255,255,255,0.5)";
+          ctx.beginPath();
+          ctx.arc(b.x - b.r * 0.2, b.y - b.r * 0.2, b.r * 0.15, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawSnowmanDecorations() {
+        if (placedBalls.length < 3) return;
+        const head = placedBalls[2];
+        // Eyes
+        ctx.fillStyle = COL.coal;
+        ctx.beginPath();
+        ctx.arc(head.x - 8, head.y - 4, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(head.x + 8, head.y - 4, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Carrot nose
+        ctx.fillStyle = COL.carrot;
+        ctx.beginPath();
+        ctx.moveTo(head.x, head.y + 2);
+        ctx.lineTo(head.x + 18, head.y + 5);
+        ctx.lineTo(head.x, head.y + 8);
+        ctx.fill();
+        // Mouth (smile)
+        ctx.fillStyle = COL.coal;
+        for (let i = -2; i <= 2; i++) {
+          ctx.beginPath();
+          ctx.arc(head.x + i * 5, head.y + 12 + Math.abs(i) * 2, 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // Arms (sticks)
+        const mid = placedBalls[1];
+        ctx.strokeStyle = COL.stick;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(mid.x - mid.r, mid.y);
+        ctx.lineTo(mid.x - mid.r - 35, mid.y - 20);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(mid.x + mid.r, mid.y);
+        ctx.lineTo(mid.x + mid.r + 35, mid.y - 20);
+        ctx.stroke();
+        // Scarf
+        ctx.fillStyle = COL.scarf;
+        ctx.fillRect(mid.x - 18, mid.y - mid.r - 3, 36, 8);
+        ctx.fillRect(mid.x + 10, mid.y - mid.r - 3, 8, 22);
+      }
+
+      function drawSizeGauge() {
+        const target = TARGET_SIZES[currentLayer];
+        const barX = W - 50, barY = 80, barH = 300;
+        const ratio = ball.r / MAX_BALL_SIZE;
+        const targetRatio = target / MAX_BALL_SIZE;
+        const tolRatio = SIZE_TOLERANCE / MAX_BALL_SIZE;
+
+        // Bar bg
+        ctx.fillStyle = "rgba(200,210,220,0.5)";
+        ctx.fillRect(barX, barY, 20, barH);
+
+        // Target zone
+        const targetY = barY + barH - (targetRatio + tolRatio) * barH;
+        const targetH = tolRatio * 2 * barH;
+        ctx.fillStyle = "rgba(46,204,113,0.4)";
+        ctx.fillRect(barX, targetY, 20, targetH);
+
+        // Current size
+        const curY = barY + barH - ratio * barH;
+        ctx.fillStyle = Math.abs(ball.r - target) <= SIZE_TOLERANCE ? COL.clear : COL.accent;
+        ctx.fillRect(barX, curY, 20, 3);
+
+        // Labels
+        ctx.font = "11px 'Trebuchet MS',sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#888";
+        ctx.fillText(`${Math.round(ball.r)}`, barX - 4, curY + 4);
+      }
+
+      function drawSnowflakes() {
+        for (const sf of snowflakes) {
+          ctx.globalAlpha = sf.alpha;
+          ctx.fillStyle = "#fff";
+          ctx.beginPath();
+          ctx.arc(sf.x, sf.y, sf.size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = "rgba(224,240,255,0.75)";
+        ctx.fillRect(0, 0, W, 40);
+        ctx.font = "bold 16px 'Trebuchet MS',sans-serif";
+        ctx.textBaseline = "middle";
+
+        ctx.fillStyle = COL.clear;
+        ctx.textAlign = "left";
+        ctx.fillText(`단계: ${currentLayer + 1}/3`, 20, 20);
+
+        ctx.fillStyle = COL.accent;
+        ctx.textAlign = "center";
+        const layerNames = ["몸통", "가슴", "머리"];
+        ctx.fillText(`${layerNames[currentLayer]} 만드는 중`, CX, 20);
+
+        ctx.fillStyle = "#555";
+        ctx.textAlign = "right";
+        ctx.fillText(`${Math.ceil(elapsed)}초`, W - 70, 20);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 52 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2;
+        const cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 12);
+        ctx.fill();
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+        ctx.fillStyle = "#333";
+        ctx.font = "bold 24px 'Trebuchet MS',sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+        ctx.font = "500 14px 'Trebuchet MS',sans-serif";
+        ctx.fillStyle = "#555";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.font = "400 13px 'Trebuchet MS',sans-serif";
+        ctx.fillText("탭 또는 Enter로 시작", CX, cardY + cardH - 24);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(224,240,255,0.5)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("눈사람 빚기", [
+          "눈덩이를 굴려 눈사람을 만드세요",
+          "",
+          "조작: 드래그로 눈덩이 굴리기, 탭으로 놓기",
+          "클리어: 눈사람 3단 완성",
+          "실패: 장애물에 부딪힘",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(255,255,255,${clearAnim * 0.4})`;
+        ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) {
+          drawCard("눈사람 완성!", [
+            `${Math.ceil(elapsed)}초 만에 완료`,
+            "멋진 눈사람이에요!",
+          ], COL.clear);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("눈덩이 파괴!", [
+          "장애물에 부딪혔습니다",
+          `완성: ${currentLayer}/3 단계`,
+        ], COL.fail);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset(); mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        if (!ball) return;
+        dragging = true;
+        canvas.setPointerCapture(e.pointerId);
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!dragging || !ball) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        ball.x = clamp(p.x, ball.r + 10, W - ball.r - 60);
+        ball.y = GROUND_Y - ball.r;
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (!dragging) return;
+        dragging = false;
+        if (ball) placeBall();
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") handleStart();
+          else if (ball && dragging) { dragging = false; placeBall(); }
+          else if (ball && !dragging) dragging = true;
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT); dt -= FIXED_DT; steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          currentLayer, placedCount: placedBalls.length,
+          ballSize: ball ? +ball.r.toFixed(0) : 0,
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          placedBalls = [
+            { x: SNOWMAN_X, y: GROUND_Y - 55, r: 55 },
+            { x: SNOWMAN_X, y: GROUND_Y - 55 - 55 - 40 + 5, r: 40 },
+            { x: SNOWMAN_X, y: GROUND_Y - 55 - 55 - 40 + 5 - 40 - 28 + 4, r: 28 },
+          ];
+          currentLayer = 3; ball = null;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      // --- Init ---
+      generateObstacles(); generateTrees(); initSnowflakes();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

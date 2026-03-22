@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>파이프 연결</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #E8F4F8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 200, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(40, 70, 90, 0.92);
+        color: #E8F4F8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8F4F8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(59, 130, 246, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">파이프 연결. 화면 터치로 파이프 회전. 물이 출구에 도달하면 클리어. 물이 막힌 곳에 도달하면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="파이프 연결" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = 960, H = 540;
+      const CX = W/2, CY = H/2;
+      const FIXED_DT = 1/60, MAX_DT = 1/20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "pipe-rush", title: "파이프 연결",
+        description: "파이프를 돌려 물길을 연결하는 퍼즐 레이싱 게임",
+        creator: "jungcollin", genre: "Spatial puzzle",
+        clearCondition: "물이 출구에 도달하면 클리어",
+        failCondition: "물이 막힌 곳에 도달하면 실패",
+        controls: "화면 터치로 파이프 회전",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history:[], clearCount:0, previousStageId:null };
+      window.relayStageMeta = { id:META.id, title:META.title, description:META.description, creator:META.creator, genre:META.genre, clearCondition:META.clearCondition, failCondition:META.failCondition, controls:META.controls };
+      window.relayStageResult = { status:"running" };
+
+      const COL = {
+        bg: "#E8F4F8", tile: "#D1E8F0", tileBorder: "#8BB8CC",
+        pipe: "#5A8A9A", pipeInner: "#7AACBC",
+        water: "#3B82F6", waterLight: "rgba(59,130,246,0.3)",
+        source: "#2E7D32", exit: "#E65100",
+        text: "#1A3A4A", textLight: "rgba(26,58,74,0.5)",
+        gold: "#F59E0B", red: "#DC2626",
+      };
+
+      // Grid config
+      const COLS = 6, ROWS = 4;
+      const CELL = 72;
+      const GX = CX - (COLS*CELL)/2, GY = CY - (ROWS*CELL)/2 + 20;
+
+      // Pipe types: 0=straight(|), 1=elbow(L), 2=tee(T), 3=cross(+)
+      // Openings per type per rotation (0=up,1=right,2=down,3=left)
+      const PIPE_OPENINGS = {
+        0: [[0,2],[1,3],[0,2],[1,3]], // straight
+        1: [[0,1],[1,2],[2,3],[3,0]], // elbow
+        2: [[0,1,2],[1,2,3],[2,3,0],[3,0,1]], // tee
+        3: [[0,1,2,3],[0,1,2,3],[0,1,2,3],[0,1,2,3]], // cross
+      };
+      const OPPOSITE = {0:2, 1:3, 2:0, 3:1};
+      const DIR_DR = {0:{r:-1,c:0}, 1:{r:0,c:1}, 2:{r:1,c:0}, 3:{r:0,c:-1}};
+
+      let mode = "menu";
+      let elapsed = 0, lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let grid = []; // [{type, rot, filled, fillAnim}]
+      let sourceR, sourceC, exitR, exitC;
+      let waterFront = []; // [{r,c,fromDir,timer}]
+      let waterDelay = 0;
+      let waterStarted = false;
+      let waterSpeed = 0.4; // seconds per cell
+      let shake = 0, flashA = 0, clearAnim = 0;
+      let particles = [];
+      let level = 0;
+      const DURATION = 40;
+
+      function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+      function lerp(a,b,t){return a+(b-a)*t;}
+      function rand(lo,hi){return lo+Math.random()*(hi-lo);}
+
+      function inRelayHost(){try{return window.parent&&window.parent!==window&&window.parent.RelayHost;}catch{return false;}}
+      function reportReady(){if(inRelayHost())window.parent.RelayHost.onStageReady?.(window.relayStageMeta);}
+      function reportFailed(reason){if(!inRelayHost()||hostFailedReported)return;hostFailedReported=true;window.parent.RelayHost.onStageFailed?.({stageId:META.id,stageTitle:META.title,reason,durationSec:+elapsed.toFixed(1)});}
+      function reportCleared(){if(!inRelayHost()||hostClearedReported)return;hostClearedReported=true;window.parent.RelayHost.onStageCleared?.({stageId:META.id,stageTitle:META.title,clearCountAfter:relayContext.clearCount+1,durationSec:+elapsed.toFixed(1)});}
+
+      function spawnP(x,y,n,col,sr){for(let i=0;i<n;i++){const a=rand(0,Math.PI*2),sp=rand(40,120);particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:1,color:col,size:rand(sr[0],sr[1])});}}
+
+      function getOpenings(type, rot) { return PIPE_OPENINGS[type][rot % 4]; }
+
+      function hasOpening(r,c,dir) {
+        if(r<0||r>=ROWS||c<0||c>=COLS) return false;
+        const cell = grid[r*COLS+c];
+        return getOpenings(cell.type, cell.rot).includes(dir);
+      }
+
+      function generateLevel() {
+        grid = [];
+        for(let i=0; i<ROWS*COLS; i++) {
+          grid.push({ type: Math.floor(rand(0,3.99)), rot: Math.floor(rand(0,4)), filled: false, fillAnim: 0 });
+        }
+        // Source: left side, random row
+        sourceR = Math.floor(rand(0, ROWS));
+        sourceC = -1;
+        // Exit: right side, random row
+        exitR = Math.floor(rand(0, ROWS));
+        exitC = COLS;
+        // Ensure first column pipe has left opening, last column has right opening
+        // Generate a solvable path
+        let path = generatePath(sourceR, 0, exitR, COLS-1);
+        for(const {r,c,from,to} of path) {
+          const cell = grid[r*COLS+c];
+          // Find type+rot that has both from and to openings
+          for(let type=0; type<4; type++){
+            for(let rot=0; rot<4; rot++){
+              const opens = PIPE_OPENINGS[type][rot];
+              if(opens.includes(from) && opens.includes(to)){
+                cell.type = type; cell.rot = rot; break;
+              }
+            }
+          }
+        }
+        // Randomize rotations (make puzzle)
+        for(const cell of grid) {
+          cell.rot = (cell.rot + Math.floor(rand(1,4))) % 4;
+          cell.filled = false; cell.fillAnim = 0;
+        }
+        waterFront = [];
+        waterStarted = false;
+        waterDelay = 3.0; // 3 seconds before water starts
+        waterSpeed = lerp(0.5, 0.3, level/4);
+      }
+
+      function generatePath(startR, startC, endR, endC) {
+        let path = [];
+        let r = startR, c = startC;
+        while(c < endC || r !== endR) {
+          let from = (c === startC && r === startR) ? 3 : (path.length > 0 ? OPPOSITE[path[path.length-1].to] : 3);
+          let to;
+          if(c < endC && (r === endR || Math.random() > 0.4)) {
+            to = 1; // right
+          } else if(r < endR) {
+            to = 2; // down
+          } else if(r > endR) {
+            to = 0; // up
+          } else {
+            to = 1; // right
+          }
+          path.push({r, c, from, to});
+          const d = DIR_DR[to];
+          r += d.r; c += d.c;
+        }
+        // Last cell
+        path.push({r, c: endC, from: OPPOSITE[path[path.length-1].to], to: 1});
+        // Fix: endC is COLS-1 actually
+        // Rewrite path properly
+        path = [];
+        r = startR; c = startC;
+        let prevTo = 3; // coming from left
+        while(c <= endC) {
+          let from = (c === startC) ? 3 : OPPOSITE[prevTo];
+          let to;
+          if(c === endC) { to = 1; }
+          else if(r === endR || Math.random() > 0.45) { to = 1; }
+          else if(r < endR) { to = 2; }
+          else { to = 0; }
+          path.push({r, c, from, to});
+          prevTo = to;
+          const d = DIR_DR[to];
+          r += d.r; c += d.c;
+          if(c > endC) break;
+        }
+        return path;
+      }
+
+      function reset() {
+        elapsed=0; shake=0; flashA=0; clearAnim=0; particles=[];
+        hostFailedReported=false; hostClearedReported=false;
+        window.relayStageResult.status="running";
+        level = 0;
+        generateLevel();
+      }
+
+      function rotatePipe(r,c) {
+        if(r<0||r>=ROWS||c<0||c>=COLS) return;
+        const cell = grid[r*COLS+c];
+        if(cell.filled) return; // can't rotate filled pipes
+        cell.rot = (cell.rot + 1) % 4;
+        spawnP(GX+c*CELL+CELL/2, GY+r*CELL+CELL/2, reducedMotion?2:5, COL.tileBorder, [2,4]);
+      }
+
+      function startWater() {
+        waterStarted = true;
+        // Start from source
+        const firstC = 0;
+        waterFront = [{r: sourceR, c: firstC, fromDir: 3, timer: waterSpeed}];
+      }
+
+      function update(dt) {
+        if(mode!=="running"&&mode!=="clear") return;
+        if(mode==="clear"){clearAnim=clamp(clearAnim+dt*1.5,0,1);updP(dt);return;}
+        elapsed += dt;
+
+        // Water start countdown
+        if(!waterStarted) {
+          waterDelay -= dt;
+          if(waterDelay <= 0) startWater();
+        }
+
+        // Water flow
+        if(waterStarted && waterFront.length > 0) {
+          for(let i = waterFront.length-1; i >= 0; i--) {
+            const wf = waterFront[i];
+            wf.timer -= dt;
+            if(wf.timer <= 0) {
+              const cell = grid[wf.r*COLS+wf.c];
+              const opens = getOpenings(cell.type, cell.rot);
+              // Check if water can enter from this direction
+              if(!opens.includes(wf.fromDir)) {
+                // Water hit a wall - FAIL
+                mode = "failed";
+                window.relayStageResult.status = "failed";
+                reportFailed("물이 막혔습니다");
+                shake = 8; flashA = 0.3;
+                spawnP(GX+wf.c*CELL+CELL/2, GY+wf.r*CELL+CELL/2, reducedMotion?4:10, COL.red, [3,6]);
+                return;
+              }
+              cell.filled = true;
+              cell.fillAnim = 0;
+              // Find next cells water flows to
+              waterFront.splice(i, 1);
+              for(const openDir of opens) {
+                if(openDir === wf.fromDir) continue; // don't go back
+                const d = DIR_DR[openDir];
+                const nr = wf.r + d.r, nc = wf.c + d.c;
+                // Check if reached exit
+                if(nc >= COLS && wf.r === exitR && openDir === 1) {
+                  // CLEAR!
+                  mode = "clear"; clearAnim = 0;
+                  window.relayStageResult.status = "cleared";
+                  reportCleared();
+                  spawnP(GX+COLS*CELL, GY+exitR*CELL+CELL/2, reducedMotion?6:20, COL.water, [3,8]);
+                  return;
+                }
+                if(nr>=0 && nr<ROWS && nc>=0 && nc<COLS && !grid[nr*COLS+nc].filled) {
+                  waterFront.push({r:nr, c:nc, fromDir: OPPOSITE[openDir], timer: waterSpeed});
+                }
+              }
+            }
+          }
+        }
+
+        // Fill animations
+        for(const cell of grid) {
+          if(cell.filled && cell.fillAnim < 1) cell.fillAnim = clamp(cell.fillAnim + dt*4, 0, 1);
+        }
+
+        shake *= 0.88; if(shake<0.3) shake=0; flashA *= 0.92;
+        updP(dt);
+
+        if(elapsed >= DURATION) {
+          mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("시간 초과");
+        }
+      }
+
+      function updP(dt){for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=80*dt;p.life-=dt*2.5;if(p.life<=0)particles.splice(i,1);}}
+
+      function draw() {
+        ctx.save();
+        const sx=shake>0.3?rand(-shake,shake):0, sy=shake>0.3?rand(-shake,shake):0;
+        ctx.translate(sx,sy);
+        ctx.fillStyle=COL.bg; ctx.fillRect(0,0,W,H);
+
+        if(mode==="running"||mode==="clear"||mode==="failed") {
+          drawGrid();
+          drawSource();
+          drawExit();
+          drawWaterFront();
+          if(mode==="running") drawHUD();
+        }
+
+        drawParts();
+        if(flashA>0.01){ctx.fillStyle=`rgba(220,38,38,${flashA})`;ctx.fillRect(0,0,W,H);}
+        ctx.restore();
+
+        if(mode==="menu") drawMenu();
+        else if(mode==="clear") drawClearScreen();
+        else if(mode==="failed") drawFailedScreen();
+      }
+
+      function drawGrid() {
+        for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) {
+          const x=GX+c*CELL, y=GY+r*CELL;
+          const cell = grid[r*COLS+c];
+
+          // Tile bg
+          ctx.fillStyle = cell.filled ? COL.waterLight : COL.tile;
+          ctx.fillRect(x+1, y+1, CELL-2, CELL-2);
+          ctx.strokeStyle = COL.tileBorder;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x+1, y+1, CELL-2, CELL-2);
+
+          // Draw pipe
+          const opens = getOpenings(cell.type, cell.rot);
+          const cx2 = x+CELL/2, cy2 = y+CELL/2;
+          const pw = 16; // pipe width
+
+          ctx.fillStyle = cell.filled ? COL.water : COL.pipe;
+          // Center junction
+          ctx.fillRect(cx2-pw/2, cy2-pw/2, pw, pw);
+
+          for(const dir of opens) {
+            if(dir===0) ctx.fillRect(cx2-pw/2, y+1, pw, CELL/2-1); // up
+            if(dir===1) ctx.fillRect(cx2, cy2-pw/2, CELL/2-1, pw); // right
+            if(dir===2) ctx.fillRect(cx2-pw/2, cy2, pw, CELL/2-1); // down
+            if(dir===3) ctx.fillRect(x+1, cy2-pw/2, CELL/2-1, pw); // left
+          }
+
+          // Inner pipe highlight
+          ctx.fillStyle = cell.filled ? "rgba(59,130,246,0.5)" : COL.pipeInner;
+          const ipw = 8;
+          ctx.fillRect(cx2-ipw/2, cy2-ipw/2, ipw, ipw);
+          for(const dir of opens) {
+            if(dir===0) ctx.fillRect(cx2-ipw/2, y+5, ipw, CELL/2-5);
+            if(dir===1) ctx.fillRect(cx2, cy2-ipw/2, CELL/2-5, ipw);
+            if(dir===2) ctx.fillRect(cx2-ipw/2, cy2, ipw, CELL/2-5);
+            if(dir===3) ctx.fillRect(x+5, cy2-ipw/2, CELL/2-5, ipw);
+          }
+        }
+      }
+
+      function drawSource() {
+        const x = GX - 40, y = GY + sourceR*CELL;
+        ctx.fillStyle = COL.source;
+        rr(ctx, x, y+10, 38, CELL-20, 6); ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 14px 'Segoe UI',sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText("수원", x+19, y+CELL/2);
+        // Arrow
+        ctx.fillStyle = COL.source;
+        ctx.beginPath();
+        ctx.moveTo(GX-2, y+CELL/2-8);
+        ctx.lineTo(GX+6, y+CELL/2);
+        ctx.lineTo(GX-2, y+CELL/2+8);
+        ctx.fill();
+      }
+
+      function drawExit() {
+        const x = GX + COLS*CELL + 2, y = GY + exitR*CELL;
+        ctx.fillStyle = COL.exit;
+        rr(ctx, x, y+10, 38, CELL-20, 6); ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 14px 'Segoe UI',sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText("출구", x+19, y+CELL/2);
+      }
+
+      function drawWaterFront() {
+        if(!waterStarted) {
+          // Show countdown
+          const t = Math.ceil(waterDelay);
+          ctx.fillStyle = COL.water;
+          ctx.font = "bold 20px 'Segoe UI',sans-serif";
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(`물 시작: ${t}초`, CX, GY - 20);
+        }
+        // Pulsing water front indicators
+        for(const wf of waterFront) {
+          const x = GX+wf.c*CELL+CELL/2, y = GY+wf.r*CELL+CELL/2;
+          const pulse = Math.sin(elapsed*6)*0.3+0.7;
+          ctx.beginPath(); ctx.arc(x, y, 6*pulse, 0, Math.PI*2);
+          ctx.fillStyle = `rgba(59,130,246,${pulse*0.6})`;
+          ctx.fill();
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "600 15px 'Segoe UI',sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText("파이프 연결", 24, 10);
+        ctx.textAlign = "right";
+        const tl = Math.max(0, DURATION-elapsed);
+        ctx.fillText(`${Math.ceil(tl)}초`, W-24, 10);
+        // Timer bar
+        const bw = W-48, bx = 24, by = 32;
+        ctx.fillStyle = "rgba(26,58,74,0.1)"; ctx.fillRect(bx,by,bw,3);
+        ctx.fillStyle = tl < 10 ? COL.red : COL.water;
+        ctx.fillRect(bx,by,bw*(tl/DURATION),3);
+      }
+
+      function drawParts(){for(const p of particles){ctx.beginPath();ctx.arc(p.x,p.y,p.size*clamp(p.life,0,1),0,Math.PI*2);ctx.fillStyle=p.color;ctx.globalAlpha=clamp(p.life,0,1);ctx.fill();ctx.globalAlpha=1;}}
+
+      function rr(c2,x,y,w,h,r){c2.beginPath();c2.moveTo(x+r,y);c2.lineTo(x+w-r,y);c2.arcTo(x+w,y,x+w,y+r,r);c2.lineTo(x+w,y+h-r);c2.arcTo(x+w,y+h,x+w-r,y+h,r);c2.lineTo(x+r,y+h);c2.arcTo(x,y+h,x,y+h-r,r);c2.lineTo(x,y+r);c2.arcTo(x,y,x+r,y,r);c2.closePath();}
+
+      function drawCard(title,lines,accent){
+        const cw=Math.min(340,W-40),ch=44+lines.length*28+40;
+        const cx2=CX-cw/2,cy2=CY-ch/2;
+        ctx.fillStyle="rgba(232,244,248,0.96)";ctx.beginPath();rr(ctx,cx2,cy2,cw,ch,10);ctx.fill();
+        ctx.fillStyle=accent;ctx.fillRect(cx2+14,cy2,cw-28,3);
+        ctx.fillStyle=COL.text;ctx.font="bold 24px 'Segoe UI',sans-serif";
+        ctx.textAlign="center";ctx.textBaseline="top";ctx.fillText(title,CX,cy2+18);
+        ctx.font="400 14px 'Segoe UI',sans-serif";ctx.fillStyle="rgba(26,58,74,0.7)";
+        for(let i=0;i<lines.length;i++)ctx.fillText(lines[i],CX,cy2+52+i*28);
+        ctx.fillStyle="rgba(26,58,74,0.35)";ctx.font="400 12px 'Segoe UI',sans-serif";
+        ctx.fillText("TAP or ENTER",CX,cy2+ch-20);
+      }
+
+      function drawMenu(){
+        ctx.fillStyle="rgba(232,244,248,0.5)";ctx.fillRect(0,0,W,H);
+        drawCard("파이프 연결",[
+          "파이프를 돌려 물길을 연결하세요","","조작: 화면 터치로 파이프 회전",
+          "클리어: 물이 출구에 도달","실패: 물이 막히면 게임 오버"
+        ], COL.pipe);
+      }
+
+      function drawClearScreen(){
+        clearAnim=clamp(clearAnim+0.02,0,1);
+        ctx.fillStyle=`rgba(232,244,248,${clearAnim*0.5})`;ctx.fillRect(0,0,W,H);
+        if(clearAnim>0.3) drawCard("연결 성공!",[`${Math.ceil(elapsed)}초 만에 완료`,"물이 무사히 도착했습니다"],COL.source);
+      }
+
+      function drawFailedScreen(){
+        ctx.fillStyle="rgba(60,30,20,0.25)";ctx.fillRect(0,0,W,H);
+        drawCard("연결 실패",[elapsed>=DURATION?"시간이 다했습니다":"물이 막혔습니다"],COL.red);
+      }
+
+      function handleStart(){if(mode==="menu"||mode==="clear"||mode==="failed"){reset();mode="running";}}
+
+      function getGridCell(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        const mx = (clientX-rect.left)*(W/rect.width);
+        const my = (clientY-rect.top)*(H/rect.height);
+        const c = Math.floor((mx-GX)/CELL);
+        const r = Math.floor((my-GY)/CELL);
+        if(r>=0&&r<ROWS&&c>=0&&c<COLS) return {r,c};
+        return null;
+      }
+
+      canvas.addEventListener("pointerdown",(e)=>{
+        e.preventDefault();
+        if(mode!=="running"){handleStart();return;}
+        const cell = getGridCell(e.clientX, e.clientY);
+        if(cell) rotatePipe(cell.r, cell.c);
+      });
+
+      canvas.addEventListener("keydown",(e)=>{
+        if(e.key==="Enter"||e.key===" "){e.preventDefault();if(mode!=="running"){handleStart();}}
+      });
+
+      function gameLoop(ts){
+        animFrame=requestAnimationFrame(gameLoop);
+        if(!lastTimestamp){lastTimestamp=ts;return;}
+        let dt=Math.min((ts-lastTimestamp)/1000,MAX_DT);lastTimestamp=ts;
+        let steps=0;
+        while(dt>=FIXED_DT&&steps<4){update(FIXED_DT);dt-=FIXED_DT;steps++;}
+        if(dt>0&&steps<4)update(dt);draw();
+      }
+
+      function renderGameToText(){
+        const filled = grid.filter(c=>c.filled).length;
+        return JSON.stringify({mode,elapsed:+elapsed.toFixed(1),filledCells:filled,totalCells:ROWS*COLS,waterStarted,result:window.relayStageResult.status});
+      }
+
+      window.render_game_to_text=renderGameToText;
+      window.advanceTime=(ms=16.67)=>{const s=Math.max(1,Math.round(ms/(FIXED_DT*1000)));for(let i=0;i<s;i++)update(FIXED_DT);draw();return renderGameToText();};
+      window.relayStageDebug={
+        forceClear(){reset();mode="running";mode="clear";clearAnim=0;window.relayStageResult.status="cleared";reportCleared();draw();},
+        forceFail(){reset();mode="running";mode="failed";window.relayStageResult.status="failed";reportFailed("debug_force_fail");draw();},
+      };
+
+      reportReady();
+      animFrame=requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

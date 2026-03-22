@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Memory Match</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">Memory Match. 캔버스를 터치하거나 Enter로 시작하세요. 조작: 카드를 클릭/터치하여 뒤집기. 클리어 조건: 45초 안에 모든 카드 쌍 맞추기. 실패 조건: 시간 초과 또는 틀린 횟수 8회 초과.</p>
+    <canvas id="game" width="960" height="540" aria-label="Memory Match" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("memory-match") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const COLS = 4;
+      const ROWS = 4;
+      const TOTAL_PAIRS = 8;
+      const TIME_LIMIT = 45;
+      const MAX_MISSES = 8;
+      const SYMBOLS = ["★", "♦", "♣", "♥", "▲", "●", "■", "♠"];
+      const CARD_COLORS = [
+        "#e74c3c", "#3498db", "#2ecc71", "#f39c12",
+        "#9b59b6", "#1abc9c", "#e67e22", "#34495e"
+      ];
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "카드를 뒤집어 같은 그림의 쌍을 찾아 맞추세요",
+        cards: [],
+        flipped: [],
+        matched: [],
+        misses: 0,
+        matchCount: 0,
+        flipLock: false,
+        flipTimer: 0,
+        failReason: "",
+      };
+
+      function shuffleArray(arr) {
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
+      }
+
+      function initCards() {
+        const pairs = [];
+        for (let i = 0; i < TOTAL_PAIRS; i++) {
+          pairs.push(i, i);
+        }
+        shuffleArray(pairs);
+        state.cards = pairs;
+        state.flipped = [];
+        state.matched = new Array(COLS * ROWS).fill(false);
+        state.misses = 0;
+        state.matchCount = 0;
+        state.flipLock = false;
+        state.flipTimer = 0;
+        state.failReason = "";
+      }
+
+      function getCardLayout() {
+        const gridW = 560;
+        const gridH = 400;
+        const offsetX = (VIEW.width - gridW) / 2;
+        const offsetY = 100;
+        const cardW = gridW / COLS - 16;
+        const cardH = gridH / ROWS - 16;
+        const gapX = 16;
+        const gapY = 16;
+        return { offsetX, offsetY, cardW, cardH, gapX, gapY, gridW, gridH };
+      }
+
+      function getCardRect(index) {
+        const layout = getCardLayout();
+        const col = index % COLS;
+        const row = Math.floor(index / COLS);
+        const x = layout.offsetX + col * (layout.cardW + layout.gapX);
+        const y = layout.offsetY + row * (layout.cardH + layout.gapY);
+        return { x, y, w: layout.cardW, h: layout.cardH };
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+        initCards();
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.failReason = reason;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function flipCard(index) {
+        if (state.mode !== "running") return;
+        if (state.flipLock) return;
+        if (state.matched[index]) return;
+        if (state.flipped.includes(index)) return;
+
+        state.flipped.push(index);
+
+        if (state.flipped.length === 2) {
+          state.flipLock = true;
+          const [a, b] = state.flipped;
+          if (state.cards[a] === state.cards[b]) {
+            state.matched[a] = true;
+            state.matched[b] = true;
+            state.matchCount++;
+            state.flipped = [];
+            state.flipLock = false;
+            if (state.matchCount >= TOTAL_PAIRS) {
+              clearStage();
+            }
+          } else {
+            state.misses++;
+            state.flipTimer = 0.6;
+            if (state.misses >= MAX_MISSES) {
+              setTimeout(() => failStage("틀린 횟수 " + MAX_MISSES + "회 초과"), 400);
+            }
+          }
+        }
+      }
+
+      function canvasToGame(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = VIEW.width / rect.width;
+        const scaleY = VIEW.height / rect.height;
+        return {
+          x: (clientX - rect.left) * scaleX,
+          y: (clientY - rect.top) * scaleY,
+        };
+      }
+
+      function hitTestCard(gx, gy) {
+        for (let i = 0; i < COLS * ROWS; i++) {
+          const r = getCardRect(i);
+          if (gx >= r.x && gx <= r.x + r.w && gy >= r.y && gy <= r.y + r.h) {
+            return i;
+          }
+        }
+        return -1;
+      }
+
+      function handleCanvasClick(e) {
+        const pos = canvasToGame(e.clientX, e.clientY);
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        const idx = hitTestCard(pos.x, pos.y);
+        if (idx >= 0) flipCard(idx);
+      }
+
+      function handleCanvasTouch(e) {
+        e.preventDefault();
+        const touch = e.changedTouches[0];
+        const pos = canvasToGame(touch.clientX, touch.clientY);
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        const idx = hitTestCard(pos.x, pos.y);
+        if (idx >= 0) flipCard(idx);
+      }
+
+      function update(dt) {
+        if (state.mode === "running") {
+          state.elapsed += dt;
+          if (state.flipLock) {
+            state.flipTimer -= dt;
+            if (state.flipTimer <= 0) {
+              state.flipped = [];
+              state.flipLock = false;
+            }
+          }
+          if (state.elapsed >= TIME_LIMIT && state.mode === "running") {
+            failStage("시간 초과");
+          }
+        }
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      function drawCard(index) {
+        const r = getCardRect(index);
+        const isFlipped = state.flipped.includes(index);
+        const isMatched = state.matched[index];
+
+        if (isMatched) {
+          roundRect(r.x, r.y, r.w, r.h, 10);
+          ctx.fillStyle = "rgba(46, 204, 113, 0.2)";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(46, 204, 113, 0.5)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          const ci = state.cards[index];
+          ctx.fillStyle = "rgba(46, 204, 113, 0.5)";
+          ctx.font = "bold 36px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(SYMBOLS[ci], r.x + r.w / 2, r.y + r.h / 2);
+          return;
+        }
+
+        if (isFlipped) {
+          const ci = state.cards[index];
+          roundRect(r.x, r.y, r.w, r.h, 10);
+          ctx.fillStyle = "#f8fafc";
+          ctx.fill();
+          ctx.strokeStyle = CARD_COLORS[ci];
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          ctx.fillStyle = CARD_COLORS[ci];
+          ctx.font = "bold 42px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(SYMBOLS[ci], r.x + r.w / 2, r.y + r.h / 2);
+        } else {
+          roundRect(r.x, r.y, r.w, r.h, 10);
+          ctx.fillStyle = "#334155";
+          ctx.fill();
+          ctx.strokeStyle = "#475569";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.fillStyle = "#64748b";
+          ctx.font = "bold 28px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("?", r.x + r.w / 2, r.y + r.h / 2);
+        }
+      }
+
+      function renderHUD() {
+        const remaining = Math.max(0, Math.ceil(TIME_LIMIT - state.elapsed));
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "bold 22px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText("⏱ " + remaining + "초", 30, 20);
+
+        ctx.textAlign = "center";
+        ctx.fillText("매칭: " + state.matchCount + "/" + TOTAL_PAIRS, VIEW.width / 2, 20);
+
+        ctx.textAlign = "right";
+        const missColor = state.misses >= MAX_MISSES - 2 ? "#ef4444" : "#f8fafc";
+        ctx.fillStyle = missColor;
+        ctx.fillText("미스: " + state.misses + "/" + MAX_MISSES, VIEW.width - 30, 20);
+
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "500 16px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("카드를 클릭/터치하여 뒤집기", VIEW.width / 2, 55);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        const cardW = Math.min(640, VIEW.width - 40);
+        const cardX = (VIEW.width - cardW) / 2;
+        roundRect(cardX, 80, cardW, 380, 16);
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 38px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, VIEW.width / 2, 110);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 20px Trebuchet MS";
+        lines.forEach((line, i) => {
+          ctx.fillText(line, VIEW.width / 2, 180 + i * 38);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.clearRect(0, 0, VIEW.width, VIEW.height);
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        if (state.mode === "menu") {
+          renderCard("Memory Match", [
+            "카드를 뒤집어 같은 그림의 쌍을 찾아 맞추세요",
+            "조작: 카드를 클릭/터치하여 뒤집기",
+            "클리어: 45초 안에 모든 카드 쌍 맞추기",
+            "실패: 시간 초과 또는 틀린 횟수 8회 초과",
+            "",
+            "터치 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "running") {
+          for (let i = 0; i < COLS * ROWS; i++) {
+            drawCard(i);
+          }
+          renderHUD();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            state.failReason || "시간 초과 또는 틀린 횟수 8회 초과",
+            "매칭: " + state.matchCount + "/" + TOTAL_PAIRS,
+            "미스: " + state.misses + "회",
+            "시간: " + state.lastRunTime.toFixed(1) + "초",
+            "",
+            "터치 또는 Enter로 재시작",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderCard("클리어!", [
+          "45초 안에 모든 카드 쌍 맞추기 성공!",
+          "미스: " + state.misses + "회",
+          "시간: " + state.lastRunTime.toFixed(1) + "초",
+          "",
+          "터치 또는 Enter로 재시작",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          matchCount: state.matchCount,
+          misses: state.misses,
+          result: window.relayStageResult.status,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          if (state.mode !== "running") {
+            startStage();
+          }
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "memory-match",
+        title: "Memory Match",
+        creator: "Claude",
+        genre: "Memory",
+        clearCondition: "45초 안에 모든 카드 쌍 맞추기",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("touchstart", handleCanvasTouch, { passive: false });
+      canvas.addEventListener("pointerdown", (e) => {
+        if (e.pointerType !== "touch") handleCanvasClick(e);
+      });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

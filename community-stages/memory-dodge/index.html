@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>기억의 파편</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10; width: 1px; height: 1px;
+        padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(15, 23, 42, 0.92); color: #f8fafc;
+        font-weight: 800; text-decoration: none; white-space: nowrap; transition: transform 0.15s ease;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px; overflow: visible;
+        clip: auto; clip-path: none; transform: translateY(0);
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #0f172a; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(248, 250, 252, 0.9); outline-offset: -8px; }
+
+      .mobile-controls {
+        position: fixed; left: 0; right: 0; bottom: 16px; z-index: 16;
+        display: flex; justify-content: center; padding: 0 16px calc(16px + env(safe-area-inset-bottom, 0px));
+        pointer-events: none;
+      }
+      .mobile-controls__row {
+        pointer-events: auto; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; width: min(100%, 360px);
+      }
+      .mobile-btn {
+        appearance: none; border: 0; border-radius: 20px; flex: 0 1 96px; min-width: 64px; min-height: 64px;
+        padding: 0 16px; background: rgba(15, 23, 42, 0.78); color: #f8fafc; font: 800 24px "Trebuchet MS", sans-serif;
+        box-shadow: 0 14px 28px rgba(15, 23, 42, 0.26); touch-action: none;
+      }
+      .mobile-btn[data-active="true"] {
+        transform: scale(0.96); background: rgba(37, 99, 235, 0.9);
+      }
+      @media (hover: hover) and (pointer: fine) { .mobile-controls { display: none; } }
+      @media (max-width: 420px) {
+        .mobile-controls { bottom: 12px; padding: 0 12px calc(12px + env(safe-area-inset-bottom, 0px)); }
+        .mobile-controls__row { gap: 8px; width: min(100%, 320px); }
+        .mobile-btn { flex-basis: 80px; min-width: 56px; min-height: 56px; border-radius: 18px; font-size: 20px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">기억의 파편. 캔버스를 터치하거나 Enter로 시작하세요. 기본 조작은 터치 또는 마우스 드래그 이며, 모바일에서는 화면 터치나 버튼 조작도 함께 제공해야 합니다. 메뉴, 실행 중 HUD, 실패/클리어 화면은 390픽셀 폭 모바일에서도 가로로 넘치지 않게 유지해야 합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="기억의 파편" aria-describedby="stage-instructions" tabindex="0"></canvas>
+
+    <div class="mobile-controls">
+      <div class="mobile-controls__row">
+        <!-- This stage primarily uses pointer move/drag, but leaving controls container for future needs -->
+      </div>
+    </div>
+
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("memory-dodge") || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      // Game state
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "안전 구역이 깜빡인 후 사라집니다. 기억력과 순발력을 발휘하세요!",
+      };
+
+      const TOTAL_TIME = 20;
+      let player = { x: VIEW.width / 2, y: VIEW.height / 2, r: 12, targetX: VIEW.width / 2, targetY: VIEW.height / 2 };
+      let zones = [];
+      let particles = [];
+      let screenShake = 0;
+      let phaseTime = 0;
+      let gameTime = 0;
+      let phase = "idle"; // idle -> warn (visible) -> hide -> active (damage) -> repeat
+      let clearTextAnim = 0;
+      let spawnTimer = 0;
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function lerp(start, end, amount) {
+        return start + (end - start) * amount;
+      }
+
+      function getDifficultySettings() {
+        const progress = clamp(gameTime / TOTAL_TIME, 0, 1);
+        return {
+          progress,
+          safeScale: lerp(1, 0.58, progress),
+          warnDuration: lerp(1.2, 0.55, progress),
+          hideDuration: lerp(0.5, 0.18, progress),
+          activeDuration: lerp(0.8, 1.45, progress),
+          idleDuration: lerp(0.5, 0.12, progress),
+          moveLerp: lerp(10, 8.2, progress),
+          trailChance: lerp(0.3, 0.52, progress),
+        };
+      }
+
+      function scaledRect(centerX, centerY, width, height, scale) {
+        const scaledWidth = Math.max(48, width * scale);
+        const scaledHeight = Math.max(48, height * scale);
+        return {
+          x: centerX - scaledWidth / 2,
+          y: centerY - scaledHeight / 2,
+          w: scaledWidth,
+          h: scaledHeight,
+          safe: true,
+        };
+      }
+
+      // Pattern definitions
+      const PATTERNS = [
+        // 0: Center safe
+        (settings) => {
+          return [
+            { x: 0, y: 0, w: VIEW.width, h: VIEW.height, safe: false },
+            scaledRect(VIEW.width / 2, VIEW.height / 2, 200, 200, settings.safeScale),
+          ];
+        },
+        // 1: Corners safe
+        (settings) => {
+          const side = Math.max(72, 150 * settings.safeScale);
+          return [
+            { x: 0, y: 0, w: VIEW.width, h: VIEW.height, safe: false },
+            { x: 0, y: 0, w: side, h: side, safe: true },
+            { x: VIEW.width - side, y: 0, w: side, h: side, safe: true },
+            { x: 0, y: VIEW.height - side, w: side, h: side, safe: true },
+            { x: VIEW.width - side, y: VIEW.height - side, w: side, h: side, safe: true },
+          ];
+        },
+        // 2: Horizontal split safe
+        (settings) => {
+          return [
+            { x: 0, y: 0, w: VIEW.width, h: VIEW.height, safe: false },
+            scaledRect(VIEW.width / 2, VIEW.height / 2, VIEW.width, 120, settings.safeScale),
+          ];
+        },
+        // 3: Vertical split safe
+        (settings) => {
+          return [
+            { x: 0, y: 0, w: VIEW.width, h: VIEW.height, safe: false },
+            scaledRect(VIEW.width / 2, VIEW.height / 2, 120, VIEW.height, settings.safeScale),
+          ];
+        },
+        // 4: Four small squares safe
+        (settings) => {
+          return [
+            { x: 0, y: 0, w: VIEW.width, h: VIEW.height, safe: false },
+            scaledRect(VIEW.width / 4, VIEW.height / 4, 140, 140, settings.safeScale),
+            scaledRect((VIEW.width * 3) / 4, VIEW.height / 4, 140, 140, settings.safeScale),
+            scaledRect(VIEW.width / 4, (VIEW.height * 3) / 4, 140, 140, settings.safeScale),
+            scaledRect((VIEW.width * 3) / 4, (VIEW.height * 3) / 4, 140, 140, settings.safeScale),
+          ];
+        },
+        // 5: Double lane safe
+        (settings) => {
+          const laneWidth = Math.max(52, 90 * settings.safeScale);
+          return [
+            { x: 0, y: 0, w: VIEW.width, h: VIEW.height, safe: false },
+            { x: VIEW.width * 0.25 - laneWidth / 2, y: 0, w: laneWidth, h: VIEW.height, safe: true },
+            { x: VIEW.width * 0.75 - laneWidth / 2, y: 0, w: laneWidth, h: VIEW.height, safe: true },
+          ];
+        },
+      ];
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x, y,
+            vx: (Math.random() - 0.5) * 10,
+            vy: (Math.random() - 0.5) * 10,
+            life: 1,
+            color,
+            size: Math.random() * 4 + 2
+          });
+        }
+      }
+
+      function updateParticles(dt) {
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt * 60;
+          p.y += p.vy * dt * 60;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+      }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch (error) { return false; }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+
+        player.x = VIEW.width / 2;
+        player.y = VIEW.height / 2;
+        player.targetX = player.x;
+        player.targetY = player.y;
+        gameTime = 0;
+        phaseTime = 0;
+        phase = "idle";
+        spawnTimer = 1.0;
+        particles = [];
+        zones = [];
+        screenShake = 0;
+      }
+
+      function failStage(reason = "위험 구역에 닿기") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        screenShake = 15;
+        spawnParticles(player.x, player.y, 50, "#ef4444");
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        clearTextAnim = 0;
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function nextPattern() {
+        const settings = getDifficultySettings();
+        const availablePatterns = settings.progress < 0.2 ? 3 : settings.progress < 0.55 ? 5 : PATTERNS.length;
+        const patternIdx = Math.floor(Math.random() * availablePatterns);
+        zones = PATTERNS[patternIdx](settings);
+        phase = "warn";
+        phaseTime = settings.warnDuration;
+      }
+
+      function update(dt) {
+        if (state.mode === "running") {
+          state.elapsed += dt;
+          gameTime += dt;
+          const settings = getDifficultySettings();
+
+          if (gameTime >= TOTAL_TIME) {
+            clearStage();
+            return;
+          }
+
+          // Move player
+          const dx = player.targetX - player.x;
+          const dy = player.targetY - player.y;
+          player.x += dx * settings.moveLerp * dt;
+          player.y += dy * settings.moveLerp * dt;
+
+          // Clamp player to screen
+          player.x = Math.max(player.r, Math.min(VIEW.width - player.r, player.x));
+          player.y = Math.max(player.r, Math.min(VIEW.height - player.r, player.y));
+
+          // Particle trail
+          if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+            if (Math.random() < settings.trailChance) spawnParticles(player.x, player.y, 1, "#60a5fa");
+          }
+
+          // Phases
+          if (phase === "idle") {
+            spawnTimer -= dt;
+            if (spawnTimer <= 0) {
+              nextPattern();
+            }
+          } else if (phase === "warn") {
+            phaseTime -= dt;
+            if (phaseTime <= 0) {
+              phase = "hide";
+              phaseTime = settings.hideDuration;
+            }
+          } else if (phase === "hide") {
+            phaseTime -= dt;
+            if (phaseTime <= 0) {
+              phase = "active";
+              phaseTime = settings.activeDuration;
+              screenShake = 5;
+            }
+          } else if (phase === "active") {
+            phaseTime -= dt;
+
+            // Collision detection
+            let safe = false;
+            let insideAny = false;
+
+            for (let i = zones.length - 1; i >= 0; i--) {
+              let z = zones[i];
+              // Check AABB collision with player circle
+              let closestX = Math.max(z.x, Math.min(player.x, z.x + z.w));
+              let closestY = Math.max(z.y, Math.min(player.y, z.y + z.h));
+              let distanceX = player.x - closestX;
+              let distanceY = player.y - closestY;
+              let distanceSquared = (distanceX * distanceX) + (distanceY * distanceY);
+
+              if (distanceSquared < (player.r * player.r)) {
+                insideAny = true;
+                if (z.safe) safe = true;
+              }
+            }
+
+            if (insideAny && !safe) {
+              failStage();
+            }
+
+            if (phaseTime <= 0) {
+              phase = "idle";
+              zones = [];
+              spawnTimer = settings.idleDuration;
+            }
+          }
+        }
+
+        if (state.mode === "cleared") {
+           clearTextAnim = Math.min(1, clearTextAnim + dt * 2);
+        }
+
+        if (screenShake > 0) {
+          screenShake -= dt * 30;
+          if (screenShake < 0) screenShake = 0;
+        }
+
+        updateParticles(dt);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // Modern card styling with gradient and shadow
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+        ctx.shadowBlur = 20;
+        ctx.shadowOffsetY = 10;
+
+        let gradient = ctx.createLinearGradient(128, 92, 128, 448);
+        gradient.addColorStop(0, "rgba(248, 250, 252, 0.98)");
+        gradient.addColorStop(1, "rgba(226, 232, 240, 0.98)");
+
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.roundRect(128, 92, 704, 356, 16);
+        ctx.fill();
+
+        ctx.shadowColor = 'transparent'; // reset shadow
+        ctx.shadowOffsetY = 0;
+
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "800 46px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.save();
+        if (screenShake > 0) {
+          ctx.translate((Math.random() - 0.5) * screenShake, (Math.random() - 0.5) * screenShake);
+        }
+
+        // Draw background gradient
+        let bgGrad = ctx.createRadialGradient(VIEW.width/2, VIEW.height/2, 0, VIEW.width/2, VIEW.height/2, VIEW.width);
+        bgGrad.addColorStop(0, "#1e293b");
+        bgGrad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        if (state.mode === "running" || state.mode === "failed" || state.mode === "cleared") {
+          // Draw zones
+          for (let z of zones) {
+            if (phase === "warn") {
+              ctx.fillStyle = z.safe ? `rgba(52, 211, 153, ${0.4 + Math.sin(phaseTime*10)*0.1})` : `rgba(248, 113, 113, ${0.3 + Math.sin(phaseTime*10)*0.1})`;
+              ctx.fillRect(z.x, z.y, z.w, z.h);
+            } else if (phase === "hide") {
+               // hidden
+            } else if (phase === "active") {
+              ctx.fillStyle = z.safe ? "rgba(52, 211, 153, 0.1)" : "rgba(239, 68, 68, 0.8)";
+              ctx.fillRect(z.x, z.y, z.w, z.h);
+
+              if (!z.safe) {
+                // Glow effect for dangerous zones
+                ctx.shadowColor = "#ef4444";
+                ctx.shadowBlur = 15;
+                ctx.strokeStyle = "#f87171";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(z.x, z.y, z.w, z.h);
+                ctx.shadowColor = "transparent";
+              }
+            }
+          }
+
+          // Draw particles
+          particles.forEach(p => {
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = p.life;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1.0;
+
+          // Draw player
+          ctx.shadowColor = state.mode === "failed" ? "#ef4444" : "#60a5fa";
+          ctx.shadowBlur = 15;
+          ctx.fillStyle = state.mode === "failed" ? "#fca5a5" : "#bfdbfe";
+          ctx.beginPath();
+          ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowColor = "transparent";
+          ctx.strokeStyle = state.mode === "failed" ? "#ef4444" : "#3b82f6";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+
+          // HUD
+          ctx.fillStyle = "rgba(15, 23, 42, 0.6)";
+          ctx.fillRect(0, 0, VIEW.width, 48);
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "bold 24px Trebuchet MS";
+          ctx.textAlign = "left";
+          ctx.fillText(`Time: ${(TOTAL_TIME - gameTime).toFixed(1)}s`, 20, 32);
+          ctx.textAlign = "right";
+          ctx.fillText(`위험도 ${1 + Math.floor(getDifficultySettings().progress * 4)}`, VIEW.width - 20, 32);
+
+          if (phase === "warn") {
+             ctx.textAlign = "center";
+             ctx.fillStyle = "#fbbf24";
+             ctx.font = "bold 32px Trebuchet MS";
+             ctx.fillText("기억하세요!", VIEW.width/2, 80);
+          }
+        }
+        ctx.restore();
+
+        if (state.mode === "menu") {
+          renderCard("기억의 파편", [
+            "안전 구역이 깜빡인 후 사라지고 후반으로 갈수록 더 좁고 빨라집니다.",
+            "조작: 터치 또는 마우스 드래그",
+            "클리어 조건: 20초 동안 안전 구역을 기억하고 생존하기",
+            "실패 조건: 위험 구역에 닿기",
+            "화면을 터치하거나 클릭하여 시작하세요."
+          ], "#8b5cf6");
+          return;
+        }
+
+        if (state.mode === "failed") {
+          ctx.fillStyle = "rgba(0,0,0,0.5)";
+          ctx.fillRect(0,0,VIEW.width, VIEW.height);
+          renderCard("실패", [
+            "위험 구역에 닿기",
+            `버틴 시간: ${state.lastRunTime.toFixed(1)}초`
+          ], "#ef4444");
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          ctx.fillStyle = `rgba(0,0,0,${clearTextAnim * 0.5})`;
+          ctx.fillRect(0,0,VIEW.width, VIEW.height);
+
+          ctx.save();
+          ctx.translate(VIEW.width/2, VIEW.height/2);
+          ctx.scale(0.5 + clearTextAnim*0.5, 0.5 + clearTextAnim*0.5);
+          ctx.globalAlpha = clearTextAnim;
+
+          ctx.shadowColor = "#10b981";
+          ctx.shadowBlur = 30;
+          ctx.fillStyle = "#10b981";
+          ctx.font = "900 64px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText("STAGE CLEARED!", 0, -20);
+
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "bold 28px Trebuchet MS";
+          ctx.fillText("20초 동안 안전 구역을 기억하고 생존하기", 0, 40);
+
+          ctx.restore();
+        }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "interface-only template stage",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+        }
+      }
+
+      function handlePointerMove(e) {
+        if (state.mode === "running") {
+           // Get relative position in canvas considering scaling/CSS size
+           const rect = canvas.getBoundingClientRect();
+           const scaleX = canvas.width / rect.width;
+           const scaleY = canvas.height / rect.height;
+
+           player.targetX = (e.clientX - rect.left) * scaleX;
+           player.targetY = (e.clientY - rect.top) * scaleY;
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "memory-dodge",
+        title: "기억의 파편",
+        creator: "Jules",
+        genre: "기억 / 닷지",
+        clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        if (state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+        } else {
+           handlePointerMove(event);
+        }
+      }, { passive: false });
+
+      canvas.addEventListener("pointermove", (event) => {
+         if(event.buttons > 0 || event.pointerType === 'touch') {
+            event.preventDefault();
+            handlePointerMove(event);
+         }
+      }, { passive: false });
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

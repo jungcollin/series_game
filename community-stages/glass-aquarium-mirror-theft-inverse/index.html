@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>해파리 항해</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Noto Sans KR", "Helvetica Neue", Arial, sans-serif;
+        background: #0a1830; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 200, 240, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(10, 24, 48, 0.92);
+        color: #c0e8f8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #0a1830; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(100, 200, 240, 0.5); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">해파리 항해. 해파리를 조종해 플랑크톤을 수집하세요. 마우스 또는 화면 터치 드래그로 해파리를 움직입니다. 모바일에서는 화면 터치와 드래그만으로 플레이할 수 있습니다. 주기적으로 해류가 반전됩니다. 플랑크톤 20개 수집 시 클리어. 포식자 3번 접촉 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="해파리 항해" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "glass-aquarium-mirror-theft-inverse",
+        title: "해파리 항해",
+        description: "해파리를 조종해 해류 속에서 플랑크톤을 수집하세요. 주기적으로 해류가 반전됩니다.",
+        creator: "jungcollin",
+        genre: "Fluid navigation",
+        clearCondition: "플랑크톤 20개 수집",
+        failCondition: "포식자에 3번 접촉",
+        controls: "터치/드래그로 해파리 이동, 해류 반전 주의",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        bg: "#0a1830",
+        water: "#0c2040",
+        jelly: "#ff90b8",
+        jellyGlow: "rgba(255, 144, 184, 0.35)",
+        jellyInner: "rgba(255, 200, 220, 0.5)",
+        plankton: "#80ffc0",
+        planktonGlow: "rgba(128, 255, 192, 0.3)",
+        predator: "#1a2040",
+        predatorEye: "#ff3030",
+        current: "rgba(100, 180, 255, 0.08)",
+        currentInverse: "rgba(255, 140, 100, 0.08)",
+        text: "#c0ddf0",
+        textDim: "rgba(192, 221, 240, 0.5)",
+        danger: "#ff4060",
+        inverse: "#ff8844",
+      };
+
+      // --- State ---
+      const TARGET = 20;
+      const MAX_HITS = 3;
+      const DURATION = 45;
+      const INVERSE_INTERVAL = 6;
+      const INVERSE_DURATION = 3;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let collected = 0;
+      let predatorHits = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      // Inverse state
+      let inversed = false;
+      let inverseTimer = 0;
+      let inverseFlash = 0;
+
+      // Jellyfish
+      let jelly = { x: CX, y: CY, targetX: CX, targetY: CY, tentAngle: 0 };
+
+      // Current flow
+      let currentDir = { x: 0.6, y: 0.3 };
+      let currentSpeed = 30;
+
+      // Plankton
+      let plankton = [];
+      let planktonSpawnTimer = 0;
+
+      // Predators
+      let predators = [];
+      let predatorSpawnTimer = 2;
+
+      // Ambient particles
+      let motes = [];
+      let particles = [];
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Spawning ---
+      function spawnPlankton() {
+        const edge = Math.floor(rand(0, 4));
+        let x, y;
+        if (edge === 0) { x = rand(0, W); y = -10; }
+        else if (edge === 1) { x = W + 10; y = rand(0, H); }
+        else if (edge === 2) { x = rand(0, W); y = H + 10; }
+        else { x = -10; y = rand(0, H); }
+
+        plankton.push({
+          x, y, r: rand(4, 7),
+          wobble: rand(0, Math.PI * 2),
+          wobbleSpeed: rand(1, 3),
+          alpha: 0, age: 0,
+        });
+      }
+
+      function spawnPredator() {
+        const fromRight = Math.random() < 0.5;
+        const x = fromRight ? W + 30 : -30;
+        const y = rand(50, H - 50);
+        const speed = rand(60, 120);
+
+        predators.push({
+          x, y,
+          vx: fromRight ? -speed : speed,
+          vy: rand(-20, 20),
+          r: rand(18, 28),
+          facingRight: !fromRight,
+          wobble: rand(0, Math.PI * 2),
+        });
+      }
+
+      function initMotes() {
+        motes = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 25; i++) {
+          motes.push({
+            x: rand(0, W), y: rand(0, H),
+            r: rand(1, 3), alpha: rand(0.1, 0.3),
+            drift: rand(0.5, 1.5),
+          });
+        }
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(30, 80);
+          particles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 1, color, size: rand(2, 4),
+          });
+        }
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; collected = 0; predatorHits = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        inversed = false; inverseTimer = INVERSE_INTERVAL; inverseFlash = 0;
+        jelly = { x: CX, y: CY, targetX: CX, targetY: CY, tentAngle: 0 };
+        currentDir = { x: 0.6, y: 0.3 };
+        currentSpeed = 30;
+        plankton = []; planktonSpawnTimer = 0.5;
+        predators = []; predatorSpawnTimer = 3;
+        particles = [];
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initMotes();
+        // Pre-spawn some plankton
+        for (let i = 0; i < 6; i++) {
+          plankton.push({
+            x: rand(50, W - 50), y: rand(50, H - 50),
+            r: rand(4, 7), wobble: rand(0, Math.PI * 2),
+            wobbleSpeed: rand(1, 3), alpha: 1, age: 1,
+          });
+        }
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Inverse timer
+        inverseTimer -= dt;
+        if (inverseTimer <= 0) {
+          if (!inversed) {
+            inversed = true;
+            inverseTimer = INVERSE_DURATION;
+            inverseFlash = 1;
+            // Reverse current
+            currentDir.x *= -1;
+            currentDir.y *= -1;
+          } else {
+            inversed = false;
+            inverseTimer = INVERSE_INTERVAL;
+            inverseFlash = 0.5;
+            currentDir.x *= -1;
+            currentDir.y *= -1;
+          }
+        }
+        inverseFlash *= 0.92;
+
+        // Jelly movement (with current influence)
+        const inputMul = inversed ? -1 : 1;
+        const moveX = (jelly.targetX - jelly.x) * inputMul;
+        const moveY = (jelly.targetY - jelly.y) * inputMul;
+        const lerpSpd = 6;
+        jelly.x += moveX * clamp(lerpSpd * dt, 0, 0.3);
+        jelly.y += moveY * clamp(lerpSpd * dt, 0, 0.3);
+
+        // Apply current drift
+        jelly.x += currentDir.x * currentSpeed * dt;
+        jelly.y += currentDir.y * currentSpeed * dt;
+
+        // Clamp to screen
+        jelly.x = clamp(jelly.x, 20, W - 20);
+        jelly.y = clamp(jelly.y, 20, H - 20);
+
+        jelly.tentAngle += dt * 2;
+
+        // Spawn plankton
+        planktonSpawnTimer -= dt;
+        if (planktonSpawnTimer <= 0 && plankton.length < 12) {
+          spawnPlankton();
+          planktonSpawnTimer = rand(1, 2.5);
+        }
+
+        // Update plankton
+        for (let i = plankton.length - 1; i >= 0; i--) {
+          const p = plankton[i];
+          p.age += dt;
+          p.alpha = clamp(p.age * 2, 0, 1);
+          p.wobble += p.wobbleSpeed * dt;
+          p.x += currentDir.x * currentSpeed * 0.5 * dt + Math.sin(p.wobble) * 8 * dt;
+          p.y += currentDir.y * currentSpeed * 0.5 * dt + Math.cos(p.wobble * 0.8) * 6 * dt;
+
+          // Collect
+          if (dist(jelly.x, jelly.y, p.x, p.y) < 22 + p.r) {
+            collected++;
+            spawnParticles(p.x, p.y, reducedMotion ? 3 : 8, COL.plankton);
+            plankton.splice(i, 1);
+            continue;
+          }
+
+          // Remove off-screen
+          if (p.x < -30 || p.x > W + 30 || p.y < -30 || p.y > H + 30) {
+            plankton.splice(i, 1);
+          }
+        }
+
+        // Spawn predators
+        predatorSpawnTimer -= dt;
+        if (predatorSpawnTimer <= 0 && predators.length < 4) {
+          spawnPredator();
+          predatorSpawnTimer = rand(3, 6);
+        }
+
+        // Update predators
+        for (let i = predators.length - 1; i >= 0; i--) {
+          const pr = predators[i];
+          pr.wobble += 2 * dt;
+          pr.x += pr.vx * dt;
+          pr.y += pr.vy + Math.sin(pr.wobble) * 15 * dt;
+
+          // Collision with jelly
+          if (dist(jelly.x, jelly.y, pr.x, pr.y) < 18 + pr.r) {
+            predatorHits++;
+            shake = 8; flashAlpha = 0.35;
+            spawnParticles(jelly.x, jelly.y, reducedMotion ? 3 : 8, COL.danger);
+            predators.splice(i, 1);
+            continue;
+          }
+
+          // Remove off-screen
+          if (pr.x < -60 || pr.x > W + 60) {
+            predators.splice(i, 1);
+          }
+        }
+
+        // Motes
+        for (const m of motes) {
+          m.x += currentDir.x * m.drift * 20 * dt;
+          m.y += currentDir.y * m.drift * 20 * dt;
+          if (m.x < -5) m.x = W + 5;
+          if (m.x > W + 5) m.x = -5;
+          if (m.y < -5) m.y = H + 5;
+          if (m.y > H + 5) m.y = -5;
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 0.93; p.vy *= 0.93;
+          p.life -= dt * 2.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+
+        // Win/lose
+        if (collected >= TARGET) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+        } else if (predatorHits >= MAX_HITS) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("포식자 접촉");
+        } else if (elapsed >= DURATION) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("시간 초과");
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Water gradient
+        const grad = ctx.createRadialGradient(CX, CY, 50, CX, CY, 500);
+        grad.addColorStop(0, "#102848");
+        grad.addColorStop(0.6, "#0c2040");
+        grad.addColorStop(1, "#061020");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Current flow lines
+        drawCurrentLines();
+
+        // Motes
+        drawMotes();
+
+        // Plankton
+        drawPlankton();
+
+        // Predators
+        drawPredators();
+
+        // Jellyfish
+        drawJellyfish();
+
+        // Particles
+        drawParticles();
+
+        // Inverse warning
+        if (inversed) {
+          ctx.fillStyle = `rgba(255, 136, 68, ${0.04 + Math.sin(elapsed * 4) * 0.02})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(255, 64, 96, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        // Inverse flash
+        if (inverseFlash > 0.05) {
+          ctx.fillStyle = `rgba(255, 136, 68, ${inverseFlash * 0.15})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawCurrentLines() {
+        if (reducedMotion) return;
+        ctx.globalAlpha = 0.06;
+        ctx.strokeStyle = inversed ? "#ff8844" : "#6090c0";
+        ctx.lineWidth = 1;
+        const offset = (elapsed * currentSpeed * 2) % 60;
+        for (let i = 0; i < 12; i++) {
+          const y = i * 50 + offset * currentDir.y;
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          for (let x = 0; x <= W; x += 40) {
+            const wave = Math.sin((x + elapsed * 40) * 0.01) * 8;
+            ctx.lineTo(x, y + wave);
+          }
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawMotes() {
+        for (const m of motes) {
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(140, 200, 240, ${m.alpha})`;
+          ctx.fill();
+        }
+      }
+
+      function drawPlankton() {
+        for (const p of plankton) {
+          ctx.save();
+          ctx.globalAlpha = p.alpha;
+
+          // Glow
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r + 6, 0, Math.PI * 2);
+          ctx.fillStyle = COL.planktonGlow;
+          ctx.fill();
+
+          // Body
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fillStyle = COL.plankton;
+          ctx.fill();
+
+          ctx.restore();
+        }
+      }
+
+      function drawPredators() {
+        for (const pr of predators) {
+          ctx.save();
+          ctx.translate(pr.x, pr.y);
+          if (!pr.facingRight) ctx.scale(-1, 1);
+
+          // Dark fish body
+          ctx.beginPath();
+          ctx.ellipse(0, 0, pr.r, pr.r * 0.55, 0, 0, Math.PI * 2);
+          ctx.fillStyle = COL.predator;
+          ctx.fill();
+
+          // Tail
+          ctx.beginPath();
+          ctx.moveTo(-pr.r, 0);
+          ctx.lineTo(-pr.r - 12, -8);
+          ctx.lineTo(-pr.r - 12, 8);
+          ctx.closePath();
+          ctx.fill();
+
+          // Eye
+          ctx.beginPath();
+          ctx.arc(pr.r * 0.4, -pr.r * 0.15, 3, 0, Math.PI * 2);
+          ctx.fillStyle = COL.predatorEye;
+          ctx.fill();
+
+          // Mouth
+          ctx.beginPath();
+          ctx.moveTo(pr.r * 0.7, 0);
+          ctx.lineTo(pr.r, 2);
+          ctx.lineTo(pr.r * 0.7, 4);
+          ctx.strokeStyle = "#2a3060";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          ctx.restore();
+        }
+      }
+
+      function drawJellyfish() {
+        ctx.save();
+        ctx.translate(jelly.x, jelly.y);
+
+        // Outer glow
+        ctx.beginPath();
+        ctx.arc(0, -4, 28, 0, Math.PI * 2);
+        ctx.fillStyle = COL.jellyGlow;
+        ctx.fill();
+
+        // Bell (dome)
+        ctx.beginPath();
+        ctx.ellipse(0, -4, 18, 14, 0, Math.PI, 0);
+        ctx.fillStyle = COL.jelly;
+        ctx.globalAlpha = 0.7;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // Inner dome highlight
+        ctx.beginPath();
+        ctx.ellipse(0, -6, 10, 8, 0, Math.PI, 0);
+        ctx.fillStyle = COL.jellyInner;
+        ctx.fill();
+
+        // Tentacles
+        const tentCount = 5;
+        ctx.strokeStyle = COL.jelly;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.5;
+        for (let i = 0; i < tentCount; i++) {
+          const baseX = -8 + i * 4;
+          ctx.beginPath();
+          ctx.moveTo(baseX, 10);
+          const swing = Math.sin(jelly.tentAngle + i * 0.7) * 6;
+          const swing2 = Math.cos(jelly.tentAngle * 0.8 + i * 1.1) * 4;
+          ctx.quadraticCurveTo(baseX + swing, 22, baseX + swing2, 34);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+
+        ctx.restore();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = p.life;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text;
+        ctx.font = "500 15px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`${collected} / ${TARGET}`, 24, 20);
+
+        // Inverse indicator
+        if (inversed) {
+          ctx.fillStyle = COL.inverse;
+          ctx.textAlign = "center";
+          ctx.fillText("INVERSE", CX, 20);
+        } else {
+          // Time to next inverse
+          const toInverse = Math.ceil(inverseTimer);
+          if (toInverse <= 3) {
+            ctx.fillStyle = `rgba(255, 136, 68, ${0.5 + Math.sin(elapsed * 6) * 0.3})`;
+            ctx.textAlign = "center";
+            ctx.fillText(`${toInverse}`, CX, 20);
+          }
+        }
+
+        ctx.textAlign = "right";
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.fillStyle = COL.text;
+        ctx.fillText(`${Math.ceil(timeLeft)}`, W - 24, 20);
+
+        // Lives
+        const dotY = H - 24;
+        for (let i = 0; i < MAX_HITS; i++) {
+          const dotX = CX - (MAX_HITS - 1) * 10 + i * 20;
+          ctx.beginPath();
+          ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
+          ctx.fillStyle = i < MAX_HITS - predatorHits ? COL.jelly : COL.textDim;
+          ctx.fill();
+        }
+      }
+
+      // --- Overlay cards ---
+      function drawCard(title, lines, accent) {
+        const cardW = 320, cardH = 38 + lines.length * 26 + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(10, 24, 48, 0.92)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 8);
+        ctx.fill();
+
+        ctx.fillStyle = accent || COL.jelly;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 22px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "400 14px sans-serif";
+        ctx.fillStyle = COL.textDim;
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 50 + i * 26);
+        }
+
+        ctx.fillStyle = "rgba(192, 221, 240, 0.35)";
+        ctx.font = "400 13px sans-serif";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 20);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(10, 24, 48, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("해파리 항해", [
+          "해파리를 조종해 플랑크톤을 수집하세요",
+          "주기적으로 해류가 반전됩니다",
+          "",
+          "조작: 드래그로 이동 (반전 시 역방향)",
+          "클리어: 플랑크톤 20개 수집",
+          "실패: 포식자 3번 접촉",
+        ], COL.jelly);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(10, 24, 48, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) {
+          drawCard("항해 완료", [
+            `${Math.ceil(elapsed)}초 만에 완료`,
+            `수집: ${collected}개`,
+          ], COL.jelly);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(40, 10, 20, 0.4)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("항해 실패", [
+          predatorHits >= MAX_HITS ? "포식자에게 잡혔습니다" : "시간이 다했습니다",
+          `수집: ${collected} / ${TARGET}`,
+        ], COL.danger);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset();
+          mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        jelly.targetX = p.x;
+        jelly.targetY = p.y;
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running") return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        jelly.targetX = p.x;
+        jelly.targetY = p.y;
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleStart();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      // --- Debug / test harness ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          collected, predatorHits, inversed,
+          result: window.relayStageResult.status,
+          plankton: plankton.length, predators: predators.length,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          collected = TARGET;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          predatorHits = MAX_HITS;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail");
+          draw();
+        },
+      };
+
+      // --- Init ---
+      initMotes();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

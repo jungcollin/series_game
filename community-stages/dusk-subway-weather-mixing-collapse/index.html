@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>가을 낙엽</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Georgia", "Noto Serif KR", serif;
+        background: #e8d0a8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(200, 140, 60, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(100, 70, 40, 0.92);
+        color: #f8f0e0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #f0dcc0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(200, 140, 60, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">가을 낙엽. 바람을 일으켜 낙엽을 바구니로 안내하세요. 마우스 또는 화면 터치 드래그로 바람을 만듭니다. 모바일에서는 화면 터치와 드래그만으로 플레이할 수 있습니다. 15장의 낙엽을 모으면 클리어. 플랫폼이 완전히 무너지거나 너무 많은 낙엽을 놓치면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="가을 낙엽" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "dusk-subway-weather-mixing-collapse",
+        title: "가을 낙엽",
+        description: "바람을 일으켜 낙엽을 바구니로 안내하세요.",
+        creator: "jungcollin",
+        genre: "Wind guiding puzzler",
+        clearCondition: "15장의 낙엽을 모으면 클리어",
+        failCondition: "플랫폼 붕괴 또는 낙엽 유실 시 실패",
+        controls: "드래그로 바람을 만들어 낙엽 안내, 모바일에서는 화면 터치와 드래그만으로 플레이 가능",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        sky: "#e8c898",
+        skyTop: "#d0a070",
+        sunGlow: "rgba(240, 180, 80, 0.3)",
+        platform: "#8a6a48",
+        platformLight: "#a08060",
+        platformEdge: "#6a5038",
+        basket: "#7a5a38",
+        basketRim: "#5a4028",
+        leafOrange: "#d08030",
+        leafGold: "#c8a030",
+        leafBrown: "#906030",
+        leafRed: "#b85040",
+        wind: "rgba(200, 170, 120, 0.3)",
+        text: "#5a4030",
+        textDim: "rgba(90, 64, 48, 0.5)",
+        white: "#f8f0e0",
+      };
+
+      // --- State ---
+      const DURATION = 45;
+      const TARGET = 15;
+      const MAX_LOST = 8;
+      const PLATFORM_Y = H - 80;
+      const BASKET_POSITIONS = [
+        { x: 180, y: PLATFORM_Y - 10, w: 50, h: 30 },
+        { x: 480, y: PLATFORM_Y - 10, w: 50, h: 30 },
+        { x: 780, y: PLATFORM_Y - 10, w: 50, h: 30 },
+      ];
+
+      let mode = "menu";
+      let elapsed = 0;
+      let collected = 0;
+      let lost = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      // Platform collapse
+      let platformLeft = 0;
+      let platformRight = W;
+      let collapseSpeed = 12;
+
+      // Leaves
+      let leaves = [];
+      let spawnTimer = 0;
+
+      // Wind gust
+      let windActive = false;
+      let windStartX = 0, windStartY = 0;
+      let windEndX = 0, windEndY = 0;
+      let windTrails = [];
+
+      // Particles
+      let particles = [];
+
+      // Ambient
+      let bgTrees = [];
+      let windTime = 0;
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function progress() { return clamp(elapsed / DURATION, 0, 1); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function initTrees() {
+        bgTrees = [];
+        for (let i = 0; i < 7; i++) {
+          bgTrees.push({
+            x: 60 + i * 140 + rand(-30, 30),
+            h: rand(80, 150),
+            w: rand(40, 70),
+            sway: rand(0, Math.PI * 2),
+          });
+        }
+      }
+
+      // --- Spawning ---
+      function spawnLeaf() {
+        const colors = [COL.leafOrange, COL.leafGold, COL.leafBrown, COL.leafRed];
+        const color = colors[Math.floor(rand(0, colors.length))];
+        leaves.push({
+          x: rand(platformLeft + 40, platformRight - 40),
+          y: rand(-40, -10),
+          vx: rand(-20, 20),
+          vy: rand(15, 35),
+          rot: rand(0, Math.PI * 2),
+          rotSpeed: rand(-2, 2),
+          size: rand(8, 14),
+          color,
+          alpha: 0,
+          collected: false,
+          fallen: false,
+        });
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; collected = 0; lost = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        platformLeft = 0; platformRight = W;
+        collapseSpeed = 12;
+        leaves = []; particles = []; windTrails = [];
+        windActive = false;
+        spawnTimer = 0.8;
+        windTime = 0;
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initTrees();
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        windTime += dt;
+
+        // Platform collapse from both sides
+        const collapseRate = lerp(collapseSpeed, collapseSpeed * 2.5, progress());
+        platformLeft += collapseRate * dt * 0.5;
+        platformRight -= collapseRate * dt * 0.5;
+
+        // Spawn leaves
+        const interval = lerp(1.5, 0.6, progress());
+        spawnTimer -= dt;
+        if (spawnTimer <= 0) {
+          spawnLeaf();
+          if (progress() > 0.5 && Math.random() < 0.4) spawnLeaf();
+          spawnTimer = interval;
+        }
+
+        // Wind gust force
+        let gustVX = 0, gustVY = 0;
+        if (windActive) {
+          gustVX = (windEndX - windStartX) * 0.8;
+          gustVY = (windEndY - windStartY) * 0.8;
+        }
+
+        // Update leaves
+        for (let i = leaves.length - 1; i >= 0; i--) {
+          const lf = leaves[i];
+          if (lf.collected || lf.fallen) continue;
+
+          lf.alpha = clamp(lf.alpha + dt * 3, 0, 1);
+          lf.rot += lf.rotSpeed * dt;
+
+          // Natural drift + gravity + wind
+          const naturalWind = Math.sin(windTime * 0.7 + lf.x * 0.01) * 15;
+          lf.vx += (naturalWind + gustVX * 0.15) * dt;
+          lf.vy += (20 + gustVY * 0.1) * dt;
+
+          // Drag
+          lf.vx *= 0.98;
+          lf.vy *= 0.98;
+
+          lf.x += lf.vx * dt;
+          lf.y += lf.vy * dt;
+
+          // Bounce off sides
+          if (lf.x < platformLeft + 10) { lf.x = platformLeft + 10; lf.vx *= -0.5; }
+          if (lf.x > platformRight - 10) { lf.x = platformRight - 10; lf.vx *= -0.5; }
+
+          // Check basket collection
+          for (const b of BASKET_POSITIONS) {
+            if (b.x < platformLeft || b.x > platformRight) continue;
+            if (lf.x > b.x - b.w / 2 && lf.x < b.x + b.w / 2 &&
+                lf.y > b.y - 5 && lf.y < b.y + b.h) {
+              lf.collected = true;
+              collected++;
+              spawnParticles(lf.x, lf.y, reducedMotion ? 3 : 6, lf.color);
+              break;
+            }
+          }
+
+          // Fallen off platform
+          if (lf.y > PLATFORM_Y + 20) {
+            if (lf.x >= platformLeft && lf.x <= platformRight) {
+              // Landed on platform, settle
+              lf.y = PLATFORM_Y - 2;
+              lf.vy = 0;
+              lf.vx *= 0.3;
+              // Still can be blown
+            } else {
+              lf.fallen = true;
+              lost++;
+            }
+          }
+
+          // Off screen
+          if (lf.y > H + 40 || lf.x < -40 || lf.x > W + 40) {
+            if (!lf.collected) {
+              lf.fallen = true;
+              lost++;
+            }
+          }
+        }
+
+        // Clean up
+        leaves = leaves.filter(lf => !lf.fallen);
+
+        // Wind trails fade
+        for (let i = windTrails.length - 1; i >= 0; i--) {
+          windTrails[i].life -= dt * 3;
+          if (windTrails[i].life <= 0) windTrails.splice(i, 1);
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 0.94; p.vy *= 0.94;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Tree sway
+        for (const t of bgTrees) {
+          t.sway += dt * 1.2;
+        }
+
+        // Shake/flash
+        shake *= 0.88;
+        if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+
+        // Win/lose
+        if (collected >= TARGET) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+        } else if (platformRight - platformLeft < 100) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("플랫폼 붕괴");
+        } else if (lost >= MAX_LOST) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("낙엽 유실");
+        } else if (elapsed >= DURATION && collected < TARGET) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("시간 초과");
+        }
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2);
+          const spd = rand(20, 70);
+          particles.push({
+            x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd,
+            life: 1, color, size: rand(2, 4),
+          });
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient (sunset)
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+        skyGrad.addColorStop(0, COL.skyTop);
+        skyGrad.addColorStop(0.5, COL.sky);
+        skyGrad.addColorStop(1, "#e0c090");
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Sun glow
+        drawSun();
+
+        // Background trees
+        drawTrees();
+
+        // Platform
+        drawPlatform();
+
+        // Baskets
+        drawBaskets();
+
+        // Wind trails
+        drawWindTrails();
+
+        // Leaves
+        drawLeaves();
+
+        // Particles
+        drawParticles();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        // Flash
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(140, 80, 30, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawSun() {
+        const sunX = W * 0.75, sunY = 60;
+        const grad = ctx.createRadialGradient(sunX, sunY, 20, sunX, sunY, 200);
+        grad.addColorStop(0, "rgba(240, 200, 100, 0.4)");
+        grad.addColorStop(0.5, "rgba(240, 180, 80, 0.1)");
+        grad.addColorStop(1, "rgba(240, 180, 80, 0)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, 30, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(240, 210, 140, 0.6)";
+        ctx.fill();
+      }
+
+      function drawTrees() {
+        for (const t of bgTrees) {
+          if (t.x < platformLeft - 40 || t.x > platformRight + 40) continue;
+          const swayOff = Math.sin(t.sway) * 5;
+
+          // Trunk
+          ctx.fillStyle = "#6a4a2a";
+          ctx.fillRect(t.x - 4, PLATFORM_Y - t.h, 8, t.h);
+
+          // Canopy (autumn colors)
+          ctx.fillStyle = `rgba(180, 100, 30, 0.6)`;
+          ctx.beginPath();
+          ctx.arc(t.x + swayOff, PLATFORM_Y - t.h - 10, t.w / 2, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = `rgba(200, 140, 40, 0.4)`;
+          ctx.beginPath();
+          ctx.arc(t.x + swayOff - 10, PLATFORM_Y - t.h, t.w / 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawPlatform() {
+        // Collapsed sides (void)
+        ctx.fillStyle = "rgba(60, 40, 20, 0.3)";
+        ctx.fillRect(0, PLATFORM_Y, platformLeft, H - PLATFORM_Y);
+        ctx.fillRect(platformRight, PLATFORM_Y, W - platformRight, H - PLATFORM_Y);
+
+        // Platform surface
+        ctx.fillStyle = COL.platform;
+        ctx.fillRect(platformLeft, PLATFORM_Y, platformRight - platformLeft, 16);
+
+        // Platform edge
+        ctx.fillStyle = COL.platformEdge;
+        ctx.fillRect(platformLeft, PLATFORM_Y + 16, platformRight - platformLeft, 4);
+
+        // Platform underneath
+        ctx.fillStyle = COL.platformLight;
+        ctx.fillRect(platformLeft, PLATFORM_Y + 20, platformRight - platformLeft, H - PLATFORM_Y - 20);
+
+        // Collapse edge cracks
+        if (platformLeft > 30) {
+          ctx.strokeStyle = COL.platformEdge;
+          ctx.lineWidth = 2;
+          for (let i = 0; i < 3; i++) {
+            const cy = PLATFORM_Y + rand(2, 14);
+            ctx.beginPath();
+            ctx.moveTo(platformLeft, cy);
+            ctx.lineTo(platformLeft + rand(5, 15), cy + rand(-5, 5));
+            ctx.stroke();
+          }
+        }
+        if (platformRight < W - 30) {
+          ctx.strokeStyle = COL.platformEdge;
+          ctx.lineWidth = 2;
+          for (let i = 0; i < 3; i++) {
+            const cy = PLATFORM_Y + rand(2, 14);
+            ctx.beginPath();
+            ctx.moveTo(platformRight, cy);
+            ctx.lineTo(platformRight - rand(5, 15), cy + rand(-5, 5));
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawBaskets() {
+        for (const b of BASKET_POSITIONS) {
+          if (b.x < platformLeft || b.x > platformRight) continue;
+          // Basket body
+          ctx.fillStyle = COL.basket;
+          ctx.beginPath();
+          ctx.moveTo(b.x - b.w / 2, b.y);
+          ctx.lineTo(b.x - b.w / 2 + 6, b.y + b.h);
+          ctx.lineTo(b.x + b.w / 2 - 6, b.y + b.h);
+          ctx.lineTo(b.x + b.w / 2, b.y);
+          ctx.closePath();
+          ctx.fill();
+
+          // Rim
+          ctx.strokeStyle = COL.basketRim;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(b.x - b.w / 2 - 3, b.y);
+          ctx.lineTo(b.x + b.w / 2 + 3, b.y);
+          ctx.stroke();
+
+          // Weave pattern
+          ctx.strokeStyle = "rgba(90, 64, 40, 0.3)";
+          ctx.lineWidth = 1;
+          for (let row = 0; row < 3; row++) {
+            const ry = b.y + 6 + row * 8;
+            ctx.beginPath();
+            ctx.moveTo(b.x - b.w / 2 + 8, ry);
+            ctx.lineTo(b.x + b.w / 2 - 8, ry);
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawWindTrails() {
+        for (const wt of windTrails) {
+          ctx.globalAlpha = wt.life * 0.4;
+          ctx.strokeStyle = COL.wind;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(wt.x1, wt.y1);
+          ctx.lineTo(wt.x2, wt.y2);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+
+        // Active drag line
+        if (windActive) {
+          ctx.strokeStyle = "rgba(200, 170, 120, 0.5)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          ctx.moveTo(windStartX, windStartY);
+          ctx.lineTo(windEndX, windEndY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Arrow head
+          const angle = Math.atan2(windEndY - windStartY, windEndX - windStartX);
+          ctx.fillStyle = "rgba(200, 170, 120, 0.5)";
+          ctx.beginPath();
+          ctx.moveTo(windEndX, windEndY);
+          ctx.lineTo(windEndX - Math.cos(angle - 0.4) * 12, windEndY - Math.sin(angle - 0.4) * 12);
+          ctx.lineTo(windEndX - Math.cos(angle + 0.4) * 12, windEndY - Math.sin(angle + 0.4) * 12);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+
+      function drawLeaves() {
+        for (const lf of leaves) {
+          if (lf.collected || lf.fallen) continue;
+          ctx.save();
+          ctx.globalAlpha = lf.alpha;
+          ctx.translate(lf.x, lf.y);
+          ctx.rotate(lf.rot);
+
+          // Leaf shape
+          ctx.fillStyle = lf.color;
+          ctx.beginPath();
+          ctx.moveTo(0, -lf.size);
+          ctx.quadraticCurveTo(lf.size * 0.7, -lf.size * 0.3, lf.size * 0.3, lf.size * 0.5);
+          ctx.quadraticCurveTo(0, lf.size, 0, lf.size * 0.8);
+          ctx.quadraticCurveTo(0, lf.size, -lf.size * 0.3, lf.size * 0.5);
+          ctx.quadraticCurveTo(-lf.size * 0.7, -lf.size * 0.3, 0, -lf.size);
+          ctx.fill();
+
+          // Stem
+          ctx.strokeStyle = "rgba(90, 64, 40, 0.5)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(0, -lf.size);
+          ctx.lineTo(0, lf.size * 0.6);
+          ctx.stroke();
+
+          ctx.restore();
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = p.life;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text;
+        ctx.font = `500 15px Georgia, serif`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`${collected} / ${TARGET}`, 24, 20);
+
+        ctx.textAlign = "right";
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.fillText(`${Math.ceil(timeLeft)}`, W - 24, 20);
+
+        // Timer bar
+        const barW = W - 48, barX = 24, barY = 44;
+        ctx.fillStyle = "rgba(90, 64, 48, 0.1)";
+        ctx.fillRect(barX, barY, barW, 2);
+        ctx.fillStyle = COL.leafOrange;
+        ctx.fillRect(barX, barY, barW * (1 - progress()), 2);
+
+        // Lost counter
+        const dotY = H - 24;
+        for (let i = 0; i < MAX_LOST; i++) {
+          const dotX = CX - (MAX_LOST - 1) * 8 + i * 16;
+          ctx.beginPath();
+          ctx.arc(dotX, dotY, 3, 0, Math.PI * 2);
+          ctx.fillStyle = i < MAX_LOST - lost ? COL.leafGold : "rgba(90, 64, 48, 0.15)";
+          ctx.fill();
+        }
+      }
+
+      // --- Overlay cards ---
+      function drawCard(title, lines, accent) {
+        const cardW = 320, cardH = 38 + lines.length * 26 + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(248, 240, 224, 0.94)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 8);
+        ctx.fill();
+        ctx.fillStyle = accent || COL.leafOrange;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+        ctx.fillStyle = COL.text;
+        ctx.font = `bold 22px Georgia, serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+        ctx.font = `400 14px Georgia, serif`;
+        ctx.fillStyle = COL.textDim;
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 50 + i * 26);
+        }
+        ctx.fillStyle = "rgba(90, 64, 48, 0.3)";
+        ctx.font = `400 13px Georgia, serif`;
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 20);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(240, 220, 192, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("가을 낙엽", [
+          "바람을 일으켜 낙엽을 바구니로 안내하세요",
+          "",
+          "조작: 드래그로 바람 만들기",
+          "클리어: 15장 수집",
+          "실패: 플랫폼 붕괴 또는 낙엽 유실",
+        ], COL.leafOrange);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(240, 220, 192, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) {
+          drawCard("수집 완료", [
+            `${Math.ceil(elapsed)}초 만에 완료`,
+            `수집: ${collected}장`,
+          ], COL.leafOrange);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(60, 40, 20, 0.3)";
+        ctx.fillRect(0, 0, W, H);
+        const reason = platformRight - platformLeft < 100
+          ? "플랫폼이 무너졌습니다"
+          : lost >= MAX_LOST
+            ? "너무 많은 낙엽을 놓쳤습니다"
+            : "시간이 다했습니다";
+        drawCard("실패", [
+          reason,
+          `수집: ${collected} / ${TARGET}`,
+        ], COL.leafBrown);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset(); mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        windActive = true;
+        windStartX = p.x; windStartY = p.y;
+        windEndX = p.x; windEndY = p.y;
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running" || !windActive) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        windEndX = p.x; windEndY = p.y;
+
+        // Apply wind force to nearby leaves
+        const dx = windEndX - windStartX;
+        const dy = windEndY - windStartY;
+        const strength = Math.min(Math.hypot(dx, dy), 200);
+        if (strength > 10) {
+          const nx = dx / strength, ny = dy / strength;
+          for (const lf of leaves) {
+            if (lf.collected || lf.fallen) continue;
+            const d = dist(lf.x, lf.y, windEndX, windEndY);
+            if (d < 120) {
+              const force = (1 - d / 120) * strength * 0.3;
+              lf.vx += nx * force * 0.5;
+              lf.vy += ny * force * 0.3;
+            }
+          }
+
+          // Wind trail
+          windTrails.push({
+            x1: windStartX + dx * 0.3, y1: windStartY + dy * 0.3,
+            x2: windEndX, y2: windEndY,
+            life: 1,
+          });
+        }
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        windActive = false;
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleStart();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      // --- Debug / test harness ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          collected, lost,
+          platformWidth: +(platformRight - platformLeft).toFixed(0),
+          result: window.relayStageResult.status,
+          leaves: leaves.length,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          collected = TARGET;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          lost = MAX_LOST;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      // --- Init ---
+      initTrees();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>수정 광부</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Noto Sans KR", "Helvetica Neue", Arial, sans-serif;
+        background: #1a0e2e; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(160, 80, 220, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(26, 14, 46, 0.92);
+        color: #d8c0f0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #1a0e2e; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(180, 120, 255, 0.5); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">수정 광부. 수정 동굴에서 보석을 수집하세요. 마우스 또는 화면 터치로 보석을 탭하세요. 모바일에서는 화면 터치와 드래그만으로 플레이할 수 있습니다. 20개 수정 수집 시 클리어. 붕괴에 휩쓸리거나 종유석 3번 충돌 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="수정 광부" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "crystal-foundry-mirror-theft-collapse",
+        title: "수정 광부",
+        description: "수정 동굴에서 보석을 수집하며 천장 붕괴를 피해 출구로 탈출하세요.",
+        creator: "jungcollin",
+        genre: "Collection runner",
+        clearCondition: "출구 도달 전 수정 20개 수집",
+        failCondition: "붕괴에 휩쓸리거나 종유석 3회 충돌",
+        controls: "터치로 보석 수집, 종유석 회피",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        bg: "#1a0e2e",
+        cave: "#120824",
+        amethyst: "#b060ff",
+        amethystGlow: "rgba(176, 96, 255, 0.4)",
+        quartz: "#e8e0f0",
+        quartzGlow: "rgba(232, 224, 240, 0.3)",
+        magma: "#ff6820",
+        magmaGlow: "rgba(255, 104, 32, 0.5)",
+        emerald: "#40d880",
+        ruby: "#ff4060",
+        sapphire: "#4080ff",
+        text: "#d8c8f0",
+        textDim: "rgba(216, 200, 240, 0.5)",
+        danger: "#ff4040",
+        collapse: "#ff5020",
+      };
+
+      const GEM_TYPES = [
+        { color: COL.amethyst, glow: COL.amethystGlow, points: 1 },
+        { color: COL.quartz, glow: COL.quartzGlow, points: 1 },
+        { color: COL.emerald, glow: "rgba(64, 216, 128, 0.4)", points: 1 },
+        { color: COL.ruby, glow: "rgba(255, 64, 96, 0.4)", points: 2 },
+        { color: COL.sapphire, glow: "rgba(64, 128, 255, 0.4)", points: 1 },
+      ];
+
+      // --- State ---
+      const TARGET = 20;
+      const MAX_HITS = 3;
+      const DURATION = 35;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let collected = 0;
+      let hits = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      // Cave scroll
+      let scrollX = 0;
+      const SCROLL_SPEED = 80;
+      const CAVE_LENGTH = 4000;
+
+      // Collapse wall (chases from left)
+      let collapseX = -100;
+      const COLLAPSE_SPEED = 65;
+
+      // Player
+      let player = { x: 150, y: CY, targetY: CY };
+
+      // Gems
+      let gems = [];
+      let stalactites = [];
+      let sparkles = [];
+      let particles = [];
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function progress() { return clamp(scrollX / CAVE_LENGTH, 0, 1); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Generation ---
+      function generateLevel() {
+        gems = [];
+        stalactites = [];
+
+        for (let i = 0; i < 35; i++) {
+          const gx = rand(200, CAVE_LENGTH - 100);
+          const gy = rand(60, H - 60);
+          const type = GEM_TYPES[Math.floor(rand(0, GEM_TYPES.length))];
+          gems.push({
+            worldX: gx, y: gy,
+            type, r: rand(10, 16),
+            wobble: rand(0, Math.PI * 2),
+            collected: false, sparkle: 0,
+          });
+        }
+
+        for (let i = 0; i < 25; i++) {
+          const sx = rand(300, CAVE_LENGTH - 200);
+          const fromTop = Math.random() < 0.6;
+          stalactites.push({
+            worldX: sx,
+            y: fromTop ? rand(-5, 5) : rand(H - 5, H + 5),
+            fromTop,
+            w: rand(16, 30),
+            h: rand(50, 120),
+            hit: false,
+          });
+        }
+      }
+
+      function initSparkles() {
+        sparkles = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 30; i++) {
+          sparkles.push({
+            x: rand(0, W), y: rand(0, H),
+            alpha: rand(0, 1), speed: rand(0.5, 2),
+            size: rand(1, 3),
+          });
+        }
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(40, 120);
+          particles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 1, color, size: rand(2, 5),
+          });
+        }
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; collected = 0; hits = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        scrollX = 0; collapseX = -100;
+        player = { x: 150, y: CY, targetY: CY };
+        particles = [];
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateLevel();
+        initSparkles();
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Auto-scroll forward
+        scrollX += SCROLL_SPEED * dt;
+        collapseX += COLLAPSE_SPEED * dt;
+
+        // Increase collapse speed over time
+        const speedBonus = progress() * 30;
+
+        // Player vertical movement
+        player.y = lerp(player.y, player.targetY, clamp(8 * dt, 0, 1));
+
+        // Check gem collection (tap-based, handled in input)
+        // Check stalactite collision
+        for (const s of stalactites) {
+          if (s.hit) continue;
+          const sx = s.worldX - scrollX;
+          if (sx < -50 || sx > W + 50) continue;
+          // Check if player is near
+          const px = player.x;
+          const py = player.y;
+          if (px > sx - s.w / 2 - 15 && px < sx + s.w / 2 + 15) {
+            if (s.fromTop && py < s.h + 15) {
+              s.hit = true; hits++;
+              shake = 8; flashAlpha = 0.3;
+              spawnParticles(px, py, reducedMotion ? 3 : 8, COL.danger);
+            } else if (!s.fromTop && py > H - s.h - 15) {
+              s.hit = true; hits++;
+              shake = 8; flashAlpha = 0.3;
+              spawnParticles(px, py, reducedMotion ? 3 : 8, COL.danger);
+            }
+          }
+        }
+
+        // Check collapse catching player
+        if (collapseX > player.x + scrollX - 30) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("붕괴에 휩쓸림");
+          return;
+        }
+
+        // Sparkles
+        for (const s of sparkles) {
+          s.alpha += s.speed * dt;
+          if (s.alpha > 1) { s.alpha = 0; s.x = rand(0, W); s.y = rand(0, H); }
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 0.93; p.vy *= 0.93;
+          p.life -= dt * 2.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+
+        // Win/lose
+        if (collected >= TARGET) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+        } else if (hits >= MAX_HITS) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("종유석 충돌");
+        } else if (scrollX >= CAVE_LENGTH && collected < TARGET) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("수정 부족");
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Cave background gradient
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, "#1e1238");
+        grad.addColorStop(0.3, "#1a0e2e");
+        grad.addColorStop(0.7, "#160a28");
+        grad.addColorStop(1, "#1e1238");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Cave ceiling/floor texture
+        drawCaveWalls();
+
+        // Sparkles
+        drawSparkles();
+
+        // Collapse wall
+        drawCollapse();
+
+        // Stalactites
+        drawStalactites();
+
+        // Gems
+        drawGems();
+
+        // Player
+        drawPlayer();
+
+        // Particles
+        drawParticles();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(255, 64, 64, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawCaveWalls() {
+        // Rough cave ceiling
+        ctx.fillStyle = "#0e0618";
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        for (let x = 0; x <= W; x += 30) {
+          const h = 15 + Math.sin((x + scrollX * 0.3) * 0.02) * 12 + Math.sin((x + scrollX * 0.5) * 0.05) * 6;
+          ctx.lineTo(x, h);
+        }
+        ctx.lineTo(W, 0);
+        ctx.fill();
+
+        // Cave floor
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        for (let x = 0; x <= W; x += 30) {
+          const h = H - 15 - Math.sin((x + scrollX * 0.3) * 0.025) * 10 - Math.cos((x + scrollX * 0.4) * 0.04) * 8;
+          ctx.lineTo(x, h);
+        }
+        ctx.lineTo(W, H);
+        ctx.fill();
+      }
+
+      function drawSparkles() {
+        for (const s of sparkles) {
+          const a = Math.sin(s.alpha * Math.PI) * 0.5;
+          if (a < 0.05) continue;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(220, 200, 255, ${a})`;
+          ctx.fill();
+        }
+      }
+
+      function drawCollapse() {
+        const cx = collapseX - scrollX;
+        if (cx < -W) return;
+
+        // Collapse wall (magma)
+        const grad = ctx.createLinearGradient(cx - 60, 0, cx + 20, 0);
+        grad.addColorStop(0, "rgba(255, 80, 20, 0)");
+        grad.addColorStop(0.5, "rgba(255, 80, 20, 0.6)");
+        grad.addColorStop(1, "rgba(255, 40, 10, 0.9)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(cx - 60, 0, 80, H);
+
+        // Solid collapse
+        ctx.fillStyle = "#2a0800";
+        ctx.fillRect(0, 0, Math.max(0, cx - 60), H);
+      }
+
+      function drawStalactites() {
+        for (const s of stalactites) {
+          const sx = s.worldX - scrollX;
+          if (sx < -50 || sx > W + 50) continue;
+
+          ctx.save();
+          ctx.translate(sx, s.y);
+
+          ctx.fillStyle = s.hit ? "rgba(80, 50, 100, 0.4)" : "#2a1848";
+          ctx.beginPath();
+          if (s.fromTop) {
+            ctx.moveTo(-s.w / 2, 0);
+            ctx.lineTo(0, s.h);
+            ctx.lineTo(s.w / 2, 0);
+          } else {
+            ctx.moveTo(-s.w / 2, 0);
+            ctx.lineTo(0, -s.h);
+            ctx.lineTo(s.w / 2, 0);
+          }
+          ctx.fill();
+
+          // Crystal shimmer
+          if (!s.hit) {
+            ctx.fillStyle = "rgba(180, 140, 255, 0.15)";
+            ctx.beginPath();
+            if (s.fromTop) {
+              ctx.moveTo(-s.w / 4, 0);
+              ctx.lineTo(-2, s.h * 0.6);
+              ctx.lineTo(s.w / 4, 0);
+            } else {
+              ctx.moveTo(-s.w / 4, 0);
+              ctx.lineTo(-2, -s.h * 0.6);
+              ctx.lineTo(s.w / 4, 0);
+            }
+            ctx.fill();
+          }
+
+          ctx.restore();
+        }
+      }
+
+      function drawGems() {
+        for (const g of gems) {
+          if (g.collected) continue;
+          const gx = g.worldX - scrollX;
+          if (gx < -30 || gx > W + 30) continue;
+
+          g.wobble += 0.03;
+
+          ctx.save();
+          ctx.translate(gx, g.y);
+
+          // Glow
+          ctx.beginPath();
+          ctx.arc(0, 0, g.r + 8, 0, Math.PI * 2);
+          ctx.fillStyle = g.type.glow;
+          ctx.fill();
+
+          // Crystal shape (hexagon)
+          ctx.beginPath();
+          const r = g.r + Math.sin(g.wobble) * 2;
+          for (let i = 0; i < 6; i++) {
+            const angle = (Math.PI / 3) * i - Math.PI / 6;
+            const px = Math.cos(angle) * r;
+            const py = Math.sin(angle) * r;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fillStyle = g.type.color;
+          ctx.fill();
+
+          // Inner highlight
+          ctx.beginPath();
+          for (let i = 0; i < 6; i++) {
+            const angle = (Math.PI / 3) * i - Math.PI / 6;
+            const px = Math.cos(angle) * r * 0.5;
+            const py = Math.sin(angle) * r * 0.5;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fillStyle = "rgba(255, 255, 255, 0.25)";
+          ctx.fill();
+
+          ctx.restore();
+        }
+      }
+
+      function drawPlayer() {
+        ctx.save();
+        ctx.translate(player.x, player.y);
+
+        // Lantern glow
+        ctx.beginPath();
+        ctx.arc(0, -5, 30, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255, 200, 80, 0.15)";
+        ctx.fill();
+
+        // Miner body
+        ctx.beginPath();
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fillStyle = "#e8d0a0";
+        ctx.fill();
+        ctx.strokeStyle = "#a08060";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Helmet
+        ctx.beginPath();
+        ctx.arc(0, -4, 10, Math.PI, 0);
+        ctx.fillStyle = "#c0a060";
+        ctx.fill();
+
+        // Lantern light
+        ctx.beginPath();
+        ctx.arc(2, -10, 3, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffe080";
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = p.life;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text;
+        ctx.font = "500 15px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`${collected} / ${TARGET}`, 24, 20);
+
+        // Progress bar
+        const barW = W - 48;
+        const barX = 24, barY = 44;
+        ctx.fillStyle = "rgba(40, 20, 60, 0.5)";
+        ctx.fillRect(barX, barY, barW, 3);
+        ctx.fillStyle = COL.amethyst;
+        ctx.fillRect(barX, barY, barW * progress(), 3);
+
+        // Lives
+        const dotY = H - 24;
+        for (let i = 0; i < MAX_HITS; i++) {
+          const dotX = CX - (MAX_HITS - 1) * 10 + i * 20;
+          ctx.beginPath();
+          ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
+          ctx.fillStyle = i < MAX_HITS - hits ? COL.amethyst : COL.textDim;
+          ctx.fill();
+        }
+      }
+
+      // --- Overlay cards ---
+      function drawCard(title, lines, accent) {
+        const cardW = 320, cardH = 38 + lines.length * 26 + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(26, 14, 46, 0.92)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 8);
+        ctx.fill();
+
+        ctx.fillStyle = accent || COL.amethyst;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 22px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "400 14px sans-serif";
+        ctx.fillStyle = COL.textDim;
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 50 + i * 26);
+        }
+
+        ctx.fillStyle = "rgba(216, 200, 240, 0.35)";
+        ctx.font = "400 13px sans-serif";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 20);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(26, 14, 46, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("수정 광부", [
+          "수정 동굴에서 보석을 수집하세요",
+          "천장이 무너지기 전에 탈출하세요",
+          "",
+          "조작: 보석 터치로 수집, 상하 이동",
+          "클리어: 수정 20개 수집",
+          "실패: 붕괴 또는 종유석 3회 충돌",
+        ], COL.amethyst);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(26, 14, 46, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) {
+          drawCard("탈출 성공", [
+            `${Math.ceil(elapsed)}초 만에 완료`,
+            `수집: ${collected}개`,
+          ], COL.amethyst);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(40, 10, 10, 0.4)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("탈출 실패", [
+          hits >= MAX_HITS ? "종유석에 너무 많이 부딪혔습니다" : "동굴이 무너졌습니다",
+          `수집: ${collected} / ${TARGET}`,
+        ], COL.danger);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset();
+          mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+
+        // Move player vertically
+        player.targetY = clamp(p.y, 30, H - 30);
+
+        // Check gem tap
+        for (const g of gems) {
+          if (g.collected) continue;
+          const gx = g.worldX - scrollX;
+          if (dist(gx, g.y, p.x, p.y) < g.r + 20) {
+            g.collected = true;
+            collected += g.type.points;
+            spawnParticles(gx, g.y, reducedMotion ? 4 : 10, g.type.color);
+          }
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running") return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        player.targetY = clamp(p.y, 30, H - 30);
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleStart();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      // --- Debug / test harness ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          collected, hits, scrollX: +scrollX.toFixed(0),
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          collected = TARGET;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          hits = MAX_HITS;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail");
+          draw();
+        },
+      };
+
+      // --- Init ---
+      initSparkles();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
