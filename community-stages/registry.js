@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "neon-observatory-mirror-theft-cursed",
+    title: "Neon Observatory: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./neon-observatory-mirror-theft-cursed/thumbnail.png",
+    path: "./neon-observatory-mirror-theft-cursed/index.html",
   }
 ];
