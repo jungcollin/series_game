@@ -547,5 +547,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "돌을 7번 이상 튕기면 클리어",
     thumbnail: "./stone-skipper/thumbnail.png",
     path: "./stone-skipper/index.html",
+  },
+  {
+    id: "snowman-builder",
+    title: "눈사람 빚기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rolling builder",
+    clearCondition: "눈사람 3단을 완성하면 클리어",
+    thumbnail: "./snowman-builder/thumbnail.png",
+    path: "./snowman-builder/index.html",
   }
 ];
