@@ -263,8 +263,12 @@ async function dispatchCanvasPointerStart(page, pointerType = "mouse") {
 
 async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta }) {
   debugLog(`thumbnail: goto ${stageMeta.id}`);
-  await page.goto(stageUrl, { waitUntil: "networkidle" });
-  await page.waitForTimeout(150);
+  await page.goto(stageUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(
+    () => typeof window.render_game_to_text === "function" && typeof window.advanceTime === "function",
+    { timeout: 5000 }
+  );
+  await page.waitForTimeout(80);
 
   const canvas = page.locator("#game");
   if ((await canvas.count()) === 0) {
@@ -399,7 +403,11 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
       };
     });
 
-  await mobilePage.goto(stageUrl, { waitUntil: "networkidle" });
+  await mobilePage.goto(stageUrl, { waitUntil: "domcontentloaded" });
+  await mobilePage.waitForFunction(
+    () => typeof window.render_game_to_text === "function" && typeof window.advanceTime === "function",
+    { timeout: 5000 }
+  );
   debugLog(`mobile: loaded ${stageMeta.id}`);
   const canvas = mobilePage.locator("#game");
   await canvas.waitFor({ state: "visible" });
@@ -527,7 +535,7 @@ async function main() {
 
   const launcherUrl = `${baseUrl}/community-stages/index.html`;
   debugLog(`launcher goto`);
-  await page.goto(launcherUrl, { waitUntil: "networkidle" });
+  await page.goto(launcherUrl, { waitUntil: "domcontentloaded" });
   const launcherCount = await page.locator(`text=${stageMeta.title}`).count();
   await page.screenshot({
     path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
@@ -536,8 +544,11 @@ async function main() {
 
   const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
   debugLog(`stage goto`);
-  await page.goto(stageUrl, { waitUntil: "networkidle" });
-  await page.waitForTimeout(300);
+  await page.goto(stageUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(
+    () => typeof window.render_game_to_text === "function" && typeof window.advanceTime === "function",
+    { timeout: 5000 }
+  );
   const directChecks = await page.evaluate(() => ({
     hasRender: typeof window.render_game_to_text === "function",
     hasAdvance: typeof window.advanceTime === "function",
@@ -606,7 +617,7 @@ async function main() {
     }
   });
   debugLog(`host goto`);
-  await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
+  await hostPage.goto(launcherUrl, { waitUntil: "domcontentloaded" });
 
   async function runHostCase(iframeId, actionName) {
     await hostPage.evaluate(
