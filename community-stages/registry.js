@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "moon-greenhouse-shadow-stitch-charge",
+    title: "Moon Greenhouse: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 제한 충전",
+    clearCondition: "충전을 남기며 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./moon-greenhouse-shadow-stitch-charge/thumbnail.png",
+    path: "./moon-greenhouse-shadow-stitch-charge/index.html",
+  },
+  {
     id: "dusk-subway-shadow-stitch-cursed",
     title: "Dusk Subway: Shadow Stitch",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
