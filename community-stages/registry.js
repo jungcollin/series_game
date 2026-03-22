@@ -295,6 +295,8 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 20연속 파형을 반사하면 클리어",
     thumbnail: "./moon-greenhouse-pulse-fencing-witness/thumbnail.png",
     path: "./moon-greenhouse-pulse-fencing-witness/index.html",
+  },
+  {
     id: "moon-greenhouse-mirror-theft-tempo",
     title: "Moon Greenhouse: Mirror Heist",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -302,5 +304,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "템포 창을 놓치지 않고 서로 다른 패턴 3개로 금고 문을 열면 클리어",
     thumbnail: "./moon-greenhouse-mirror-theft-tempo/thumbnail.png",
     path: "./moon-greenhouse-mirror-theft-tempo/index.html",
+  },
+  {
+    id: "midnight-harbor-pulse-fencing-tempo",
+    title: "Midnight Harbor: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 20연속 파형을 반사하면 클리어",
+    thumbnail: "./midnight-harbor-pulse-fencing-tempo/thumbnail.png",
+    path: "./midnight-harbor-pulse-fencing-tempo/index.html",
   }
 ];
