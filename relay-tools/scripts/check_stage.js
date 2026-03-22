@@ -26,9 +26,18 @@ async function launchBrowser(chromium, probeUrl) {
   const attemptErrors = [];
   const attempts = [
     {
-      label: "chromium-default",
+      label: "chrome-disable-gpu",
       options: {
         headless: true,
+        channel: "chrome",
+        args: ["--disable-gpu"],
+      },
+    },
+    {
+      label: "chromium-disable-gpu",
+      options: {
+        headless: true,
+        args: ["--disable-gpu"],
       },
     },
   ];
@@ -524,7 +533,7 @@ async function main() {
   fs.mkdirSync(outputDir, { recursive: true });
 
   debugLog(`launch browser`);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchBrowser(chromium, `${baseUrl}/community-stages/index.html`);
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   const consoleErrors = [];
   page.on("console", (msg) => {

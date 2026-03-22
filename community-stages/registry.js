@@ -592,5 +592,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "축소 구간 끝까지 버티며 서로 다른 패턴 3개로 금고 문을 열면 클리어",
     thumbnail: "./storm-archive-mirror-theft-shrink/thumbnail.png",
     path: "./storm-archive-mirror-theft-shrink/index.html",
+  },
+  {
+    id: "crystal-foundry-shadow-stitch-sync",
+    title: "Crystal Foundry: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./crystal-foundry-shadow-stitch-sync/thumbnail.png",
+    path: "./crystal-foundry-shadow-stitch-sync/index.html",
   }
 ];
