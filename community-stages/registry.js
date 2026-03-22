@@ -439,5 +439,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "사진 5장을 촬영하면 클리어",
     thumbnail: "./wildlife-snap/thumbnail.png",
     path: "./wildlife-snap/index.html",
+  },
+  {
+    id: "beacon-relay",
+    title: "봉화 릴레이",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Chain timing",
+    clearCondition: "5개 봉화대를 모두 점화하면 클리어",
+    thumbnail: "./beacon-relay/thumbnail.png",
+    path: "./beacon-relay/index.html",
   }
 ];
