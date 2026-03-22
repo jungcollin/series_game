@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "dusk-subway-pulse-fencing-charge",
+    title: "Dusk Subway: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 제한 충전",
+    clearCondition: "충전 1칸 이상 남기고 20연속 파형 반사",
+    thumbnail: "./dusk-subway-pulse-fencing-charge/thumbnail.png",
+    path: "./dusk-subway-pulse-fencing-charge/index.html",
   }
 ];
