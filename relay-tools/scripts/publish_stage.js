@@ -32,6 +32,23 @@ function run(command, args, cwd) {
   }).trim();
 }
 
+function runDetailed(command, args, cwd) {
+  try {
+    return {
+      ok: true,
+      stdout: run(command, args, cwd),
+      stderr: "",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: String(error.stdout || "").trim(),
+      stderr: String(error.stderr || "").trim(),
+      error: error.message,
+    };
+  }
+}
+
 function parseRepoFullName(remoteUrl) {
   const match = String(remoteUrl || "").match(/github\.com[:/]([^/]+\/[^/.]+)/);
   return match ? match[1].replace(/\.git$/, "") : null;
@@ -173,6 +190,72 @@ function findExistingPr(repoRoot, repositoryFullName, branch, headOwner) {
   };
 }
 
+function parsePrNumber(prUrl) {
+  const match = String(prUrl || "").match(/\/pull\/(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
+function verifyAutoMerge(repoRoot, repositoryFullName, prRef) {
+  const viewResult = runDetailed(
+    "gh",
+    ["pr", "view", String(prRef), "--repo", repositoryFullName, "--json", "number,url,state,autoMergeRequest"],
+    repoRoot
+  );
+
+  if (!viewResult.ok) {
+    return {
+      verified: false,
+      enabled: false,
+      merged: false,
+      message: viewResult.stderr || viewResult.error || "Failed to verify auto-merge state.",
+      details: null,
+    };
+  }
+
+  const details = JSON.parse(viewResult.stdout);
+  return {
+    verified: true,
+    enabled: Boolean(details.autoMergeRequest),
+    merged: details.state === "MERGED",
+    message: details.autoMergeRequest
+      ? "Auto-merge request is set."
+      : details.state === "MERGED"
+        ? "PR merged immediately after enabling auto-merge."
+        : "Auto-merge request not present after merge command.",
+    details,
+  };
+}
+
+function enableAutoMerge(repoRoot, repositoryFullName, prRef) {
+  const mergeResult = runDetailed(
+    "gh",
+    ["pr", "merge", String(prRef), "--repo", repositoryFullName, "--auto", "--squash"],
+    repoRoot
+  );
+
+  if (!mergeResult.ok) {
+    return {
+      requested: true,
+      enabled: false,
+      verified: false,
+      merged: false,
+      message: mergeResult.stderr || mergeResult.error || "Failed to enable auto-merge.",
+      details: null,
+    };
+  }
+
+  const verification = verifyAutoMerge(repoRoot, repositoryFullName, prRef);
+  return {
+    requested: true,
+    enabled: verification.enabled || verification.merged,
+    verified: verification.verified,
+    merged: verification.merged,
+    message: verification.message || mergeResult.stdout || "Auto-merge command succeeded.",
+    details: verification.details,
+    commandOutput: mergeResult.stdout,
+  };
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
@@ -232,6 +315,14 @@ function main() {
   let prAction = "not_requested";
   let existingPr = null;
   let previousPr = null;
+  let autoMerge = {
+    requested: false,
+    enabled: false,
+    verified: false,
+    merged: false,
+    message: "",
+    details: null,
+  };
 
   // Detect fork vs direct workflow
   const upstreamRepo = detectUpstreamRepo(repoRoot);
@@ -299,6 +390,17 @@ function main() {
       prUrl = ghOutput.trim();
       prAction = previousPr ? "created_after_closed_pr" : "created_new";
     }
+
+    if (args["auto-merge"]) {
+      const prRef = existingPr?.number || parsePrNumber(prUrl);
+      if (!prRef) {
+        throw new Error("Auto-merge requested but PR reference could not be determined.");
+      }
+      autoMerge = enableAutoMerge(repoRoot, targetRepo, prRef);
+      if (!autoMerge.enabled) {
+        throw new Error(`Auto-merge requested but was not enabled. ${autoMerge.message}`);
+      }
+    }
   }
 
   process.stdout.write(
@@ -322,6 +424,7 @@ function main() {
         existingPr,
         previousPr,
         prUrl,
+        autoMerge,
       },
       null,
       2

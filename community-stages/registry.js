@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "midnight-harbor-gravity-folding-witness",
+    title: "Midnight Harbor: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
+    thumbnail: "./midnight-harbor-gravity-folding-witness/thumbnail.png",
+    path: "./midnight-harbor-gravity-folding-witness/index.html",
   }
 ];
