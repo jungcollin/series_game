@@ -468,6 +468,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./sand-castle/index.html",
   },
   {
+    id: "tuning-master",
+    title: "조율사",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Precision timing",
+    clearCondition: "8개 현을 정확히 조율하면 클리어",
+    thumbnail: "./tuning-master/thumbnail.png",
+    path: "./tuning-master/index.html",
+  },
+  {
     id: "pipe-rush",
     title: "파이프 연결",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
