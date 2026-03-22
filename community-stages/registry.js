@@ -378,6 +378,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./moon-greenhouse-weather-mixing-cursed/index.html",
   },
   {
+    id: "pottery-wheel",
+    title: "도자기 빚기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Shaping simulation",
+    clearCondition: "목표 형태와 일치하면 클리어",
+    thumbnail: "./pottery-wheel/thumbnail.png",
+    path: "./pottery-wheel/index.html",
+  },
+  {
     id: "rhythm-fishing",
     title: "리듬 낚시",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
