@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "dream-motel-mirror-theft-sync",
+    title: "Dream Motel: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./dream-motel-mirror-theft-sync/thumbnail.png",
+    path: "./dream-motel-mirror-theft-sync/index.html",
+  },
+  {
     id: "biomech-theater-mirror-theft-witness",
     title: "Biomech Theater: Mirror Heist",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
