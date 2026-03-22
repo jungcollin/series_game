@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "biomech-theater-shadow-stitch-tempo",
+    title: "Biomech Theater: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./biomech-theater-shadow-stitch-tempo/thumbnail.png",
+    path: "./biomech-theater-shadow-stitch-tempo/index.html",
   }
 ];
