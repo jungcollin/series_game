@@ -198,7 +198,6 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
-<<<<<<< HEAD
     id: "crystal-foundry-tide-anchoring-heat",
     title: "Crystal Foundry: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -206,7 +205,8 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 조류 6파를 넘기며 발전기를 지키면 클리어",
     thumbnail: "./crystal-foundry-tide-anchoring-heat/thumbnail.png",
     path: "./crystal-foundry-tide-anchoring-heat/index.html",
-=======
+  },
+  {
     id: "glass-aquarium-shadow-stitch-collapse",
     title: "Glass Aquarium: Shadow Stitch",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -214,7 +214,6 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "붕괴선이 닿기 전에 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./glass-aquarium-shadow-stitch-collapse/thumbnail.png",
     path: "./glass-aquarium-shadow-stitch-collapse/index.html",
->>>>>>> origin/main
   },
   {
     id: "moon-greenhouse-shadow-stitch-charge",
