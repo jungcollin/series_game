@@ -466,5 +466,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "모래성 5층을 완성하면 클리어",
     thumbnail: "./sand-castle/thumbnail.png",
     path: "./sand-castle/index.html",
+  },
+  {
+    id: "tuning-master",
+    title: "조율사",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Precision timing",
+    clearCondition: "8개 현을 정확히 조율하면 클리어",
+    thumbnail: "./tuning-master/thumbnail.png",
+    path: "./tuning-master/index.html",
   }
 ];
