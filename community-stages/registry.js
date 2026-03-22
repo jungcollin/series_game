@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "glass-aquarium-tide-anchoring-charge",
+    title: "Glass Aquarium: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 제한 충전",
+    clearCondition: "충전을 남기고 조류 6파 동안 발전기를 지키기",
+    thumbnail: "./glass-aquarium-tide-anchoring-charge/thumbnail.png",
+    path: "./glass-aquarium-tide-anchoring-charge/index.html",
+  },
+  {
     id: "dream-motel-tide-anchoring-cursed",
     title: "Dream Motel: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
