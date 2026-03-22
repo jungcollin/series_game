@@ -430,5 +430,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "별 12개를 수집하면 클리어",
     thumbnail: "./sky-kite/thumbnail.png",
     path: "./sky-kite/index.html",
+  },
+  {
+    id: "wildlife-snap",
+    title: "야생 포착",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Photography timing",
+    clearCondition: "사진 5장을 촬영하면 클리어",
+    thumbnail: "./wildlife-snap/thumbnail.png",
+    path: "./wildlife-snap/index.html",
   }
 ];

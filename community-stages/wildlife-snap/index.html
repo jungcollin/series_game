@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>야생 포착</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E8F0E0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(80, 120, 60, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(60, 80, 40, 0.92);
+        color: #fff; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8F0E0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(60, 80, 40, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">야생 포착. 화면 터치로 뷰파인더 이동, 탭으로 촬영. 동물이 프레임 안에 있을 때 촬영하세요. 사진 5장을 촬영하면 클리어. 필름이 소진되면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="야생 포착" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "wildlife-snap",
+        title: "야생 포착",
+        description: "움직이는 동물을 뷰파인더에 맞춰 촬영하는 게임",
+        creator: "jungcollin",
+        genre: "Photography timing",
+        clearCondition: "사진 5장을 촬영하면 클리어",
+        failCondition: "필름이 소진되면 실패",
+        controls: "화면 터치로 뷰파인더 이동, 탭으로 촬영",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#E8F0E0", bgDark: "#C8D8B0",
+        ground: "#B2C9AD", groundDark: "#8AAF7E",
+        tree: "#6B8F5E", treeDark: "#4A7040",
+        sky: "#D4E8F0", finder: "rgba(255,255,255,0.85)",
+        finderBorder: "#C4A882", finderGood: "#4CAF50",
+        text: "#4A5A3A", textLight: "rgba(74,90,58,0.6)",
+        card: "rgba(255,252,245,0.95)", accent: "#C4A882",
+        damage: "#A05030", flash: "rgba(255,255,255,0.9)",
+        animal: "#8B6A4A",
+      };
+
+      const TARGET = 5, MAX_FILM = 10, DURATION = 40;
+      const FINDER_SIZE = 90;
+      const ANIMALS = [
+        { emoji: "\uD83E\uDD8C", name: "사슴", size: 36 },
+        { emoji: "\uD83D\uDC07", name: "토끼", size: 28 },
+        { emoji: "\uD83E\uDD8A", name: "여우", size: 32 },
+        { emoji: "\uD83E\uDDA2", name: "백조", size: 30 },
+        { emoji: "\uD83E\uDD94", name: "고슴도치", size: 24 },
+      ];
+
+      let mode = "menu", elapsed = 0, photos = 0, filmLeft = MAX_FILM;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, clearAnim = 0, flashAlpha = 0;
+      let finder = { x: CX, y: CY, tx: CX, ty: CY };
+      let animals = [], particles = [], trees = [];
+      let shutterCooldown = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) }); }
+      function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) }); }
+
+      function spawnAnimal() {
+        const type = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
+        const fromLeft = Math.random() > 0.5;
+        const y = rand(H * 0.35, H - 80);
+        const speed = rand(40, 90) * (fromLeft ? 1 : -1);
+        animals.push({
+          type, x: fromLeft ? -40 : W + 40, y, vx: speed, vy: 0,
+          wobble: rand(0, Math.PI * 2), wobbleSpeed: rand(1.5, 3),
+          pauseTimer: 0, moving: true,
+        });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), sp = rand(30, 100);
+          particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+
+      function initTrees() {
+        trees = [];
+        for (let i = 0; i < 8; i++) {
+          trees.push({ x: rand(20, W - 20), y: rand(H * 0.25, H - 60), size: rand(30, 60) });
+        }
+        trees.sort((a, b) => a.y - b.y);
+      }
+
+      function reset() {
+        elapsed = 0; photos = 0; filmLeft = MAX_FILM;
+        shake = 0; clearAnim = 0; flashAlpha = 0; shutterCooldown = 0;
+        finder = { x: CX, y: CY, tx: CX, ty: CY };
+        animals = []; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initTrees();
+        for (let i = 0; i < 3; i++) spawnAnimal();
+      }
+
+      function tryShoot() {
+        if (shutterCooldown > 0 || filmLeft <= 0) return;
+        filmLeft--;
+        shutterCooldown = 0.5;
+        flashAlpha = 1;
+
+        let hit = false;
+        for (const a of animals) {
+          const halfF = FINDER_SIZE / 2;
+          if (a.x > finder.x - halfF && a.x < finder.x + halfF &&
+              a.y > finder.y - halfF && a.y < finder.y + halfF) {
+            hit = true;
+            photos++;
+            spawnParticles(a.x, a.y, reducedMotion ? 4 : 10, COL.finderGood, [3, 6]);
+            a.dead = true;
+            break;
+          }
+        }
+
+        if (!hit) {
+          shake = 4;
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        shutterCooldown = Math.max(0, shutterCooldown - dt);
+
+        finder.x = lerp(finder.x, finder.tx, clamp(10 * dt, 0, 1));
+        finder.y = lerp(finder.y, finder.ty, clamp(10 * dt, 0, 1));
+
+        for (const a of animals) {
+          a.wobble += a.wobbleSpeed * dt;
+          if (a.moving) {
+            a.x += a.vx * dt;
+            a.y += Math.sin(a.wobble) * 8 * dt;
+            if (Math.random() < 0.005) { a.moving = false; a.pauseTimer = rand(0.8, 2.0); }
+          } else {
+            a.pauseTimer -= dt;
+            if (a.pauseTimer <= 0) { a.moving = true; }
+          }
+        }
+
+        animals = animals.filter(a => !a.dead && a.x > -60 && a.x < W + 60);
+
+        while (animals.length < 3 && photos < TARGET) spawnAnimal();
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92;
+          p.life -= dt * 2.5; if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.9; if (flashAlpha < 0.01) flashAlpha = 0;
+
+        if (photos >= TARGET) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared"; reportCleared();
+        } else if (filmLeft <= 0 && shutterCooldown <= 0) {
+          mode = "failed";
+          window.relayStageResult.status = "failed"; reportFailed("필름 소진");
+        } else if (elapsed >= DURATION) {
+          mode = "failed";
+          window.relayStageResult.status = "failed"; reportFailed("시간 초과");
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, COL.sky); grad.addColorStop(0.5, COL.bg); grad.addColorStop(1, COL.ground);
+        ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+
+        // Ground
+        ctx.fillStyle = COL.ground; ctx.fillRect(0, H - 40, W, 40);
+
+        // Trees (behind animals)
+        for (const t of trees) {
+          ctx.fillStyle = COL.treeDark;
+          ctx.fillRect(t.x - 3, t.y, 6, t.size * 0.6);
+          ctx.beginPath();
+          ctx.moveTo(t.x, t.y - t.size * 0.4);
+          ctx.lineTo(t.x + t.size * 0.4, t.y + t.size * 0.15);
+          ctx.lineTo(t.x - t.size * 0.4, t.y + t.size * 0.15);
+          ctx.closePath();
+          ctx.fillStyle = COL.tree; ctx.fill();
+        }
+
+        // Animals
+        for (const a of animals) {
+          ctx.font = `${a.type.size}px sans-serif`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(a.type.emoji, a.x, a.y);
+        }
+
+        // Viewfinder
+        drawFinder();
+
+        // Particles
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = p.life; ctx.fill(); ctx.globalAlpha = 1;
+        }
+
+        // Flash
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(255,255,255,${flashAlpha * 0.7})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        if (mode === "running") drawHUD();
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawFinder() {
+        const halfF = FINDER_SIZE / 2;
+        const fx = finder.x - halfF, fy = finder.y - halfF;
+        const cornerLen = 15;
+
+        // Check if animal is inside
+        let hasTarget = false;
+        for (const a of animals) {
+          if (a.x > finder.x - halfF && a.x < finder.x + halfF &&
+              a.y > finder.y - halfF && a.y < finder.y + halfF) {
+            hasTarget = true; break;
+          }
+        }
+
+        const col = hasTarget ? COL.finderGood : COL.finderBorder;
+        ctx.strokeStyle = col; ctx.lineWidth = 2.5;
+
+        // Corner brackets
+        // Top-left
+        ctx.beginPath(); ctx.moveTo(fx, fy + cornerLen); ctx.lineTo(fx, fy); ctx.lineTo(fx + cornerLen, fy); ctx.stroke();
+        // Top-right
+        ctx.beginPath(); ctx.moveTo(fx + FINDER_SIZE - cornerLen, fy); ctx.lineTo(fx + FINDER_SIZE, fy); ctx.lineTo(fx + FINDER_SIZE, fy + cornerLen); ctx.stroke();
+        // Bottom-left
+        ctx.beginPath(); ctx.moveTo(fx, fy + FINDER_SIZE - cornerLen); ctx.lineTo(fx, fy + FINDER_SIZE); ctx.lineTo(fx + cornerLen, fy + FINDER_SIZE); ctx.stroke();
+        // Bottom-right
+        ctx.beginPath(); ctx.moveTo(fx + FINDER_SIZE - cornerLen, fy + FINDER_SIZE); ctx.lineTo(fx + FINDER_SIZE, fy + FINDER_SIZE); ctx.lineTo(fx + FINDER_SIZE, fy + FINDER_SIZE - cornerLen); ctx.stroke();
+
+        // Crosshair
+        ctx.strokeStyle = `${col}80`; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(finder.x - 10, finder.y); ctx.lineTo(finder.x + 10, finder.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(finder.x, finder.y - 10); ctx.lineTo(finder.x, finder.y + 10); ctx.stroke();
+
+        // Center dot
+        ctx.beginPath(); ctx.arc(finder.x, finder.y, 2, 0, Math.PI * 2);
+        ctx.fillStyle = col; ctx.fill();
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "bold 16px Trebuchet MS,sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`\uD83D\uDCF7 ${photos} / ${TARGET}`, 20, 16);
+
+        ctx.textAlign = "right";
+        ctx.fillText(`\uD83C\uDFDE ${filmLeft}`, W - 20, 16);
+
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.textAlign = "center"; ctx.font = "14px Trebuchet MS,sans-serif"; ctx.fillStyle = COL.textLight;
+        ctx.fillText(`${Math.ceil(timeLeft)}s`, CX, 16);
+
+        ctx.fillStyle = "rgba(74,90,58,0.15)"; ctx.fillRect(20, 40, W - 40, 3);
+        ctx.fillStyle = COL.text; ctx.fillRect(20, 40, (W - 40) * (1 - elapsed / DURATION), 3);
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath(); c.moveTo(x + r, y); c.lineTo(x + w - r, y); c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r); c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h); c.arcTo(x, y + h, x, y + h - r, r); c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+      function drawCard(title, lines, accent) {
+        const cW = Math.min(340, W - 40), lH = 24, cH = 44 + lines.length * lH + 36;
+        const cX = CX - cW / 2, cY = CY - cH / 2;
+        ctx.fillStyle = COL.card; roundRect(ctx, cX, cY, cW, cH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cX + 16, cY, cW - 32, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 22px Trebuchet MS,sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cY + 16);
+        ctx.font = "14px Trebuchet MS,sans-serif"; ctx.fillStyle = "rgba(74,90,58,0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cY + 48 + i * lH);
+        ctx.fillStyle = "rgba(74,90,58,0.35)"; ctx.font = "13px Trebuchet MS,sans-serif";
+        ctx.fillText("TAP or ENTER", CX, cY + cH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(232,240,224,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("야생 포착", ["숲 속 동물을 뷰파인더에 맞춰", "촬영하세요!", "", "조작: 화면 터치로 뷰파인더 이동, 탭으로 촬영", "클리어: 사진 5장 촬영", "실패: 필름 10장 소진 시"], COL.accent);
+      }
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(232,240,224,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, `\uD83D\uDCF7 ${photos}장 촬영`], COL.accent);
+      }
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80,40,20,0.25)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", [elapsed >= DURATION ? "시간이 다했습니다" : "필름이 소진되었습니다", `\uD83D\uDCF7 ${photos} / ${TARGET}`], COL.damage);
+      }
+
+      function handleStart() { if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; } }
+
+      let pointerDown = false;
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        pointerDown = true;
+        const rect = canvas.getBoundingClientRect();
+        finder.tx = (e.clientX - rect.left) * (W / rect.width);
+        finder.ty = (e.clientY - rect.top) * (H / rect.height);
+        tryShoot();
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running" || !pointerDown) return;
+        const rect = canvas.getBoundingClientRect();
+        finder.tx = (e.clientX - rect.left) * (W / rect.width);
+        finder.ty = (e.clientY - rect.top) * (H / rect.height);
+      });
+      canvas.addEventListener("pointerup", () => { pointerDown = false; });
+      canvas.addEventListener("pointercancel", () => { pointerDown = false; });
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (mode !== "running") handleStart(); else tryShoot(); }
+      });
+
+      function gameLoop(ts) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = ts; return; }
+        let dt = Math.min((ts - lastTimestamp) / 1000, MAX_DT); lastTimestamp = ts;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), photos, filmLeft, animals: animals.length, result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => { const s = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < s; i++) update(FIXED_DT); draw(); return renderGameToText(); };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; photos = TARGET; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; filmLeft = 0; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      initTrees(); reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
