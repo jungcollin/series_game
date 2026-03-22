@@ -1006,5 +1006,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "동기화 문을 모두 맞춘 뒤 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
     thumbnail: "./moon-greenhouse-debt-auction-sync/thumbnail.png",
     path: "./moon-greenhouse-debt-auction-sync/index.html",
+  },
+  {
+    id: "paper-temple-debt-auction-inverse",
+    title: "Paper Temple: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./paper-temple-debt-auction-inverse/thumbnail.png",
+    path: "./paper-temple-debt-auction-inverse/index.html",
   }
 ];
