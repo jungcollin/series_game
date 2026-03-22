@@ -232,5 +232,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "10초 버티기",
     thumbnail: "./my-new-stage/thumbnail.png",
     path: "./my-new-stage/index.html",
+  },
+  {
+    id: "space-dodge",
+    title: "스페이스 닷지",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./space-dodge/thumbnail.png",
+    path: "./space-dodge/index.html",
   }
 ];
