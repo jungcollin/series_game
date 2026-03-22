@@ -259,5 +259,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "붕괴선이 닿기 전에 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
     thumbnail: "./storm-archive-gravity-folding-collapse/thumbnail.png",
     path: "./storm-archive-gravity-folding-collapse/index.html",
+  },
+  {
+    id: "dream-motel-gravity-folding-inverse",
+    title: "Dream Motel: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
+    thumbnail: "./dream-motel-gravity-folding-inverse/thumbnail.png",
+    path: "./dream-motel-gravity-folding-inverse/index.html",
   }
 ];
