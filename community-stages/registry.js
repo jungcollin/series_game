@@ -198,6 +198,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+<<<<<<< HEAD
     id: "biomech-theater-echo-weaving-charge",
     title: "Biomech Theater: Echo Loom",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -205,6 +206,24 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "충전을 남기며 모든 코어 문양을 연결하면 클리어",
     thumbnail: "./biomech-theater-echo-weaving-charge/thumbnail.png",
     path: "./biomech-theater-echo-weaving-charge/index.html",
+=======
+    id: "dusk-subway-echo-weaving-inverse",
+    title: "Dusk Subway: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./dusk-subway-echo-weaving-inverse/thumbnail.png",
+    path: "./dusk-subway-echo-weaving-inverse/index.html",
+  },
+  {
+    id: "moon-greenhouse-orbit-herding-collapse",
+    title: "Moon Greenhouse: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./moon-greenhouse-orbit-herding-collapse/thumbnail.png",
+    path: "./moon-greenhouse-orbit-herding-collapse/index.html",
+>>>>>>> origin/main
   },
   {
     id: "glass-aquarium-debt-auction-tempo",
@@ -511,5 +530,23 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./midnight-harbor-shadow-stitch-heat/thumbnail.png",
     path: "./midnight-harbor-shadow-stitch-heat/index.html",
+  },
+  {
+    id: "paper-temple-shadow-stitch-witness",
+    title: "Paper Temple: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./paper-temple-shadow-stitch-witness/thumbnail.png",
+    path: "./paper-temple-shadow-stitch-witness/index.html",
+  },
+  {
+    id: "neon-observatory-gravity-folding-charge",
+    title: "Neon Observatory: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 제한 충전",
+    clearCondition: "충전을 남기며 코어를 목적 슬롯까지 배달하기",
+    thumbnail: "./neon-observatory-gravity-folding-charge/thumbnail.png",
+    path: "./neon-observatory-gravity-folding-charge/index.html",
   }
 ];
