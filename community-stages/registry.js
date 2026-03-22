@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "crystal-foundry-tide-anchoring-heat",
+    title: "Crystal Foundry: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./crystal-foundry-tide-anchoring-heat/thumbnail.png",
+    path: "./crystal-foundry-tide-anchoring-heat/index.html",
   }
 ];
