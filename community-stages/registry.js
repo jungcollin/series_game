@@ -520,5 +520,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./paper-temple-shadow-stitch-witness/thumbnail.png",
     path: "./paper-temple-shadow-stitch-witness/index.html",
+  },
+  {
+    id: "neon-observatory-pulse-fencing-heat",
+    title: "Neon Observatory: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 20연속 파형을 반사하면 클리어",
+    thumbnail: "./neon-observatory-pulse-fencing-heat/thumbnail.png",
+    path: "./neon-observatory-pulse-fencing-heat/index.html",
   }
 ];
