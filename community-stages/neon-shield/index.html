@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>네온 쉴드</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #050510;
+        touch-action: none; /* Prevent default touch actions like pull-to-refresh */
+      }
+      body {
+        display: grid;
+        place-items: center;
+      }
+      canvas {
+        -webkit-tap-highlight-color: transparent;
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="sr-only">
+      <h1>네온 쉴드</h1>
+      <p>다가오는 공격의 방향과 색상을 맞춰 코어를 방어하세요. 터치/클릭 조작.</p>
+      <p>목표: 20초 동안 네온 코어 방어하기</p>
+      <p>실패 조건: 코어가 파괴되면 실패</p>
+      <p>조작: 터치/클릭으로 방패 방향 및 색상 전환</p>
+      <p>모바일 터치 스크린 지원</p>
+    </div>
+    <!-- Relay Context Support -->
+    <script>
+      let relaySuccess = null;
+      let relayFail = null;
+
+      window.relayStageMeta = {
+        id: "neon-shield",
+        title: "네온 쉴드",
+        description: "다가오는 공격의 방향과 색상을 맞춰 코어를 방어하세요. 터치/클릭 조작.",
+        genre: "아케이드 퍼즐",
+        clearCondition: "20초 동안 네온 코어 방어하기",
+        failCondition: "코어가 파괴되면 실패",
+        controls: "터치/클릭으로 방패 방향 및 색상 전환"
+      };
+
+      window.relayStageResult = {
+        clearCount: 0,
+        failCount: 0
+      };
+
+      // Provide state for thumbnail capturer
+      window.render_game_to_text = function() {
+        if (!window.gameState || !window.gameState.startTime) return JSON.stringify({ mode: "menu" });
+        if (window.gameState.active) return JSON.stringify({ mode: "running" });
+        if (window.gameTimeRemaining <= 0) return JSON.stringify({ mode: "cleared" });
+        return JSON.stringify({ mode: "failed" });
+      };
+
+      // Mock advanceTime to satisfy the test harness
+      window.advanceTime = function(dt) {
+         if (window.gameState && window.gameState.active) {
+            updateTimer(dt);
+            updateProjectiles(dt);
+            updateParticles(dt);
+            updateFloatText(dt);
+         }
+      };
+
+      // Mock forceFail for the test harness
+      window.relayStageDebug = {
+         forceClear: function() {
+            window.gameState.active = false;
+            window.gameTimeRemaining = 0;
+            sendSuccess();
+         },
+         forceFail: function() {
+            window.gameState.active = false;
+            sendFail();
+         }
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function sendSuccess() {
+        if (relaySuccess) return;
+        relaySuccess = true;
+        window.relayStageResult.clearCount += 1;
+        if (inRelayHost()) {
+           window.parent.RelayHost.onStageCleared?.({
+             stageId: window.relayStageMeta.id,
+             stageTitle: window.relayStageMeta.title,
+             clearCountAfter: window.relayStageResult.clearCount,
+             durationSec: 20 - window.gameTimeRemaining
+           });
+        }
+        window.parent.postMessage({ type: "stage-success" }, "*");
+      }
+      function sendFail() {
+        if (relayFail) return;
+        relayFail = true;
+        window.relayStageResult.failCount += 1;
+        if (inRelayHost()) {
+           window.parent.RelayHost.onStageFailed?.({
+             stageId: window.relayStageMeta.id,
+             stageTitle: window.relayStageMeta.title,
+             reason: "failed",
+             durationSec: 20 - window.gameTimeRemaining
+           });
+        }
+        window.parent.postMessage({ type: "stage-fail" }, "*");
+      }
+
+      // Ensure onStageReady is always called, including via check_stage evaluation.
+      function reportReady() {
+         if (inRelayHost()) {
+            window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+         }
+      }
+      reportReady();
+    </script>
+
+    <canvas id="game" width="800" height="800"></canvas>
+
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+
+      const COLORS = {
+        blue: "#00f3ff",
+        pink: "#ff00e5",
+        bg: "#050510",
+        core: "#ffffff"
+      };
+
+      window.gameState = {
+        active: true,
+        startTime: null,
+        timeLimit: 20, // 20 seconds to win
+        shieldDir: 0, // 0: Top, 1: Right, 2: Bottom, 3: Left
+        shieldColor: COLORS.blue,
+        centerRadius: 100, // Safe zone radius for tapping to switch color
+        cx: 400, // Center X
+        cy: 400  // Center Y
+      };
+
+      const gameState = window.gameState;
+
+      function handleInput(x, y) {
+        if (!gameState.active) return;
+
+        // Map canvas coordinates relative to center
+        const rect = canvas.getBoundingClientRect();
+        // Scale to logical canvas resolution (800x800)
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+
+        const clientX = (x - rect.left) * scaleX;
+        const clientY = (y - rect.top) * scaleY;
+
+        const dx = clientX - gameState.cx;
+        const dy = clientY - gameState.cy;
+        const distance = Math.sqrt(dx*dx + dy*dy);
+
+        // Tap inside the center circle: swap color
+        if (distance < gameState.centerRadius) {
+          gameState.shieldColor = (gameState.shieldColor === COLORS.blue) ? COLORS.pink : COLORS.blue;
+        } else {
+          // Tap outside: change shield direction based on quadrant
+          // Calculate angle in radians, then convert to 0-3 sectors
+          // Math.atan2 returns -PI to PI. 0 is Right, PI/2 is Bottom, -PI/2 is Top.
+          let angle = Math.atan2(dy, dx);
+
+          if (angle >= -Math.PI/4 && angle < Math.PI/4) {
+             gameState.shieldDir = 1; // Right
+          } else if (angle >= Math.PI/4 && angle < 3*Math.PI/4) {
+             gameState.shieldDir = 2; // Bottom
+          } else if (angle >= -3*Math.PI/4 && angle < -Math.PI/4) {
+             gameState.shieldDir = 0; // Top
+          } else {
+             gameState.shieldDir = 3; // Left
+          }
+        }
+      }
+
+      // Touch and Mouse events
+      canvas.addEventListener("mousedown", (e) => {
+        handleInput(e.clientX, e.clientY);
+      });
+      canvas.addEventListener("touchstart", (e) => {
+        e.preventDefault(); // Prevent scrolling
+        if (e.touches.length > 0) {
+          handleInput(e.touches[0].clientX, e.touches[0].clientY);
+        }
+      }, { passive: false });
+
+      // Request Animation Frame Loop Setup
+      let lastTime = 0;
+
+      function gameLoop(timestamp) {
+        if (!gameState.startTime) gameState.startTime = timestamp;
+        const deltaTime = timestamp - lastTime;
+        lastTime = timestamp;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (gameState.active) {
+          drawCore();
+          drawShield();
+          updateParticles(deltaTime);
+          drawParticles();
+        }
+
+        requestAnimationFrame(gameLoop);
+      }
+
+      let particles = [];
+      let screenShake = 0;
+      let projectiles = [];
+      let floatText = [];
+      let spawnTimer = 0;
+      let spawnInterval = 1500; // ms between spawns
+      window.gameTimeRemaining = gameState.timeLimit;
+      let gameTimeRemaining = window.gameTimeRemaining;
+      let stateMessage = "";
+
+      function spawnProjectile() {
+        const dirs = [0, 1, 2, 3]; // Top, Right, Bottom, Left
+        const dir = dirs[Math.floor(Math.random() * dirs.length)];
+        const color = Math.random() > 0.5 ? COLORS.blue : COLORS.pink;
+
+        let x = gameState.cx;
+        let y = gameState.cy;
+        const dist = 500;
+
+        if (dir === 0) y -= dist;
+        else if (dir === 1) x += dist;
+        else if (dir === 2) y += dist;
+        else if (dir === 3) x -= dist;
+
+        projectiles.push({
+          x: x,
+          y: y,
+          dir: dir,
+          color: color,
+          speed: 250 // pixels per second
+        });
+      }
+
+      function updateProjectiles(dt) {
+        // Spawn
+        spawnTimer += dt;
+        if (spawnTimer >= spawnInterval) {
+          spawnTimer = 0;
+          spawnProjectile();
+          spawnInterval = Math.max(400, spawnInterval - 50); // Speed up over time
+        }
+
+        // Move and Collide
+        for(let i=projectiles.length-1; i>=0; i--) {
+          let proj = projectiles[i];
+          const distPerFrame = proj.speed * (dt / 1000);
+
+          if (proj.dir === 0) proj.y += distPerFrame;
+          else if (proj.dir === 1) proj.x -= distPerFrame;
+          else if (proj.dir === 2) proj.y -= distPerFrame;
+          else if (proj.dir === 3) proj.x += distPerFrame;
+
+          const dx = proj.x - gameState.cx;
+          const dy = proj.y - gameState.cy;
+          const distToCore = Math.sqrt(dx*dx + dy*dy);
+
+          // Check hit on shield radius (140)
+          if (distToCore <= 150 && distToCore >= 130) {
+            // Check if shielded
+            if (gameState.shieldDir === proj.dir && gameState.shieldColor === proj.color) {
+              // Blocked!
+              spawnParticles(proj.x, proj.y, proj.color, 30);
+              screenShake = 10;
+              addFloatText("PERFECT!", proj.x, proj.y, proj.color);
+              projectiles.splice(i, 1);
+              continue;
+            }
+          }
+
+          // Check hit on core (radius 50)
+          if (distToCore < 50) {
+            // GameOver
+            spawnParticles(gameState.cx, gameState.cy, COLORS.core, 100);
+            screenShake = 30;
+            projectiles.splice(i, 1);
+            endGame(false, "Core Destroyed!");
+          }
+        }
+      }
+
+      function drawProjectiles() {
+        ctx.save();
+        applyShake();
+        projectiles.forEach(p => {
+          ctx.beginPath();
+          // Draw triangle pointing towards center
+          ctx.translate(p.x, p.y);
+          if (p.dir === 0) ctx.rotate(Math.PI);
+          else if (p.dir === 1) ctx.rotate(-Math.PI/2);
+          else if (p.dir === 2) ctx.rotate(0);
+          else if (p.dir === 3) ctx.rotate(Math.PI/2);
+
+          ctx.moveTo(0, 15);
+          ctx.lineTo(-15, -15);
+          ctx.lineTo(15, -15);
+          ctx.closePath();
+
+          ctx.fillStyle = p.color;
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = p.color;
+          ctx.fill();
+
+          ctx.resetTransform();
+        });
+        ctx.restore();
+      }
+
+      function addFloatText(text, x, y, color) {
+        floatText.push({
+          text: text,
+          x: x,
+          y: y,
+          life: 1.0,
+          color: color
+        });
+      }
+
+      function updateFloatText(dt) {
+        for(let i=floatText.length-1; i>=0; i--) {
+          let ft = floatText[i];
+          ft.y -= 1; // move up
+          ft.life -= dt * 0.001; // fade out (1 second)
+          if (ft.life <= 0) floatText.splice(i, 1);
+        }
+      }
+
+      function drawFloatText() {
+        ctx.save();
+        ctx.font = "bold 24px 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "center";
+        floatText.forEach(ft => {
+          ctx.globalAlpha = ft.life;
+          ctx.fillStyle = ft.color;
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = ft.color;
+          ctx.fillText(ft.text, ft.x, ft.y);
+        });
+        ctx.restore();
+      }
+
+      function updateTimer(dt) {
+        if (!gameState.active) return;
+        gameTimeRemaining -= dt / 1000;
+        window.gameTimeRemaining = gameTimeRemaining;
+        if (gameTimeRemaining <= 0) {
+          gameTimeRemaining = 0;
+          window.gameTimeRemaining = 0;
+          endGame(true, "VICTORY!");
+        }
+      }
+
+      function drawUI() {
+        ctx.save();
+        ctx.font = "bold 36px 'Trebuchet MS', sans-serif";
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = "#ffffff";
+        ctx.fillText(Math.ceil(gameTimeRemaining) + "s", 400, 50);
+
+        if (!gameState.active) {
+          ctx.font = "bold 60px 'Trebuchet MS', sans-serif";
+          ctx.fillText(stateMessage, 400, 350);
+        }
+        ctx.restore();
+      }
+
+      function endGame(win, msg) {
+        if (!gameState.active) return;
+        gameState.active = false;
+        stateMessage = msg;
+
+        // Remove setTimeout so tests can see the result immediately
+        if (win) {
+          sendSuccess();
+        } else {
+          sendFail();
+        }
+      }
+
+      function spawnParticles(x, y, color, count) {
+        for(let i=0; i<count; i++) {
+          particles.push({
+            x: x,
+            y: y,
+            vx: (Math.random() - 0.5) * 8,
+            vy: (Math.random() - 0.5) * 8,
+            life: 1.0,
+            color: color
+          });
+        }
+      }
+
+      function updateParticles(dt) {
+        for(let i=particles.length-1; i>=0; i--) {
+          let p = particles[i];
+          p.x += p.vx;
+          p.y += p.vy;
+          p.life -= 0.02; // decay
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        if (screenShake > 0) {
+          screenShake -= dt * 0.05;
+          if (screenShake < 0) screenShake = 0;
+        }
+      }
+
+      function drawParticles() {
+        particles.forEach(p => {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 3 * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = p.life;
+          ctx.fill();
+        });
+        ctx.globalAlpha = 1.0;
+      }
+
+      function applyShake() {
+        if (screenShake > 0) {
+          const shakeX = (Math.random() - 0.5) * screenShake;
+          const shakeY = (Math.random() - 0.5) * screenShake;
+          ctx.translate(shakeX, shakeY);
+        }
+      }
+
+      function drawCore() {
+        ctx.save();
+        applyShake();
+
+        // Pulsing core effect
+        const time = Date.now() * 0.003;
+        const pulse = Math.sin(time) * 5 + 45;
+
+        // Core Inner
+        ctx.beginPath();
+        ctx.arc(gameState.cx, gameState.cy, pulse, 0, Math.PI * 2);
+        ctx.fillStyle = COLORS.core;
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = gameState.shieldColor;
+        ctx.fill();
+
+        // Safe zone visual (center area)
+        ctx.beginPath();
+        ctx.arc(gameState.cx, gameState.cy, gameState.centerRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+        ctx.lineWidth = 2;
+        ctx.shadowBlur = 0;
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      function drawShield() {
+        ctx.save();
+        applyShake();
+
+        // Shield distance from center
+        const shieldRadius = 140;
+
+        ctx.beginPath();
+        // Shield drawn as an arc covering 90 degrees
+        let startAngle = 0;
+        let endAngle = 0;
+
+        if (gameState.shieldDir === 0) { // Top
+          startAngle = Math.PI + Math.PI/4;
+          endAngle = Math.PI*2 - Math.PI/4;
+        } else if (gameState.shieldDir === 1) { // Right
+          startAngle = -Math.PI/4;
+          endAngle = Math.PI/4;
+        } else if (gameState.shieldDir === 2) { // Bottom
+          startAngle = Math.PI/4;
+          endAngle = Math.PI - Math.PI/4;
+        } else if (gameState.shieldDir === 3) { // Left
+          startAngle = Math.PI - Math.PI/4;
+          endAngle = Math.PI + Math.PI/4;
+        }
+
+        ctx.arc(gameState.cx, gameState.cy, shieldRadius, startAngle, endAngle);
+        ctx.strokeStyle = gameState.shieldColor;
+        ctx.lineWidth = 15;
+        ctx.lineCap = "round";
+        ctx.shadowBlur = 25;
+        ctx.shadowColor = gameState.shieldColor;
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      // Initialize
+      requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

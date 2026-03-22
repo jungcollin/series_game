@@ -205,5 +205,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "시간을 되돌려 함정을 피하고 출구에 도달하기",
     thumbnail: "./time-reversal-escape/thumbnail.png",
     path: "./time-reversal-escape/index.html",
+  },
+  {
+    id: "neon-shield",
+    title: "네온 쉴드",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드 퍼즐",
+    clearCondition: "20초 동안 네온 코어 방어하기",
+    thumbnail: "./neon-shield/thumbnail.png",
+    path: "./neon-shield/index.html",
   }
 ];
