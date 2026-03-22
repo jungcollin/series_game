@@ -45,18 +45,6 @@ function run(command, args, cwd) {
   }).trim();
 }
 
-async function launchBrowser(chromium) {
-  try {
-    return await chromium.launch({
-      headless: true,
-      channel: "chrome",
-      args: ["--disable-gpu"],
-    });
-  } catch (_error) {
-    return chromium.launch({ headless: true, args: ["--disable-gpu"] });
-  }
-}
-
 function parseChangedStageSlugs(gitStatus) {
   const stageSlugs = new Set();
   const lines = String(gitStatus || "").split("\n");
@@ -204,6 +192,42 @@ function stageThumbnailPath(repoRoot, stageDir) {
   return path.join(repoRoot, "community-stages", stageDir, "thumbnail.png");
 }
 
+async function launchBrowserWithRetries(chromium, attempts = 3) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await chromium.launch({
+        headless: true,
+        channel: "chrome",
+        args: ["--disable-gpu"],
+      });
+    } catch (error) {
+      lastError = error;
+      try {
+        return await chromium.launch({
+          headless: true,
+          args: ["--disable-gpu"],
+        });
+      } catch (fallbackError) {
+        lastError = fallbackError;
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function retryAsync(attempts, callback) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await callback(attempt);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta }) {
   await page.goto(stageUrl, { waitUntil: "networkidle" });
   await page.waitForTimeout(150);
@@ -221,8 +245,16 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
     );
 
   const startStage = async (frames) => {
-    await canvas.click({ position: { x: 24, y: 24 } }).catch(() => {});
-    await page.keyboard.press("Enter").catch(() => {});
+    const usedForceStart = await page.evaluate(() => {
+      if (typeof window.relayStageDebug?.forceStart === "function") {
+        window.relayStageDebug.forceStart();
+        return true;
+      }
+      return false;
+    }).catch(() => false);
+    if (!usedForceStart) {
+      await canvas.click({ position: { x: 24, y: 24 } }).catch(() => {});
+    }
     await page.waitForTimeout(80);
     await page.evaluate((frameCount) => {
       if (typeof window.advanceTime === "function") {
@@ -252,7 +284,15 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
   }
 
   const thumbnailPath = stageThumbnailPath(repoRoot, stageMeta.dir);
-  await canvas.screenshot({ path: thumbnailPath });
+  const dataUrl = await page.evaluate(() => {
+    const liveCanvas = document.querySelector("#game");
+    return liveCanvas instanceof HTMLCanvasElement ? liveCanvas.toDataURL("image/png") : null;
+  });
+  if (!dataUrl) {
+    throw new Error(`Canvas toDataURL failed for thumbnail capture: ${stageMeta.id}`);
+  }
+  const base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
+  fs.writeFileSync(thumbnailPath, Buffer.from(base64, "base64"));
   return thumbnailPath;
 }
 
@@ -447,115 +487,147 @@ async function main() {
 
   fs.mkdirSync(outputDir, { recursive: true });
 
-  let browser = null;
-  let launcherCount = 0;
-  let directChecks = null;
-  let mobileChecks = null;
-  let clearEvents = [];
-  let failEvents = [];
-  let thumbnailPath = "";
+  const browser = await launchBrowserWithRetries(chromium);
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   const consoleErrors = [];
-
-  try {
-    browser = await launchBrowser(chromium);
-    const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
-    page.on("console", (msg) => {
-      if (msg.type() === "error") {
-        consoleErrors.push(msg.text());
-      }
-    });
-
-    const launcherUrl = `${baseUrl}/community-stages/index.html`;
-    await page.goto(launcherUrl, { waitUntil: "networkidle" });
-    launcherCount = await page.locator(`text=${stageMeta.title}`).count();
-    await page.screenshot({
-      path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
-      fullPage: true,
-    });
-
-    const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
-    await page.goto(stageUrl, { waitUntil: "networkidle" });
-    await page.waitForTimeout(300);
-    directChecks = await page.evaluate(() => ({
-      hasRender: typeof window.render_game_to_text === "function",
-      hasAdvance: typeof window.advanceTime === "function",
-      hasMeta: typeof window.relayStageMeta === "object" && window.relayStageMeta !== null,
-      hasResult: typeof window.relayStageResult === "object" && window.relayStageResult !== null,
-      hasDebug:
-        typeof window.relayStageDebug === "object" &&
-        typeof window.relayStageDebug?.forceClear === "function" &&
-        typeof window.relayStageDebug?.forceFail === "function",
-      text: typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null,
-      meta: window.relayStageMeta || null,
-      result: window.relayStageResult || null,
-    }));
-    await page.screenshot({
-      path: path.join(outputDir, `${stageMeta.dir}-direct.png`),
-      fullPage: true,
-    });
-    thumbnailPath = await captureGameplayThumbnail({
-      page,
-      stageUrl,
-      repoRoot,
-      stageMeta,
-    });
-    mobileChecks = await captureMobileStageState({
-      browser,
-      stageUrl,
-      outputDir,
-      stageMeta,
-      consoleErrors,
-    });
-
-    const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    hostPage.on("console", (msg) => {
-      if (msg.type() === "error") {
-        consoleErrors.push(msg.text());
-      }
-    });
-    await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
-
-    async function runHostCase(iframeId, actionName) {
-      await hostPage.evaluate(
-        ({ stageDir, iframeId }) => {
-          window.__relayHostEvents = [];
-          window.RelayHost = {
-            onStageReady(meta) {
-              window.__relayHostEvents.push({ type: "ready", meta });
-            },
-            onStageCleared(payload) {
-              window.__relayHostEvents.push({ type: "cleared", payload });
-            },
-            onStageFailed(payload) {
-              window.__relayHostEvents.push({ type: "failed", payload });
-            },
-          };
-          document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
-        },
-        { stageDir: stageMeta.dir, iframeId }
-      );
-
-      const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
-      await frame.waitForFunction(() => !!window.relayStageDebug);
-      await frame.evaluate((actionName) => {
-        window.relayStageDebug[actionName]();
-      }, actionName);
-      await hostPage.waitForTimeout(250);
-      return hostPage.evaluate(() => window.__relayHostEvents);
+  page.on("console", (msg) => {
+    if (msg.type() === "error") {
+      consoleErrors.push(msg.text());
     }
+  });
 
-    clearEvents = await runHostCase("stage-clear", "forceClear");
-    failEvents = await runHostCase("stage-fail", "forceFail");
+  const launcherUrl = `${baseUrl}/community-stages/index.html`;
+  await page.goto(launcherUrl, { waitUntil: "networkidle" });
+  const launcherCount = await page.locator(`text=${stageMeta.title}`).count();
+  await page.screenshot({
+    path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
+    fullPage: true,
+  });
 
-    await hostPage.screenshot({
-      path: path.join(outputDir, `${stageMeta.dir}-host.png`),
-      fullPage: true,
-    });
-  } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
+  const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
+  await page.goto(stageUrl, { waitUntil: "networkidle" });
+  await page.waitForTimeout(300);
+  const directChecks = await page.evaluate(() => ({
+    hasRender: typeof window.render_game_to_text === "function",
+    hasAdvance: typeof window.advanceTime === "function",
+    hasMeta: typeof window.relayStageMeta === "object" && window.relayStageMeta !== null,
+    hasResult: typeof window.relayStageResult === "object" && window.relayStageResult !== null,
+    hasDebug:
+      typeof window.relayStageDebug === "object" &&
+      typeof window.relayStageDebug?.forceClear === "function" &&
+      typeof window.relayStageDebug?.forceFail === "function",
+    text: typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null,
+    meta: window.relayStageMeta || null,
+    result: window.relayStageResult || null,
+  }));
+  await page.screenshot({
+    path: path.join(outputDir, `${stageMeta.dir}-direct.png`),
+    fullPage: true,
+  });
+  const thumbnailPath = await captureGameplayThumbnail({
+    page,
+    stageUrl,
+    repoRoot,
+    stageMeta,
+  });
+  await browser.close();
+
+  const mobileChecks = await retryAsync(3, async () => {
+    const mobileBrowser = await launchBrowserWithRetries(chromium);
+    try {
+      return await captureMobileStageState({
+        browser: mobileBrowser,
+        stageUrl,
+        outputDir,
+        stageMeta,
+        consoleErrors,
+      });
+    } finally {
+      await mobileBrowser.close().catch(() => {});
     }
+  });
+
+  if (!launcherCount) {
+    throw new Error(`Launcher card not found for stage: ${stageMeta.id}`);
   }
+  if (!directChecks.hasRender || !directChecks.hasAdvance || !directChecks.hasMeta || !directChecks.hasResult) {
+    throw new Error(`Required relay interface missing for stage: ${stageMeta.id}`);
+  }
+  if (!directChecks.hasDebug) {
+    throw new Error(`relayStageDebug.forceClear/forceFail missing for stage: ${stageMeta.id}`);
+  }
+  if (directChecks.meta?.id !== stageMeta.id) {
+    throw new Error(`window.relayStageMeta.id does not match meta.json for stage: ${stageMeta.id}`);
+  }
+  if (directChecks.meta?.title !== stageMeta.title) {
+    throw new Error(
+      `window.relayStageMeta.title does not match meta.json for stage: ${stageMeta.id}`
+    );
+  }
+  if (directChecks.meta?.genre !== stageMeta.genre) {
+    throw new Error(
+      `window.relayStageMeta.genre does not match meta.json for stage: ${stageMeta.id}`
+    );
+  }
+  if (directChecks.meta?.clearCondition !== stageMeta.clearCondition) {
+    throw new Error(
+      `window.relayStageMeta.clearCondition does not match meta.json for stage: ${stageMeta.id}`
+    );
+  }
+
+  const { clearEvents, failEvents } = await retryAsync(3, async () => {
+    const hostBrowser = await launchBrowserWithRetries(chromium);
+    try {
+      const hostPage = await hostBrowser.newPage({ viewport: { width: 1280, height: 800 } });
+      hostPage.on("console", (msg) => {
+        if (msg.type() === "error") {
+          consoleErrors.push(msg.text());
+        }
+      });
+      await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
+
+      async function runHostCase(iframeId, actionName) {
+        await hostPage.evaluate(
+          ({ stageDir, iframeId }) => {
+            window.__relayHostEvents = [];
+            window.RelayHost = {
+              onStageReady(meta) {
+                window.__relayHostEvents.push({ type: "ready", meta });
+              },
+              onStageCleared(payload) {
+                window.__relayHostEvents.push({ type: "cleared", payload });
+              },
+              onStageFailed(payload) {
+                window.__relayHostEvents.push({ type: "failed", payload });
+              },
+            };
+            document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
+          },
+          { stageDir: stageMeta.dir, iframeId }
+        );
+
+        const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
+        await frame.waitForFunction(() => !!window.relayStageDebug);
+        await frame.evaluate((actionName) => {
+          window.relayStageDebug[actionName]();
+        }, actionName);
+        await hostPage.waitForTimeout(250);
+        return hostPage.evaluate(() => window.__relayHostEvents);
+      }
+
+      const clearEvents = await runHostCase("stage-clear", "forceClear");
+      const failEvents = await runHostCase("stage-fail", "forceFail");
+
+      await hostPage.screenshot({
+        path: path.join(outputDir, `${stageMeta.dir}-host.png`),
+        fullPage: true,
+      });
+
+      return { clearEvents, failEvents };
+    } finally {
+      await hostBrowser.close().catch(() => {});
+    }
+  });
 
   const hasClearEvent = clearEvents.some((event) => event.type === "cleared");
   const hasFailEvent = failEvents.some((event) => event.type === "failed");
@@ -597,44 +669,9 @@ async function main() {
   );
 }
 
-function isTransientBrowserFailure(error) {
-  const message = String(error?.message || error || "");
-  return /Page crashed|Target page, context or browser has been closed|Target crashed/i.test(
-    message
-  );
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function runWithRetries(maxAttempts = 3) {
-  let attempt = 0;
-  let lastError = null;
-
-  while (attempt < maxAttempts) {
-    attempt += 1;
-    try {
-      await main();
-      return;
-    } catch (error) {
-      lastError = error;
-      if (!isTransientBrowserFailure(error) || attempt >= maxAttempts) {
-        throw error;
-      }
-      process.stderr.write(
-        `Transient Playwright failure on attempt ${attempt}/${maxAttempts}: ${error.message}\n`
-      );
-      await sleep(1200 * attempt);
-    }
-  }
-
-  throw lastError || new Error("check_stage failed");
-}
-
 if (require.main === module) {
-  runWithRetries().catch((error) => {
-    process.stderr.write(`${error.message}\n`);
+  main().catch((error) => {
+    process.stderr.write(`${error?.stack || error?.message || String(error)}\n`);
     process.exit(1);
   });
 }
@@ -644,7 +681,6 @@ module.exports = {
   assertStageSourceIncludesMobileSupport,
   assertStageSourceIncludesMetaText,
   findOverflowingElements,
-  launchBrowser,
   parseArgs,
   parseChangedStageSlugs,
   parseStageRenderText,
