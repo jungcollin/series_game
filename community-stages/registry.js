@@ -511,5 +511,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./paper-temple-shadow-stitch-witness/thumbnail.png",
     path: "./paper-temple-shadow-stitch-witness/index.html",
+  },
+  {
+    id: "midnight-harbor-weather-mixing-inverse",
+    title: "Midnight Harbor: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./midnight-harbor-weather-mixing-inverse/thumbnail.png",
+    path: "./midnight-harbor-weather-mixing-inverse/index.html",
   }
 ];
