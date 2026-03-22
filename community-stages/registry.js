@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "glass-aquarium-gravity-folding-heat",
+    title: "Glass Aquarium: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
+    thumbnail: "./glass-aquarium-gravity-folding-heat/thumbnail.png",
+    path: "./glass-aquarium-gravity-folding-heat/index.html",
+  },
+  {
     id: "storm-archive-shadow-stitch-combo",
     title: "Storm Archive: Shadow Stitch",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
