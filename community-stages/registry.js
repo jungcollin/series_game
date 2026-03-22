@@ -241,5 +241,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "붕괴선이 닿기 전에 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
     thumbnail: "./storm-archive-gravity-folding-collapse/thumbnail.png",
     path: "./storm-archive-gravity-folding-collapse/index.html",
+  },
+  {
+    id: "moon-greenhouse-mirror-theft-tempo",
+    title: "Moon Greenhouse: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./moon-greenhouse-mirror-theft-tempo/thumbnail.png",
+    path: "./moon-greenhouse-mirror-theft-tempo/index.html",
   }
 ];
