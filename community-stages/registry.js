@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "glass-aquarium-weather-mixing-shrink",
+    title: "Glass Aquarium: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./glass-aquarium-weather-mixing-shrink/thumbnail.png",
+    path: "./glass-aquarium-weather-mixing-shrink/index.html",
   }
 ];
