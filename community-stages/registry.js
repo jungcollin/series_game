@@ -970,5 +970,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 활공체를 3개 관측대에 모두 착륙시키면 클리어",
     thumbnail: "./dream-motel-weather-mixing-witness/thumbnail.png",
     path: "./dream-motel-weather-mixing-witness/index.html",
+  },
+  {
+    id: "moon-greenhouse-weather-mixing-cursed",
+    title: "Moon Greenhouse: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./moon-greenhouse-weather-mixing-cursed/thumbnail.png",
+    path: "./moon-greenhouse-weather-mixing-cursed/index.html",
   }
 ];
