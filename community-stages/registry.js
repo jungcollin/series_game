@@ -952,5 +952,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "템포 창을 놓치지 않고 활공체를 3개 관측대에 모두 착륙시키면 클리어",
     thumbnail: "./storm-archive-weather-mixing-tempo/thumbnail.png",
     path: "./storm-archive-weather-mixing-tempo/index.html",
+  },
+  {
+    id: "dream-motel-weather-mixing-witness",
+    title: "Dream Motel: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./dream-motel-weather-mixing-witness/thumbnail.png",
+    path: "./dream-motel-weather-mixing-witness/index.html",
   }
 ];
