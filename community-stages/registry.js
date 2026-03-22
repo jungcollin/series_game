@@ -549,6 +549,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./neon-observatory-tide-anchoring-tempo/index.html",
   },
   {
+    id: "storm-archive-pulse-fencing-sync",
+    title: "Storm Archive: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 20연속 파형을 반사하면 클리어",
+    thumbnail: "./storm-archive-pulse-fencing-sync/thumbnail.png",
+    path: "./storm-archive-pulse-fencing-sync/index.html",
+  },
+  {
     id: "neon-observatory-echo-weaving-collapse",
     title: "Neon Observatory: Echo Loom",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
