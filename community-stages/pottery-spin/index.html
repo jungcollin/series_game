@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>도자기 빚기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #F5E6D3;
+      }
+      body { display: grid; place-items: center; }
+      a, canvas { -webkit-tap-highlight-color: rgba(148,163,184,0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0,0,0,0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(15,23,42,0.92);
+        color: #f8fafc; font-weight: 800; text-decoration: none;
+        white-space: nowrap; transition: transform 0.15s ease;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        background: #F5E6D3; touch-action: manipulation;
+      }
+      canvas:focus-visible {
+        outline: 4px solid rgba(180,120,60,0.5); outline-offset: -8px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">도자기 빚기. 터치 드래그로 점토를 성형하세요.</p>
+    <canvas id="game" width="960" height="540" aria-label="도자기 빚기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+    (function() {
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = 960, H = 540;
+      const FIXED_DT = 1/60, MAX_DT = 1/20;
+
+      const relayContext = window.RelayRuntime?.readContext("pottery-spin") || {
+        history: [], clearCount: 0, previousStageId: null
+      };
+      let animFrame = 0, lastTs = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      /* ── Colors (terracotta warm palette) ── */
+      const C = {
+        bg: "#F5E6D3", bgBot: "#E8D5BE",
+        table: "#C4956A", tableTop: "#D4A57A", tableEdge: "#A07850",
+        clay: "#C17A50", clayLight: "#D49070", clayDark: "#9A5E3A",
+        clayWet: "#B06840",
+        target: "rgba(100,160,80,0.35)", targetLine: "#6AA050",
+        wheel: "#8B7355", wheelRim: "#6B5340", wheelCenter: "#A08868",
+        hud: "#5A3A20", hudBg: "rgba(245,230,211,0.85)",
+        cardBg: "rgba(245,230,211,0.96)", cardBorder: "#C4956A",
+        success: "#6AA050", fail: "#C05040",
+        particle: "#D49070", particleGold: "#E8B860"
+      };
+
+      /* ── Game Constants ── */
+      const DURATION = 35;
+      const CLAY_POINTS = 20; // number of profile points (symmetric, only right half)
+      const CLAY_BASE_Y = H - 120;
+      const CLAY_CENTER_X = W / 2;
+      const CLAY_MAX_R = 100;
+      const CLAY_MIN_R = 15;
+      const CLAY_HEIGHT = 180;
+      const TARGET_MATCH_THRESHOLD = 0.82;
+
+      /* ── State ── */
+      const st = {
+        mode: "menu", elapsed: 0, lastRunTime: 0,
+        // Clay profile (radii at each height level, from bottom to top)
+        clay: [], // array of radii
+        clayTarget: [], // target profile
+        // Wheel
+        wheelAngle: 0, wheelSpeed: 4, // radians per sec
+        // Interaction
+        dragging: false, dragY: -1, dragR: -1,
+        // Stability (too much reshaping = collapse)
+        stability: 100,
+        // Visual
+        matchPercent: 0,
+        particles: [],
+        shakeTime: 0, shakeX: 0, shakeY: 0,
+        // Clay spin visual offset
+        spinPhase: 0,
+        // Score display
+        showScore: false, scoreTimer: 0
+      };
+
+      function lerp(a,b,t) { return a+(b-a)*Math.min(1,Math.max(0,t)); }
+      function rand(a,b) { return a+Math.random()*(b-a); }
+      function clamp(v,mn,mx) { return Math.max(mn,Math.min(mx,v)); }
+      function shake(d) { st.shakeTime = Math.max(st.shakeTime, d); }
+
+      function generateTarget() {
+        // Generate an interesting pottery shape
+        const shapes = [
+          // Bowl shape
+          () => {
+            const t = [];
+            for (let i = 0; i < CLAY_POINTS; i++) {
+              const p = i / (CLAY_POINTS - 1);
+              const r = 30 + 55 * Math.pow(Math.sin(p * Math.PI * 0.5), 0.6);
+              t.push(r);
+            }
+            return t;
+          },
+          // Vase shape
+          () => {
+            const t = [];
+            for (let i = 0; i < CLAY_POINTS; i++) {
+              const p = i / (CLAY_POINTS - 1);
+              const body = 60 * Math.sin(p * Math.PI * 0.8);
+              const neck = p > 0.6 ? -20 * (p - 0.6) / 0.4 : 0;
+              const lip = p > 0.85 ? 10 * (p - 0.85) / 0.15 : 0;
+              t.push(25 + body + neck + lip);
+            }
+            return t;
+          },
+          // Cup shape
+          () => {
+            const t = [];
+            for (let i = 0; i < CLAY_POINTS; i++) {
+              const p = i / (CLAY_POINTS - 1);
+              const r = 30 + 20 * p + 8 * Math.sin(p * Math.PI);
+              t.push(r);
+            }
+            return t;
+          },
+          // Jar shape
+          () => {
+            const t = [];
+            for (let i = 0; i < CLAY_POINTS; i++) {
+              const p = i / (CLAY_POINTS - 1);
+              const belly = 65 * Math.sin(p * Math.PI * 0.65);
+              const top = p > 0.7 ? -30 * Math.pow((p - 0.7) / 0.3, 1.2) : 0;
+              t.push(25 + belly + top);
+            }
+            return t;
+          }
+        ];
+        const fn = shapes[Math.floor(Math.random() * shapes.length)];
+        return fn();
+      }
+
+      function initClay() {
+        // Start as a rough cylinder
+        st.clay = [];
+        for (let i = 0; i < CLAY_POINTS; i++) {
+          st.clay.push(40 + rand(-5, 5));
+        }
+      }
+
+      function calcMatch() {
+        let totalDiff = 0;
+        for (let i = 0; i < CLAY_POINTS; i++) {
+          const diff = Math.abs(st.clay[i] - st.clayTarget[i]);
+          totalDiff += diff / CLAY_MAX_R;
+        }
+        const avgDiff = totalDiff / CLAY_POINTS;
+        return Math.max(0, 1 - avgDiff * 3);
+      }
+
+      function spawnParticles(x, y, n, color) {
+        for (let i = 0; i < n; i++) {
+          const ang = Math.random() * Math.PI * 2, spd = rand(20, 60);
+          st.particles.push({
+            x, y, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd - rand(20,50),
+            life: rand(0.3, 0.7), maxLife: rand(0.3, 0.7), size: rand(2, 5), color
+          });
+        }
+      }
+
+      function getClayY(i) {
+        return CLAY_BASE_Y - (i / (CLAY_POINTS - 1)) * CLAY_HEIGHT;
+      }
+
+      /* ── Relay Host ── */
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch(e) { return false; }
+      }
+      function reportReadyToHost() { if (!inRelayHost()) return; window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailedToHost(reason) {
+        if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: "pottery-spin", stageTitle: "도자기 빚기", reason, durationSec: +st.lastRunTime.toFixed(1) });
+      }
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: "pottery-spin", stageTitle: "도자기 빚기", clearCountAfter: relayContext.clearCount + 1, durationSec: +st.lastRunTime.toFixed(1) });
+      }
+
+      function startStage() {
+        st.mode = "running"; st.elapsed = 0; st.lastRunTime = 0;
+        st.stability = 100; st.dragging = false;
+        st.particles = []; st.shakeTime = 0;
+        st.matchPercent = 0; st.showScore = false; st.scoreTimer = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initClay();
+        st.clayTarget = generateTarget();
+      }
+
+      function failStage(reason) {
+        st.mode = "failed"; st.lastRunTime = st.elapsed;
+        window.relayStageResult.status = "failed"; shake(0.5);
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        st.mode = "cleared"; st.lastRunTime = st.elapsed;
+        window.relayStageResult.status = "cleared";
+        spawnParticles(CLAY_CENTER_X, CLAY_BASE_Y - CLAY_HEIGHT / 2, 40, C.particleGold);
+        reportClearedToHost();
+      }
+
+      /* ── Update ── */
+      function update(dt) {
+        if (st.mode !== "running") { updateEffects(dt); return; }
+        st.elapsed += dt;
+        st.wheelAngle += st.wheelSpeed * dt;
+        st.spinPhase += st.wheelSpeed * dt;
+
+        // Stability recovery when not touching
+        if (!st.dragging) {
+          st.stability = Math.min(100, st.stability + dt * 5);
+        }
+
+        // Calculate match
+        st.matchPercent = calcMatch();
+
+        // Check clear
+        if (st.matchPercent >= TARGET_MATCH_THRESHOLD) {
+          st.scoreTimer += dt;
+          if (st.scoreTimer > 0.8) {
+            clearStage(); return;
+          }
+        } else {
+          st.scoreTimer = Math.max(0, st.scoreTimer - dt * 2);
+        }
+
+        // Check fail - stability too low
+        if (st.stability <= 0) {
+          failStage("점토가 무너졌습니다"); return;
+        }
+
+        // Check fail - time
+        if (st.elapsed >= DURATION) {
+          failStage("시간 초과"); return;
+        }
+
+        // Shake on low stability
+        if (st.stability < 25) shake(0.05);
+
+        if (st.shakeTime > 0) {
+          st.shakeTime -= dt;
+          st.shakeX = rand(-2, 2) * (st.shakeTime / 0.5);
+          st.shakeY = rand(-2, 2) * (st.shakeTime / 0.5);
+        } else { st.shakeX = 0; st.shakeY = 0; }
+
+        updateEffects(dt);
+      }
+
+      function updateEffects(dt) {
+        for (let i = st.particles.length - 1; i >= 0; i--) {
+          const p = st.particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 80 * dt; p.life -= dt;
+          if (p.life <= 0) st.particles.splice(i, 1);
+        }
+      }
+
+      /* ── Render ── */
+      function render() {
+        ctx.save(); ctx.translate(st.shakeX, st.shakeY);
+        if (st.mode === "menu") { renderMenu(); ctx.restore(); return; }
+        renderGame();
+        if (st.mode === "failed") renderOverlay("실패", C.fail, ["터치하여 재시작"]);
+        if (st.mode === "cleared") renderOverlay("클리어!", C.success, [
+          "일치율: " + Math.round(st.matchPercent * 100) + "%",
+          "시간: " + st.lastRunTime.toFixed(1) + "초",
+          "터치하여 재시작"
+        ]);
+        ctx.restore();
+      }
+
+      function renderGame() {
+        // Background
+        const bg = ctx.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, C.bg); bg.addColorStop(1, C.bgBot);
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+        // Table
+        ctx.fillStyle = C.table;
+        ctx.fillRect(0, H - 80, W, 80);
+        ctx.fillStyle = C.tableTop;
+        ctx.fillRect(0, H - 80, W, 6);
+        ctx.fillStyle = C.tableEdge;
+        ctx.fillRect(0, H - 74, W, 2);
+
+        // Wheel (circular platform)
+        const wheelY = CLAY_BASE_Y + 10;
+        const spinOff = Math.sin(st.wheelAngle) * 3;
+
+        // Wheel shadow
+        ctx.fillStyle = "rgba(100,70,40,0.15)";
+        ctx.beginPath();
+        ctx.ellipse(CLAY_CENTER_X, wheelY + 8, 95, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Wheel body
+        ctx.fillStyle = C.wheel;
+        ctx.beginPath();
+        ctx.ellipse(CLAY_CENTER_X, wheelY, 90, 18, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Wheel rim pattern
+        ctx.strokeStyle = C.wheelRim; ctx.lineWidth = 2;
+        for (let a = 0; a < 8; a++) {
+          const angle = st.wheelAngle + a * Math.PI / 4;
+          const rx = Math.cos(angle) * 75;
+          const ry = Math.sin(angle) * 14;
+          ctx.beginPath();
+          ctx.moveTo(CLAY_CENTER_X, wheelY);
+          ctx.lineTo(CLAY_CENTER_X + rx, wheelY + ry);
+          ctx.stroke();
+        }
+
+        // Wheel center
+        ctx.fillStyle = C.wheelCenter;
+        ctx.beginPath();
+        ctx.ellipse(CLAY_CENTER_X, wheelY, 15, 4, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Target silhouette (ghost shape)
+        drawProfile(st.clayTarget, C.target, C.targetLine, true);
+
+        // Clay profile
+        drawProfile(st.clay, null, null, false);
+
+        // Match bar
+        const barX = W - 170, barY = 20, barW = 150, barH = 16;
+        ctx.fillStyle = C.hudBg;
+        rr(barX - 4, barY - 4, barW + 8, barH + 8, 10); ctx.fill();
+        ctx.fillStyle = "rgba(150,120,80,0.3)";
+        rr(barX, barY, barW, barH, 8); ctx.fill();
+        const mp = st.matchPercent;
+        ctx.fillStyle = mp > TARGET_MATCH_THRESHOLD ? C.success : (mp > 0.5 ? "#D4A040" : C.clay);
+        rr(barX, barY, barW * mp, barH, 8); ctx.fill();
+        ctx.fillStyle = C.hud; ctx.font = "700 13px Trebuchet MS"; ctx.textAlign = "right";
+        ctx.fillText("일치율 " + Math.round(mp * 100) + "%", W - 24, barY + 13);
+
+        // HUD
+        ctx.textAlign = "left"; ctx.font = "700 18px Trebuchet MS"; ctx.fillStyle = C.hud;
+        const timeLeft = Math.max(0, DURATION - st.elapsed);
+        ctx.fillText("⏱ " + Math.ceil(timeLeft) + "초", 16, 34);
+
+        // Stability bar
+        ctx.fillText("안정", 16, 58);
+        const sBarX = 60, sBarY = 46, sBarW = 80, sBarH = 12;
+        ctx.fillStyle = "rgba(150,120,80,0.3)";
+        rr(sBarX, sBarY, sBarW, sBarH, 6); ctx.fill();
+        const sp = st.stability / 100;
+        ctx.fillStyle = sp > 0.3 ? C.clayLight : C.fail;
+        rr(sBarX, sBarY, sBarW * sp, sBarH, 6); ctx.fill();
+
+        // Match threshold indicator
+        if (st.scoreTimer > 0) {
+          ctx.globalAlpha = 0.5 + Math.sin(st.elapsed * 10) * 0.3;
+          ctx.fillStyle = C.success; ctx.font = "700 22px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText("완성 중...", CLAY_CENTER_X, CLAY_BASE_Y - CLAY_HEIGHT - 20);
+          ctx.globalAlpha = 1; ctx.textAlign = "left";
+        }
+
+        // Particles
+        for (const p of st.particles) {
+          ctx.globalAlpha = p.life / p.maxLife; ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (p.life / p.maxLife), 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawProfile(profile, fillColor, lineColor, isTarget) {
+        if (!profile || profile.length === 0) return;
+        const cx = CLAY_CENTER_X;
+        const spin = isTarget ? 0 : Math.sin(st.spinPhase) * 0.03;
+
+        // Draw as a symmetric pottery shape
+        ctx.beginPath();
+        // Right side (top to bottom)
+        for (let i = CLAY_POINTS - 1; i >= 0; i--) {
+          const y = getClayY(i);
+          const r = profile[i] * (1 + (isTarget ? 0 : spin));
+          if (i === CLAY_POINTS - 1) ctx.moveTo(cx + r, y);
+          else ctx.lineTo(cx + r, y);
+        }
+        // Bottom curve
+        const botR = profile[0] * (1 + (isTarget ? 0 : spin));
+        ctx.quadraticCurveTo(cx, CLAY_BASE_Y + 5, cx - botR, getClayY(0));
+        // Left side (bottom to top)
+        for (let i = 0; i < CLAY_POINTS; i++) {
+          const y = getClayY(i);
+          const r = profile[i] * (1 + (isTarget ? 0 : spin));
+          ctx.lineTo(cx - r, y);
+        }
+        // Top curve
+        const topR = profile[CLAY_POINTS - 1] * (1 + (isTarget ? 0 : spin));
+        ctx.quadraticCurveTo(cx, getClayY(CLAY_POINTS - 1) - 5, cx + topR, getClayY(CLAY_POINTS - 1));
+        ctx.closePath();
+
+        if (isTarget) {
+          ctx.fillStyle = fillColor; ctx.fill();
+          ctx.strokeStyle = lineColor; ctx.lineWidth = 2;
+          ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+        } else {
+          // Clay gradient
+          const g = ctx.createLinearGradient(cx - 80, 0, cx + 80, 0);
+          g.addColorStop(0, C.clayDark);
+          g.addColorStop(0.3, C.clay);
+          g.addColorStop(0.5, C.clayLight);
+          g.addColorStop(0.7, C.clay);
+          g.addColorStop(1, C.clayDark);
+          ctx.fillStyle = g; ctx.fill();
+          ctx.strokeStyle = C.clayDark; ctx.lineWidth = 1.5; ctx.stroke();
+
+          // Wheel spinning lines on clay (horizontal bands)
+          ctx.strokeStyle = "rgba(160,90,50,0.25)"; ctx.lineWidth = 1;
+          for (let i = 1; i < CLAY_POINTS - 1; i += 2) {
+            const y = getClayY(i);
+            const r = profile[i] * (1 + spin);
+            ctx.beginPath();
+            ctx.moveTo(cx - r + 3, y);
+            ctx.lineTo(cx + r - 3, y);
+            ctx.stroke();
+          }
+
+          // Highlight
+          ctx.strokeStyle = "rgba(230,190,140,0.3)"; ctx.lineWidth = 2;
+          ctx.beginPath();
+          for (let i = CLAY_POINTS - 1; i >= 0; i--) {
+            const y = getClayY(i);
+            const r = profile[i] * (1 + spin) * 0.85;
+            if (i === CLAY_POINTS - 1) ctx.moveTo(cx + r, y);
+            else ctx.lineTo(cx + r, y);
+          }
+          ctx.stroke();
+        }
+      }
+
+      function renderMenu() {
+        const bg = ctx.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, C.bg); bg.addColorStop(1, C.bgBot);
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+        // Decorative pottery illustration
+        ctx.save();
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = C.clay;
+        ctx.beginPath();
+        ctx.ellipse(W / 2, H / 2 + 80, 100, 130, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        const cw = Math.min(400, W - 40), ch = 280;
+        const cx = (W - cw) / 2, cy = (H - ch) / 2;
+        ctx.fillStyle = C.cardBg; ctx.strokeStyle = C.cardBorder; ctx.lineWidth = 3;
+        rr(cx, cy, cw, ch, 18); ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = C.hud; ctx.textAlign = "center";
+        ctx.font = "800 32px Trebuchet MS";
+        ctx.fillText("도자기 빚기", W / 2, cy + 44);
+
+        ctx.font = "500 15px Trebuchet MS";
+        const lines = [
+          "물레 위 점토를 목표 모양으로 빚으세요",
+          "",
+          "🖐 조작: 터치 드래그로 점토 성형",
+          "✅ 클리어: 목표 모양과 82% 일치",
+          "❌ 실패: 점토가 무너지면 실패",
+          "",
+          "터치 또는 Enter로 시작"
+        ];
+        lines.forEach((l, i) => ctx.fillText(l, W / 2, cy + 76 + i * 28));
+      }
+
+      function renderOverlay(title, color, lines) {
+        ctx.fillStyle = "rgba(245,230,211,0.6)"; ctx.fillRect(0, 0, W, H);
+        const cw = Math.min(360, W - 40), ch = 170;
+        const cx = (W - cw) / 2, cy = (H - ch) / 2;
+        ctx.fillStyle = C.cardBg; ctx.strokeStyle = color; ctx.lineWidth = 3;
+        rr(cx, cy, cw, ch, 18); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = color; ctx.font = "800 28px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText(title, W / 2, cy + 40);
+        ctx.fillStyle = C.hud; ctx.font = "500 16px Trebuchet MS";
+        lines.forEach((l, i) => ctx.fillText(l, W / 2, cy + 75 + i * 28));
+      }
+
+      function rr(x, y, w, h, r) {
+        ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r); ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h); ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r); ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
+      }
+
+      /* ── Input ── */
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) / rect.width * W,
+          y: (clientY - rect.top) / rect.height * H
+        };
+      }
+
+      function sculptClay(canvasX, canvasY) {
+        // Find which clay point the user is near
+        for (let i = 0; i < CLAY_POINTS; i++) {
+          const py = getClayY(i);
+          const dist = Math.abs(canvasY - py);
+          if (dist < CLAY_HEIGHT / CLAY_POINTS * 1.5) {
+            const dx = canvasX - CLAY_CENTER_X;
+            const targetR = Math.abs(dx);
+            const clamped = clamp(targetR, CLAY_MIN_R, CLAY_MAX_R);
+
+            // Smooth sculpting with neighbors
+            const weight = 1 - dist / (CLAY_HEIGHT / CLAY_POINTS * 1.5);
+            const diff = clamped - st.clay[i];
+            st.clay[i] += diff * 0.15 * weight;
+
+            // Affect neighbors for smooth shape
+            for (let j = -2; j <= 2; j++) {
+              const ni = i + j;
+              if (ni >= 0 && ni < CLAY_POINTS && j !== 0) {
+                const nw = (1 - Math.abs(j) / 3) * 0.08 * weight;
+                st.clay[ni] += diff * nw;
+              }
+            }
+
+            // Reduce stability based on how much change
+            st.stability -= Math.abs(diff) * 0.08 * weight;
+
+            // Clay particles
+            if (Math.random() < 0.3) {
+              const side = dx > 0 ? 1 : -1;
+              spawnParticles(CLAY_CENTER_X + st.clay[i] * side, py, 1, C.particle);
+            }
+          }
+        }
+
+        // Clamp all values
+        for (let i = 0; i < CLAY_POINTS; i++) {
+          st.clay[i] = clamp(st.clay[i], CLAY_MIN_R, CLAY_MAX_R);
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (st.mode !== "running") { startStage(); return; }
+        st.dragging = true;
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        sculptClay(pos.x, pos.y);
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (st.mode !== "running" || !st.dragging) return;
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        sculptClay(pos.x, pos.y);
+      });
+
+      canvas.addEventListener("pointerup", () => { st.dragging = false; });
+      canvas.addEventListener("pointercancel", () => { st.dragging = false; });
+      canvas.addEventListener("click", () => canvas.focus());
+
+      canvas.addEventListener("touchstart", (e) => {
+        if (st.mode !== "running") {
+          e.preventDefault();
+          startStage();
+        }
+      }, { passive: false });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && st.mode !== "running") { e.preventDefault(); startStage(); }
+      });
+
+      /* ── Main Loop ── */
+      function frame(ts) {
+        const dt = lastTs ? Math.min((ts - lastTs) / 1000, MAX_DT) : FIXED_DT;
+        lastTs = ts; update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode: st.mode, elapsed: +(st.elapsed.toFixed(1)),
+          matchPercent: Math.round(st.matchPercent * 100),
+          stability: Math.round(st.stability),
+          result: window.relayStageResult.status
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render(); return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "pottery-spin", title: "도자기 빚기",
+        creator: "jungcollin", genre: "Crafting",
+        clearCondition: "목표 모양에 맞게 성형하면 클리어"
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() { startStage(); clearStage(); render(); },
+        forceFail() { startStage(); failStage("debug_force_fail"); render(); }
+      };
+
+      reportReadyToHost(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    })();
+    </script>
+  </body>
+</html>
