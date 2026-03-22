@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "midnight-harbor-tide-anchoring-combo",
+    title: "Midnight Harbor: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./midnight-harbor-tide-anchoring-combo/thumbnail.png",
+    path: "./midnight-harbor-tide-anchoring-combo/index.html",
   }
 ];
