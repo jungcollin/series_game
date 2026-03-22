@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "biomech-theater-gravity-folding-shrink",
+    title: "Biomech Theater: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 코어를 슬롯까지 운반",
+    thumbnail: "./biomech-theater-gravity-folding-shrink/thumbnail.png",
+    path: "./biomech-theater-gravity-folding-shrink/index.html",
   }
 ];
