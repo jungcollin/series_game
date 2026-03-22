@@ -205,5 +205,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 운석을 피해 생존하기",
     thumbnail: "./space-meteor-run/thumbnail.png",
     path: "./space-meteor-run/index.html",
+  },
+  {
+    id: "mirror-dash",
+    title: "거울 대시",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "퍼즐 러너",
+    clearCondition: "20초간 상하 대칭으로 움직이며 생존",
+    thumbnail: "./mirror-dash/thumbnail.png",
+    path: "./mirror-dash/index.html",
   }
 ];
