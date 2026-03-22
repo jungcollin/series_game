@@ -169,5 +169,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "촛불을 30초 동안 지키면 클리어",
     thumbnail: "./candle-guard/thumbnail.png",
     path: "./candle-guard/index.html",
+  },
+  {
+    id: "moonlit-bridge",
+    title: "달빛 다리",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Phase puzzle",
+    clearCondition: "다리를 건너 반대편에 도달하면 클리어",
+    thumbnail: "./moonlit-bridge/thumbnail.png",
+    path: "./moonlit-bridge/index.html",
   }
 ];
