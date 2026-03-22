@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "midnight-harbor-magnet-braiding-collapse",
+    title: "Midnight Harbor: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./midnight-harbor-magnet-braiding-collapse/thumbnail.png",
+    path: "./midnight-harbor-magnet-braiding-collapse/index.html",
   }
 ];
