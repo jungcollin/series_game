@@ -376,5 +376,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "15송이 꽃을 피우면 클리어",
     thumbnail: "./moon-greenhouse-weather-mixing-cursed/thumbnail.png",
     path: "./moon-greenhouse-weather-mixing-cursed/index.html",
+  },
+  {
+    id: "crystal-garden",
+    title: "수정 정원",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Growth simulation",
+    clearCondition: "결정으로 영역을 채우면 클리어",
+    thumbnail: "./crystal-garden/thumbnail.png",
+    path: "./crystal-garden/index.html",
   }
 ];
