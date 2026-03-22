@@ -412,5 +412,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "줄 끝까지 도달하면 클리어",
     thumbnail: "./tightrope-walk/thumbnail.png",
     path: "./tightrope-walk/index.html",
+  },
+  {
+    id: "bubble-artist",
+    title: "비누방울 장인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Precision timing",
+    clearCondition: "방울 10개를 목표 크기로 만들면 클리어",
+    thumbnail: "./bubble-artist/thumbnail.png",
+    path: "./bubble-artist/index.html",
   }
 ];

@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>비누방울 장인</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #F0FAF0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(160, 200, 180, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(60, 90, 80, 0.92);
+        color: #F0FAF0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #F0FAF0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(160, 200, 180, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">비누방울 장인. 화면을 길게 터치하여 비누방울을 목표 크기에 맞추는 게임. 화면 길게 터치로 방울 크기 조절. 방울 10개를 목표 크기로 만들면 클리어. 3개 터뜨리면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="비누방울 장인" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "bubble-artist",
+        title: "비누방울 장인",
+        description: "화면을 길게 눌러 비누방울을 목표 크기에 맞추는 게임",
+        creator: "jungcollin",
+        genre: "Precision timing",
+        clearCondition: "방울 10개를 목표 크기로 만들면 클리어",
+        failCondition: "3개 터뜨리면 실패",
+        controls: "화면 길게 터치로 방울 크기 조절",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        bg1: "#F0FAF0",
+        bg2: "#E5F5E0",
+        grass: "#8BC48A",
+        grassDark: "#6AA06A",
+        bubble: "rgba(180, 220, 240, 0.3)",
+        bubbleEdge: "rgba(120, 180, 220, 0.6)",
+        bubbleShine: "rgba(255, 255, 255, 0.7)",
+        bubblePop: "#F5A0A0",
+        target: "rgba(255, 180, 100, 0.4)",
+        targetEdge: "rgba(255, 160, 60, 0.7)",
+        wand: "#B88B5A",
+        wandRing: "#C8A878",
+        text: "#3C5A50",
+        textLight: "rgba(60, 90, 80, 0.5)",
+        success: "#5A9E6B",
+        fail: "#C86464",
+        perfect: "#FFD700",
+      };
+
+      // --- Constants ---
+      const TARGET_COUNT = 10;
+      const MAX_POP = 3;
+      const BUBBLE_GROW_SPEED = 50; // radius per second
+      const MAX_BUBBLE_R = 100;
+      const TOLERANCE = 12; // radius tolerance for "good"
+      const PERFECT_TOLERANCE = 5;
+      const WAND_X = CX;
+      const WAND_Y = 380;
+
+      // --- State ---
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      let completed = 0;
+      let popped = 0;
+      let currentBubbleR = 0;
+      let targetR = 0;
+      let isInflating = false;
+      let resultFlash = ""; // "good", "perfect", "pop"
+      let resultTimer = 0;
+      let roundActive = true;
+
+      // Floating bubbles (completed ones)
+      let floatingBubbles = [];
+      let particles = [];
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Particles ---
+      function spawnParticles(x, y, count, color) {
+        if (reducedMotion) count = Math.min(count, 3);
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(30, 100);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 30,
+            life: 1, color, size: rand(2, 6),
+          });
+        }
+      }
+
+      // --- New round ---
+      function newRound() {
+        targetR = rand(25, 70);
+        currentBubbleR = 0;
+        isInflating = false;
+        roundActive = true;
+        resultFlash = "";
+      }
+
+      function releaseBubble() {
+        if (!roundActive || currentBubbleR < 5) return;
+        isInflating = false;
+        roundActive = false;
+
+        const diff = Math.abs(currentBubbleR - targetR);
+
+        if (diff <= PERFECT_TOLERANCE) {
+          // Perfect!
+          completed++;
+          resultFlash = "perfect";
+          resultTimer = 0.8;
+          spawnParticles(WAND_X, WAND_Y - currentBubbleR, 12, COL.perfect);
+          addFloatingBubble(currentBubbleR, true);
+        } else if (diff <= TOLERANCE) {
+          // Good enough
+          completed++;
+          resultFlash = "good";
+          resultTimer = 0.6;
+          spawnParticles(WAND_X, WAND_Y - currentBubbleR, 8, COL.success);
+          addFloatingBubble(currentBubbleR, false);
+        } else {
+          // Too big or too small — popped!
+          popped++;
+          resultFlash = "pop";
+          resultTimer = 0.6;
+          shake = 6;
+          flashAlpha = 0.15;
+          spawnParticles(WAND_X, WAND_Y - currentBubbleR / 2, 10, COL.bubblePop);
+        }
+
+        // Check win/lose after delay
+        setTimeout(() => {
+          if (mode !== "running") return;
+          if (completed >= TARGET_COUNT) {
+            mode = "clear";
+            clearAnim = 0;
+            window.relayStageResult.status = "cleared";
+            reportCleared();
+            spawnParticles(CX, CY, 20, COL.perfect);
+          } else if (popped >= MAX_POP) {
+            mode = "failed";
+            window.relayStageResult.status = "failed";
+            reportFailed("방울 터짐");
+          } else {
+            newRound();
+          }
+        }, 600);
+      }
+
+      function addFloatingBubble(r, isPerfect) {
+        floatingBubbles.push({
+          x: WAND_X + rand(-30, 30),
+          y: WAND_Y - r,
+          r: r * 0.6,
+          vx: rand(-15, 15),
+          vy: rand(-20, -40),
+          wobble: rand(0, Math.PI * 2),
+          perfect: isPerfect,
+          life: 1,
+        });
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; shake = 0; flashAlpha = 0; clearAnim = 0;
+        completed = 0; popped = 0;
+        floatingBubbles = []; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        newRound();
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Inflate bubble while holding
+        if (isInflating && roundActive) {
+          currentBubbleR += BUBBLE_GROW_SPEED * dt;
+          if (currentBubbleR >= MAX_BUBBLE_R) {
+            // Auto-pop
+            currentBubbleR = MAX_BUBBLE_R;
+            releaseBubble();
+          }
+        }
+
+        // Result timer
+        if (resultTimer > 0) resultTimer -= dt;
+
+        // Floating bubbles
+        for (let i = floatingBubbles.length - 1; i >= 0; i--) {
+          const b = floatingBubbles[i];
+          b.x += b.vx * dt;
+          b.y += b.vy * dt;
+          b.wobble += dt * 2;
+          b.x += Math.sin(b.wobble) * 0.5;
+          b.life -= dt * 0.15;
+          if (b.life <= 0 || b.y < -50) floatingBubbles.splice(i, 1);
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 60 * dt;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.9;
+        if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Background
+        const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+        bgGrad.addColorStop(0, "#D4F0FF");
+        bgGrad.addColorStop(0.7, COL.bg1);
+        bgGrad.addColorStop(1, COL.bg2);
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Grass
+        ctx.fillStyle = COL.grass;
+        ctx.fillRect(0, 430, W, 110);
+        ctx.fillStyle = COL.grassDark;
+        for (let x = 0; x < W; x += 15) {
+          const gh = rand(5, 15);
+          ctx.fillRect(x, 428 - gh, 3, gh + 5);
+        }
+
+        // Flowers
+        drawFlowers();
+
+        if (mode === "running" || mode === "clear" || mode === "failed") {
+          // Floating bubbles
+          drawFloatingBubbles();
+
+          // Wand
+          drawWand();
+
+          // Target ring
+          if (roundActive) drawTargetRing();
+
+          // Current bubble
+          if (currentBubbleR > 2 && roundActive) drawCurrentBubble();
+
+          // Result feedback
+          drawResultFeedback();
+
+          // Particles
+          drawParticles();
+
+          if (mode === "running") drawHUD();
+        }
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(200, 100, 100, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawFlowers() {
+        const flowerColors = ["#FFB6C1", "#FFDAB9", "#DDA0DD"];
+        for (let i = 0; i < 8; i++) {
+          const fx = 50 + i * 120 + (i % 2) * 30;
+          const fy = 425;
+          ctx.fillStyle = COL.grassDark;
+          ctx.fillRect(fx, fy - 12, 2, 15);
+          ctx.beginPath();
+          ctx.arc(fx + 1, fy - 14, 5, 0, Math.PI * 2);
+          ctx.fillStyle = flowerColors[i % 3];
+          ctx.fill();
+        }
+      }
+
+      function drawWand() {
+        // Wand stick
+        ctx.fillStyle = COL.wand;
+        ctx.fillRect(WAND_X - 3, WAND_Y + 10, 6, 60);
+
+        // Wand ring
+        ctx.beginPath();
+        ctx.arc(WAND_X, WAND_Y, 12, 0, Math.PI * 2);
+        ctx.strokeStyle = COL.wandRing;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        // Film in ring
+        ctx.beginPath();
+        ctx.arc(WAND_X, WAND_Y, 10, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(180, 220, 240, 0.2)";
+        ctx.fill();
+      }
+
+      function drawTargetRing() {
+        ctx.beginPath();
+        ctx.arc(WAND_X, WAND_Y - targetR, targetR, 0, Math.PI * 2);
+        ctx.strokeStyle = COL.targetEdge;
+        ctx.lineWidth = 3;
+        ctx.setLineDash([6, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Target size label
+        ctx.fillStyle = COL.targetEdge;
+        ctx.font = "600 13px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("목표", WAND_X, WAND_Y - targetR * 2 - 10);
+      }
+
+      function drawCurrentBubble() {
+        const bx = WAND_X, by = WAND_Y - currentBubbleR;
+
+        // Bubble body
+        ctx.beginPath();
+        ctx.arc(bx, by, currentBubbleR, 0, Math.PI * 2);
+        ctx.fillStyle = COL.bubble;
+        ctx.fill();
+        ctx.strokeStyle = COL.bubbleEdge;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Highlight
+        ctx.beginPath();
+        ctx.arc(bx - currentBubbleR * 0.3, by - currentBubbleR * 0.3, currentBubbleR * 0.25, 0, Math.PI * 2);
+        ctx.fillStyle = COL.bubbleShine;
+        ctx.fill();
+
+        // Size proximity feedback
+        const diff = Math.abs(currentBubbleR - targetR);
+        if (diff < TOLERANCE) {
+          ctx.beginPath();
+          ctx.arc(bx, by, currentBubbleR + 3, 0, Math.PI * 2);
+          ctx.strokeStyle = diff < PERFECT_TOLERANCE ? COL.perfect : COL.success;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      function drawFloatingBubbles() {
+        for (const b of floatingBubbles) {
+          ctx.save();
+          ctx.globalAlpha = clamp(b.life, 0, 0.6);
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+          ctx.fillStyle = COL.bubble;
+          ctx.fill();
+          ctx.strokeStyle = b.perfect ? COL.perfect : COL.bubbleEdge;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          // Shine
+          ctx.beginPath();
+          ctx.arc(b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.2, 0, Math.PI * 2);
+          ctx.fillStyle = COL.bubbleShine;
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function drawResultFeedback() {
+        if (resultTimer <= 0) return;
+        const alpha = resultTimer;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.font = "bold 28px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+
+        if (resultFlash === "perfect") {
+          ctx.fillStyle = COL.perfect;
+          ctx.fillText("PERFECT!", CX, CY - 40);
+        } else if (resultFlash === "good") {
+          ctx.fillStyle = COL.success;
+          ctx.fillText("GOOD!", CX, CY - 40);
+        } else if (resultFlash === "pop") {
+          ctx.fillStyle = COL.fail;
+          ctx.fillText("POP!", CX, CY - 40);
+        }
+        ctx.restore();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        // Completed count
+        ctx.fillStyle = COL.text;
+        ctx.font = "600 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`${completed} / ${TARGET_COUNT}`, 24, 20);
+
+        // Lives
+        ctx.textAlign = "right";
+        const hearts = MAX_POP - popped;
+        let heartStr = "";
+        for (let i = 0; i < MAX_POP; i++) {
+          heartStr += i < hearts ? "♥ " : "♡ ";
+        }
+        ctx.fillStyle = popped > 0 ? COL.fail : COL.text;
+        ctx.fillText(heartStr.trim(), W - 24, 20);
+
+        // Hint
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("길게 눌러 방울을 키우고, 놓아서 날려보내세요", CX, H - 20);
+      }
+
+      // --- Overlay cards ---
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+        ctx.closePath();
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 50 + lines.length * lineH + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(240, 250, 240, 0.96)";
+        roundRect(ctx, cardX, cardY, cardW, cardH, 10);
+        ctx.fill();
+
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 24px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "400 14px 'Segoe UI', sans-serif";
+        ctx.fillStyle = "rgba(60, 90, 80, 0.75)";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("TAP 또는 ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(240, 250, 240, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+
+        drawCard("비누방울 장인", [
+          "방울을 목표 크기에 맞춰 날려보내세요",
+          "",
+          "조작: 화면 길게 터치로 방울 크기 조절",
+          "클리어: 방울 10개를 목표 크기로",
+          "실패: 3개 터뜨리면 실패",
+        ], COL.success);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(240, 250, 240, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+
+        if (clearAnim > 0.3) {
+          drawCard("방울 대가!", [
+            `${Math.ceil(elapsed)}초 만에 ${completed}개 완성`,
+          ], COL.success);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(60, 90, 80, 0.2)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("방울이 터졌어요", [
+          `${completed}개 완성 / ${popped}개 터짐`,
+        ], COL.fail);
+      }
+
+      // --- Input ---
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset();
+          mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        if (roundActive) {
+          isInflating = true;
+          canvas.setPointerCapture(e.pointerId);
+        }
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (isInflating) {
+          isInflating = false;
+          releaseBubble();
+        }
+      });
+
+      canvas.addEventListener("pointercancel", () => {
+        if (isInflating) {
+          isInflating = false;
+          releaseBubble();
+        }
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") handleStart();
+          else if (roundActive && !isInflating) isInflating = true;
+        }
+      });
+
+      canvas.addEventListener("keyup", (e) => {
+        if ((e.key === "Enter" || e.key === " ") && isInflating) {
+          isInflating = false;
+          releaseBubble();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          completed, popped,
+          currentBubbleR: +currentBubbleR.toFixed(1),
+          targetR: +targetR.toFixed(1),
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          completed = TARGET_COUNT;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          popped = MAX_POP;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail");
+          draw();
+        },
+      };
+
+      // --- Init ---
+      newRound();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
