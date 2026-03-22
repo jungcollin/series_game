@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "neon-observatory-shadow-stitch-inverse",
+    title: "Neon Observatory: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./neon-observatory-shadow-stitch-inverse/thumbnail.png",
+    path: "./neon-observatory-shadow-stitch-inverse/index.html",
   }
 ];
