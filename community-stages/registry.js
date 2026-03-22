@@ -648,6 +648,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./glass-aquarium-magnet-braiding-combo/index.html",
   },
   {
+    id: "midnight-harbor-weather-mixing-inverse",
+    title: "Midnight Harbor: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./midnight-harbor-weather-mixing-inverse/thumbnail.png",
+    path: "./midnight-harbor-weather-mixing-inverse/index.html",
+  },
+  {
     id: "neon-observatory-gravity-folding-charge",
     title: "Neon Observatory: Gravity Fold",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
