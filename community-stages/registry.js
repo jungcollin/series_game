@@ -619,5 +619,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 모양에 맞게 성형하면 클리어",
     thumbnail: "./pottery-spin/thumbnail.png",
     path: "./pottery-spin/index.html",
+  },
+  {
+    id: "summit-climber",
+    title: "산 정복자",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climbing action",
+    clearCondition: "정상에 도달하면 클리어",
+    thumbnail: "./summit-climber/thumbnail.png",
+    path: "./summit-climber/index.html",
   }
 ];

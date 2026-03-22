@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>산 정복자</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #E8F0E0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 80, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(50, 70, 40, 0.92);
+        color: #F0F5E8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8F0E0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(80, 130, 60, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">산 정복자. 화면 좌우를 터치하여 등산가를 움직이고 낙석을 피하세요. 모바일에서는 화면 좌우 터치로 조작합니다. 정상 도달 시 클리어. 낙석 3회 피격 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="산 정복자" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "summit-climber",
+        title: "산 정복자",
+        description: "산을 올라 낙석을 피하며 정상에 도달하세요",
+        creator: "jungcollin",
+        genre: "Climbing action",
+        clearCondition: "정상에 도달하면 클리어",
+        failCondition: "낙석 3회 피격 시 실패",
+        controls: "좌우 터치로 이동하며 낙석을 피하세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        sky1: "#A8D8F0", sky2: "#D0E8F8",
+        mountain: "#8AA870", mountainDark: "#6A8858", mountainSnow: "#F0F4F0",
+        rock: "#887868", rockDark: "#685848",
+        climber: "#C07038", climberPack: "#D48040",
+        text: "#3A5028", textLight: "rgba(58, 80, 40, 0.5)",
+        accent: "#70A050", success: "#60A850", fail: "#C05040",
+        flag: "#D04030",
+      };
+
+      // Lanes
+      const LANES = 5;
+      const LANE_W = 80;
+      const TOTAL_LANE_W = LANES * LANE_W;
+      const LANE_X_START = CX - TOTAL_LANE_W / 2;
+      function laneX(i) { return LANE_X_START + i * LANE_W + LANE_W / 2; }
+
+      const CLIMB_SPEED = 120; // pixels per second (scroll speed)
+      const SUMMIT_DISTANCE = 3600; // total distance to climb
+      const MAX_HITS = 3;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      let climberLane = 2; // middle lane
+      let climberTargetLane = 2;
+      let climberX = laneX(2);
+      let distance = 0; // how far climbed
+      let hits = 0;
+      let shake = 0;
+      let flashAlpha = 0;
+      let flashColor = COL.success;
+      let clearAnim = 0;
+      let invincible = 0;
+
+      // Rocks
+      let rocks = [];
+      let rockSpawnTimer = 0;
+
+      // Collectibles (mountain flowers for visual flair)
+      let flowers = [];
+      let flowerSpawnTimer = 0;
+
+      // Particles
+      let particles = [];
+
+      // Mountain features (decorative rocks/trees)
+      let features = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(30, 100);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+            life: 1, color, size: rand(2, 5),
+          });
+        }
+      }
+
+      function spawnRock() {
+        const lane = Math.floor(Math.random() * LANES);
+        const speed = 150 + (distance / SUMMIT_DISTANCE) * 100 + rand(-20, 20);
+        rocks.push({
+          lane, x: laneX(lane), y: -30,
+          speed, size: rand(14, 22), rot: rand(0, Math.PI * 2), rotSpeed: rand(-3, 3),
+        });
+      }
+
+      function spawnFeature() {
+        features.push({
+          x: rand(LANE_X_START - 60, LANE_X_START + TOTAL_LANE_W + 60),
+          y: -30, type: Math.random() > 0.5 ? "tree" : "rock",
+          size: rand(10, 25),
+        });
+      }
+
+      function reset() {
+        elapsed = 0; distance = 0; hits = 0;
+        climberLane = 2; climberTargetLane = 2;
+        climberX = laneX(2);
+        shake = 0; flashAlpha = 0; clearAnim = 0; invincible = 0;
+        rocks = []; flowers = []; particles = []; features = [];
+        rockSpawnTimer = 1; flowerSpawnTimer = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+      }
+
+      function moveClimber(dir) {
+        if (mode !== "running") return;
+        if (dir === "left" && climberTargetLane > 0) climberTargetLane--;
+        if (dir === "right" && climberTargetLane < LANES - 1) climberTargetLane++;
+      }
+
+      function update(dt) {
+        if (mode !== "running" && mode !== "clear") {
+          shake *= 0.88; if (shake < 0.3) shake = 0; flashAlpha *= 0.92;
+          if (mode === "clear") clearAnim = clamp(clearAnim + dt * 1.5, 0, 1);
+          for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i]; p.x += p.vx * dt; p.y += p.vy * dt;
+            p.life -= dt * 2;
+            if (p.life <= 0) particles.splice(i, 1);
+          }
+          return;
+        }
+
+        if (mode === "running") {
+          elapsed += dt;
+          distance += CLIMB_SPEED * dt;
+        }
+
+        // Climber movement
+        climberX = lerp(climberX, laneX(climberTargetLane), clamp(12 * dt, 0, 1));
+        climberLane = climberTargetLane;
+
+        // Invincibility frames
+        if (invincible > 0) invincible -= dt;
+
+        // Spawn rocks
+        const spawnRate = lerp(1.2, 0.4, distance / SUMMIT_DISTANCE);
+        rockSpawnTimer -= dt;
+        if (rockSpawnTimer <= 0) {
+          spawnRock();
+          if (distance > SUMMIT_DISTANCE * 0.5 && Math.random() < 0.3) spawnRock();
+          rockSpawnTimer = spawnRate;
+        }
+
+        // Spawn features
+        flowerSpawnTimer -= dt;
+        if (flowerSpawnTimer <= 0) {
+          spawnFeature();
+          flowerSpawnTimer = rand(0.3, 0.8);
+        }
+
+        // Update rocks
+        const climberY = H - 100;
+        for (let i = rocks.length - 1; i >= 0; i--) {
+          const r = rocks[i];
+          r.y += r.speed * dt;
+          r.rot += r.rotSpeed * dt;
+
+          // Collision with climber
+          if (invincible <= 0 && Math.abs(r.x - climberX) < 30 && Math.abs(r.y - climberY) < 30) {
+            hits++;
+            shake = 12;
+            flashAlpha = 0.35; flashColor = COL.fail;
+            invincible = 1;
+            spawnParticles(climberX, climberY, reducedMotion ? 4 : 8, COL.rock);
+            rocks.splice(i, 1);
+
+            if (hits >= MAX_HITS) {
+              mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("낙석 피격");
+            }
+            continue;
+          }
+
+          if (r.y > H + 40) rocks.splice(i, 1);
+        }
+
+        // Update features
+        for (let i = features.length - 1; i >= 0; i--) {
+          features[i].y += CLIMB_SPEED * 0.6 * dt;
+          if (features[i].y > H + 40) features.splice(i, 1);
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i]; p.x += p.vx * dt; p.y += p.vy * dt;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+
+        // Summit check
+        if (mode === "running" && distance >= SUMMIT_DISTANCE) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared"; reportCleared();
+          spawnParticles(CX, CY, reducedMotion ? 8 : 20, COL.flag);
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient
+        const progress = distance / SUMMIT_DISTANCE;
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+        skyGrad.addColorStop(0, lerp2Color(COL.sky1, "#6090C0", progress));
+        skyGrad.addColorStop(1, lerp2Color(COL.sky2, "#B0D0E8", progress));
+        ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, H);
+
+        // Mountain path background
+        const pathGrad = ctx.createLinearGradient(LANE_X_START, 0, LANE_X_START + TOTAL_LANE_W, 0);
+        const mtnColor = progress > 0.7 ? COL.mountainSnow : COL.mountain;
+        pathGrad.addColorStop(0, mtnColor);
+        pathGrad.addColorStop(0.5, lerp2Color(mtnColor, "#ffffff", 0.1));
+        pathGrad.addColorStop(1, mtnColor);
+        ctx.fillStyle = pathGrad;
+        ctx.fillRect(LANE_X_START - 20, 0, TOTAL_LANE_W + 40, H);
+
+        // Side mountain edges
+        ctx.fillStyle = COL.mountainDark;
+        ctx.fillRect(LANE_X_START - 25, 0, 5, H);
+        ctx.fillRect(LANE_X_START + TOTAL_LANE_W + 20, 0, 5, H);
+
+        // Lane dividers (subtle)
+        ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.lineWidth = 1;
+        for (let i = 1; i < LANES; i++) {
+          const lx = LANE_X_START + i * LANE_W;
+          ctx.setLineDash([8, 12]);
+          ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx, H); ctx.stroke();
+        }
+        ctx.setLineDash([]);
+
+        if (mode === "running" || mode === "clear" || mode === "failed") drawGame();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = flashColor === COL.fail ? `rgba(192,80,64,${flashAlpha})` : `rgba(96,168,80,${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        for (const p of particles) {
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function lerp2Color(c1, c2, t) {
+        // Simple hex lerp
+        const r1 = parseInt(c1.slice(1,3),16), g1 = parseInt(c1.slice(3,5),16), b1 = parseInt(c1.slice(5,7),16);
+        const r2 = parseInt(c2.slice(1,3),16), g2 = parseInt(c2.slice(3,5),16), b2 = parseInt(c2.slice(5,7),16);
+        const r = Math.round(lerp(r1, r2, t)), g = Math.round(lerp(g1, g2, t)), b = Math.round(lerp(b1, b2, t));
+        return `rgb(${r},${g},${b})`;
+      }
+
+      function drawGame() {
+        // Features (trees/rocks)
+        for (const f of features) {
+          if (f.type === "tree") {
+            ctx.fillStyle = "#5A7848";
+            ctx.beginPath();
+            ctx.moveTo(f.x, f.y - f.size);
+            ctx.lineTo(f.x + f.size * 0.6, f.y + f.size * 0.4);
+            ctx.lineTo(f.x - f.size * 0.6, f.y + f.size * 0.4);
+            ctx.closePath(); ctx.fill();
+            ctx.fillStyle = "#7A5840";
+            ctx.fillRect(f.x - 3, f.y + f.size * 0.3, 6, f.size * 0.3);
+          } else {
+            ctx.fillStyle = "#A09080";
+            ctx.beginPath(); ctx.arc(f.x, f.y, f.size * 0.5, 0, Math.PI * 2); ctx.fill();
+          }
+        }
+
+        // Rocks (falling)
+        for (const r of rocks) {
+          ctx.save();
+          ctx.translate(r.x, r.y);
+          ctx.rotate(r.rot);
+          ctx.fillStyle = COL.rock;
+          // Rough rock shape
+          ctx.beginPath();
+          ctx.moveTo(-r.size * 0.5, -r.size * 0.3);
+          ctx.lineTo(-r.size * 0.2, -r.size * 0.5);
+          ctx.lineTo(r.size * 0.3, -r.size * 0.4);
+          ctx.lineTo(r.size * 0.5, r.size * 0.1);
+          ctx.lineTo(r.size * 0.2, r.size * 0.5);
+          ctx.lineTo(-r.size * 0.4, r.size * 0.3);
+          ctx.closePath(); ctx.fill();
+
+          ctx.fillStyle = COL.rockDark;
+          ctx.beginPath();
+          ctx.moveTo(-r.size * 0.2, -r.size * 0.1);
+          ctx.lineTo(r.size * 0.1, -r.size * 0.2);
+          ctx.lineTo(r.size * 0.2, r.size * 0.1);
+          ctx.closePath(); ctx.fill();
+          ctx.restore();
+        }
+
+        // Climber
+        const cy = H - 100;
+        const blink = invincible > 0 && Math.sin(invincible * 20) > 0;
+        if (!blink) {
+          // Body
+          ctx.fillStyle = COL.climber;
+          ctx.beginPath(); ctx.arc(climberX, cy - 10, 12, 0, Math.PI * 2); ctx.fill();
+
+          // Head
+          ctx.fillStyle = "#F0D0A0";
+          ctx.beginPath(); ctx.arc(climberX, cy - 28, 8, 0, Math.PI * 2); ctx.fill();
+
+          // Backpack
+          ctx.fillStyle = COL.climberPack;
+          ctx.fillRect(climberX + 4, cy - 20, 10, 14);
+
+          // Legs
+          ctx.strokeStyle = COL.climber; ctx.lineWidth = 3; ctx.lineCap = "round";
+          const legPhase = elapsed * 8;
+          ctx.beginPath(); ctx.moveTo(climberX - 4, cy + 2);
+          ctx.lineTo(climberX - 6 + Math.sin(legPhase) * 4, cy + 16); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(climberX + 4, cy + 2);
+          ctx.lineTo(climberX + 6 + Math.sin(legPhase + Math.PI) * 4, cy + 16); ctx.stroke();
+        }
+
+        // Warning indicator for incoming rocks
+        for (const r of rocks) {
+          if (r.y < 0 && r.y > -50) {
+            ctx.fillStyle = `rgba(192, 80, 64, ${0.5 + Math.sin(elapsed * 10) * 0.3})`;
+            ctx.beginPath();
+            ctx.moveTo(r.x, 5);
+            ctx.lineTo(r.x - 6, 15);
+            ctx.lineTo(r.x + 6, 15);
+            ctx.closePath(); ctx.fill();
+          }
+        }
+
+        drawHUD();
+      }
+
+      function drawHUD() {
+        // Altitude bar (left side)
+        const barH = H - 100;
+        const barX = 20;
+        const barY = 50;
+        const progress = clamp(distance / SUMMIT_DISTANCE, 0, 1);
+
+        ctx.fillStyle = "rgba(255,255,255,0.3)";
+        ctx.fillRect(barX, barY, 8, barH);
+        ctx.fillStyle = COL.accent;
+        ctx.fillRect(barX, barY + barH * (1 - progress), 8, barH * progress);
+
+        // Flag at top
+        ctx.fillStyle = COL.flag;
+        ctx.fillRect(barX + 2, barY - 5, 2, 15);
+        ctx.beginPath();
+        ctx.moveTo(barX + 4, barY - 5);
+        ctx.lineTo(barX + 16, barY);
+        ctx.lineTo(barX + 4, barY + 5);
+        ctx.closePath(); ctx.fill();
+
+        // Climber marker
+        const markerY = barY + barH * (1 - progress);
+        ctx.fillStyle = COL.climber;
+        ctx.beginPath(); ctx.arc(barX + 4, markerY, 5, 0, Math.PI * 2); ctx.fill();
+
+        // Altitude text
+        ctx.fillStyle = COL.text;
+        ctx.font = `500 14px "Segoe UI", sans-serif`;
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`${Math.round(progress * 100)}%`, barX, barY + barH + 8);
+
+        // HP dots (top right)
+        ctx.textAlign = "right"; ctx.textBaseline = "top";
+        for (let i = 0; i < MAX_HITS; i++) {
+          const dx = W - 24 - i * 22;
+          ctx.beginPath(); ctx.arc(dx, 28, 7, 0, Math.PI * 2);
+          if (i < MAX_HITS - hits) {
+            ctx.fillStyle = COL.success; ctx.fill();
+          } else {
+            ctx.fillStyle = "rgba(200,200,200,0.3)"; ctx.fill();
+          }
+        }
+
+        ctx.fillStyle = COL.text;
+        ctx.font = `500 14px "Segoe UI", sans-serif`;
+        ctx.fillText("체력", W - 24 - (MAX_HITS - 1) * 22 - 10, 22);
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r); ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r); ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r); ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r); ctx.closePath();
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40); const lineH = 26;
+        const cardH = 50 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(232,240,224,0.96)"; roundRect(cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+        ctx.fillStyle = COL.text; ctx.font = `bold 24px "Segoe UI", sans-serif`;
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cardY + 16);
+        ctx.font = `400 14px "Segoe UI", sans-serif`; ctx.fillStyle = "rgba(58,80,40,0.7)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 50 + i * lineH);
+        ctx.fillStyle = "rgba(58,80,40,0.35)"; ctx.font = `400 13px "Segoe UI", sans-serif`;
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(232,240,224,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("산 정복자", [
+          "낙석을 피하며 정상에 도달하세요", "",
+          "조작: 화면 좌우 터치로 이동",
+          "클리어: 정상 도달",
+          "실패: 낙석 3회 피격",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(232,240,224,${clearAnim * 0.6})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("정상 도달!", [`${Math.ceil(elapsed)}초 만에 등정`, `피격: ${hits}회`], COL.success);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(40,50,30,0.25)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["낙석에 맞았습니다", `등반: ${Math.round(distance / SUMMIT_DISTANCE * 100)}%`, `피격: ${hits}회`], COL.fail);
+      }
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        if (p.x < CX) moveClimber("left");
+        else moveClimber("right");
+      });
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (mode !== "running") handleStart(); return; }
+        if (mode === "running") {
+          if (e.key === "ArrowLeft") moveClimber("left");
+          else if (e.key === "ArrowRight") moveClimber("right");
+        }
+      });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), distance: Math.round(distance), hits, climberLane, result: window.relayStageResult.status });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; distance = SUMMIT_DISTANCE; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; hits = MAX_HITS; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
