@@ -655,5 +655,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "레시피 5개를 완성하면 클리어",
     thumbnail: "./recipe-rush/thumbnail.png",
     path: "./recipe-rush/index.html",
+  },
+  {
+    id: "summit-climber",
+    title: "산 정복자",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climbing action",
+    clearCondition: "정상에 도달하면 클리어",
+    thumbnail: "./summit-climber/thumbnail.png",
+    path: "./summit-climber/index.html",
   }
 ];
