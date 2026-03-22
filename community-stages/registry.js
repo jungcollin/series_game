@@ -367,5 +367,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "축소 구간 끝까지 버티며 20연속 파형을 반사하면 클리어",
     thumbnail: "./paper-temple-pulse-fencing-shrink/thumbnail.png",
     path: "./paper-temple-pulse-fencing-shrink/index.html",
+  },
+  {
+    id: "dream-motel-magnet-braiding-tempo",
+    title: "Dream Motel: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./dream-motel-magnet-braiding-tempo/thumbnail.png",
+    path: "./dream-motel-magnet-braiding-tempo/index.html",
   }
 ];
