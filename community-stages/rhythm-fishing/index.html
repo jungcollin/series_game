@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>리듬 낚시</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #E8F4F8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(91, 164, 164, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(30, 80, 90, 0.92);
+        color: #F0F8FF; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8F4F8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(91, 164, 164, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">리듬 낚시. 찌가 움직이는 리듬에 맞춰 화면을 터치하여 물고기를 낚는 게임. 화면 터치로 리듬에 맞춰 릴 감기. 물고기 5마리 낚으면 클리어. 3번 놓치면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="리듬 낚시" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "rhythm-fishing",
+        title: "리듬 낚시",
+        description: "리듬에 맞춰 터치하여 물고기를 낚는 게임",
+        creator: "jungcollin",
+        genre: "Rhythm action",
+        clearCondition: "물고기 5마리 낚으면 클리어",
+        failCondition: "3번 놓치면 실패",
+        controls: "화면 터치로 리듬에 맞춰 릴 감기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        sky: "#D4EDFC",
+        water: "#5BA4A4",
+        waterDeep: "#3B7A7A",
+        waterLight: "#8ECECE",
+        sand: "#F5DEB3",
+        line: "#4A4A4A",
+        bobber: "#FF6B4A",
+        bobberWhite: "#FFFFFF",
+        fish: "#FF8C7C",
+        fishGold: "#FFD700",
+        text: "#1E505A",
+        textLight: "rgba(30, 80, 90, 0.6)",
+        success: "#4A9E6B",
+        fail: "#CC4444",
+        ring: "#FFD700",
+        ringGood: "#4ADE80",
+        ringBad: "#FF6B6B",
+      };
+
+      // --- Constants ---
+      const TARGET_CATCH = 5;
+      const MAX_MISS = 3;
+      const WATER_Y = 260;
+
+      // --- State ---
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      let caught = 0;
+      let missed = 0;
+      let phase = "waiting";
+      let phaseTimer = 0;
+      let bobberY = 0;
+      let bobberTargetY = 0;
+      let bobberBob = 0;
+
+      // Rhythm ring mechanic
+      let ringRadius = 0;
+      let ringTargetRadius = 40;
+      let ringSpeed = 0;
+      let ringActive = false;
+      let ringResult = "";
+      let ringResultTimer = 0;
+      let reelProgress = 0;
+      let reelTarget = 3;
+
+      // Fish
+      let fish = { x: 0, y: 0, angle: 0, size: 1, type: 0, visible: false };
+      let fishSwim = 0;
+
+      // Water waves
+      let waveOffset = 0;
+
+      // Particles
+      let particles = [];
+      let ripples = [];
+
+      // Rod
+      const ROD_X = 180;
+      const ROD_TIP_Y = 120;
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Particles ---
+      function spawnParticles(x, y, count, color) {
+        if (reducedMotion) count = Math.min(count, 3);
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(30, 120);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 40,
+            life: 1, color, size: rand(2, 5),
+          });
+        }
+      }
+
+      function spawnRipple(x, y) {
+        ripples.push({ x, y, radius: 5, maxRadius: rand(20, 40), life: 1 });
+      }
+
+      // --- Fish generation ---
+      function spawnFish() {
+        const types = [0, 1, 2];
+        fish.type = types[Math.floor(Math.random() * types.length)];
+        fish.x = CX + rand(-60, 60);
+        fish.y = WATER_Y + rand(60, 140);
+        fish.angle = rand(-0.3, 0.3);
+        fish.size = fish.type === 2 ? 1.4 : 1;
+        fish.visible = false;
+        fishSwim = 0;
+      }
+
+      // --- Phase transitions ---
+      function startWaiting() {
+        phase = "waiting";
+        phaseTimer = rand(1.5, 3);
+        bobberTargetY = WATER_Y + 8;
+        ringActive = false;
+        ringResult = "";
+        reelProgress = 0;
+        reelTarget = 3 + Math.floor(caught * 0.5);
+        spawnFish();
+      }
+
+      function startBobbing() {
+        phase = "bobbing";
+        phaseTimer = rand(2.5, 4);
+        ringActive = true;
+        ringRadius = 100;
+        ringSpeed = lerp(50, 80, caught / TARGET_CATCH);
+        fish.visible = true;
+        spawnRipple(CX, WATER_Y);
+      }
+
+      function handleTap() {
+        if (phase === "bobbing" && ringActive) {
+          const diff = Math.abs(ringRadius - ringTargetRadius);
+          if (diff < 15) {
+            reelProgress++;
+            ringResult = "good";
+            ringResultTimer = 0.4;
+            ringRadius = 100;
+            spawnParticles(CX, WATER_Y, 6, COL.ring);
+            spawnRipple(CX, WATER_Y);
+
+            if (reelProgress >= reelTarget) {
+              phase = "caught";
+              phaseTimer = 1.2;
+              caught++;
+              fish.visible = true;
+              spawnParticles(CX, WATER_Y - 30, 12, COL.fishGold);
+              spawnRipple(CX, WATER_Y);
+            }
+          } else {
+            ringResult = "bad";
+            ringResultTimer = 0.4;
+            shake = 4;
+          }
+        }
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; shake = 0; flashAlpha = 0; clearAnim = 0;
+        caught = 0; missed = 0;
+        bobberY = WATER_Y + 8; bobberBob = 0;
+        particles = []; ripples = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        startWaiting();
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") {
+          waveOffset += dt * 0.5;
+          bobberBob += dt * 2;
+          return;
+        }
+        elapsed += dt;
+        waveOffset += dt;
+        bobberBob += dt * 3;
+
+        const bobFloat = Math.sin(bobberBob) * 4;
+        bobberY = lerp(bobberY, bobberTargetY + bobFloat, dt * 8);
+
+        phaseTimer -= dt;
+
+        if (phase === "waiting") {
+          if (phaseTimer <= 0) startBobbing();
+        } else if (phase === "bobbing") {
+          ringRadius -= ringSpeed * dt;
+          if (ringRadius <= 0) {
+            missed++;
+            ringResult = "bad";
+            ringResultTimer = 0.5;
+            shake = 6;
+            flashAlpha = 0.2;
+            ringRadius = 100;
+
+            if (missed >= MAX_MISS) {
+              mode = "failed";
+              window.relayStageResult.status = "failed";
+              reportFailed("놓침 초과");
+            } else if (reelProgress > 0) {
+              reelProgress = Math.max(0, reelProgress - 1);
+              ringRadius = 100;
+            } else {
+              startWaiting();
+            }
+          }
+
+          fishSwim += dt;
+          if (fish.visible) {
+            fish.x = CX + Math.sin(fishSwim * 2) * 30;
+            fish.y = WATER_Y + 70 + Math.cos(fishSwim * 1.5) * 15;
+          }
+
+          if (phaseTimer <= 0 && reelProgress === 0) {
+            missed++;
+            shake = 5;
+            flashAlpha = 0.15;
+            if (missed >= MAX_MISS) {
+              mode = "failed";
+              window.relayStageResult.status = "failed";
+              reportFailed("놓침 초과");
+            } else {
+              startWaiting();
+            }
+          }
+        } else if (phase === "caught") {
+          if (fish.visible) {
+            fish.y = lerp(fish.y, WATER_Y - 60, dt * 4);
+            fish.x = lerp(fish.x, CX, dt * 3);
+          }
+          if (phaseTimer <= 0) {
+            if (caught >= TARGET_CATCH) {
+              mode = "clear";
+              clearAnim = 0;
+              window.relayStageResult.status = "cleared";
+              reportCleared();
+              spawnParticles(CX, CY, 20, COL.fishGold);
+            } else {
+              startWaiting();
+            }
+          }
+        }
+
+        if (ringResultTimer > 0) ringResultTimer -= dt;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 100 * dt;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        for (let i = ripples.length - 1; i >= 0; i--) {
+          const r = ripples[i];
+          r.radius = lerp(r.radius, r.maxRadius, dt * 4);
+          r.life -= dt * 1.5;
+          if (r.life <= 0) ripples.splice(i, 1);
+        }
+
+        shake *= 0.9;
+        if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, WATER_Y);
+        skyGrad.addColorStop(0, COL.sky);
+        skyGrad.addColorStop(1, "#B8DFF0");
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, WATER_Y);
+
+        drawClouds();
+        drawWater();
+
+        if (mode === "running" || mode === "clear" || mode === "failed") {
+          if (fish.visible && phase !== "caught") drawFishUnderwater();
+          drawRod();
+          drawBobber();
+          if (phase === "caught" && fish.visible) drawFishCaught();
+          if (ringActive && phase === "bobbing") drawRing();
+          drawRipples();
+          drawParticles();
+          if (mode === "running") drawHUD();
+        }
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(204, 68, 68, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawClouds() {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+        const t = elapsed * 8;
+        for (let i = 0; i < 4; i++) {
+          const cx = ((i * 250 + t) % (W + 100)) - 50;
+          const cy = 40 + i * 30;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 25, 0, Math.PI * 2);
+          ctx.arc(cx + 20, cy - 8, 20, 0, Math.PI * 2);
+          ctx.arc(cx + 40, cy, 22, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawWater() {
+        const waterGrad = ctx.createLinearGradient(0, WATER_Y, 0, H);
+        waterGrad.addColorStop(0, COL.waterLight);
+        waterGrad.addColorStop(0.5, COL.water);
+        waterGrad.addColorStop(1, COL.waterDeep);
+        ctx.fillStyle = waterGrad;
+        ctx.fillRect(0, WATER_Y, W, H - WATER_Y);
+
+        ctx.beginPath();
+        ctx.moveTo(0, WATER_Y);
+        for (let x = 0; x <= W; x += 10) {
+          const wave = Math.sin((x * 0.02) + waveOffset * 2) * 4 +
+                       Math.sin((x * 0.035) + waveOffset * 3) * 2;
+          ctx.lineTo(x, WATER_Y + wave);
+        }
+        ctx.lineTo(W, WATER_Y - 10);
+        ctx.lineTo(0, WATER_Y - 10);
+        ctx.closePath();
+        ctx.fillStyle = COL.waterLight;
+        ctx.globalAlpha = 0.3;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        ctx.fillStyle = COL.sand;
+        ctx.fillRect(0, H - 30, W, 30);
+        ctx.fillStyle = "rgba(245, 222, 179, 0.5)";
+        ctx.fillRect(0, H - 40, W, 15);
+      }
+
+      function drawRod() {
+        ctx.strokeStyle = "#8B6914";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(ROD_X - 80, 50);
+        ctx.quadraticCurveTo(ROD_X, 30, ROD_X + 40, ROD_TIP_Y);
+        ctx.stroke();
+
+        ctx.strokeStyle = COL.line;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(ROD_X + 40, ROD_TIP_Y);
+        ctx.lineTo(CX, bobberY);
+        ctx.stroke();
+      }
+
+      function drawBobber() {
+        const bx = CX, by = bobberY;
+        ctx.beginPath();
+        ctx.ellipse(bx, by - 8, 6, 12, 0, 0, Math.PI * 2);
+        ctx.fillStyle = COL.bobber;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(bx, by - 16, 5, 6, 0, Math.PI, Math.PI * 2);
+        ctx.fillStyle = COL.bobberWhite;
+        ctx.fill();
+        ctx.fillStyle = COL.line;
+        ctx.fillRect(bx - 1, by, 2, 12);
+      }
+
+      function drawFishUnderwater() {
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.translate(fish.x, fish.y);
+        ctx.rotate(fish.angle + Math.sin(fishSwim * 3) * 0.1);
+        ctx.scale(fish.size, fish.size);
+        drawFishShape(fish.type);
+        ctx.restore();
+      }
+
+      function drawFishCaught() {
+        ctx.save();
+        ctx.translate(fish.x, fish.y);
+        ctx.scale(fish.size, fish.size);
+        drawFishShape(fish.type);
+        ctx.restore();
+      }
+
+      function drawFishShape(type) {
+        const color = type === 1 ? COL.fishGold : COL.fish;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 20, 10, 0, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(-18, 0);
+        ctx.lineTo(-30, -10);
+        ctx.lineTo(-30, 10);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(10, -3, 3, 0, Math.PI * 2);
+        ctx.fillStyle = "#FFF";
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(11, -3, 1.5, 0, Math.PI * 2);
+        ctx.fillStyle = "#333";
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(0, 8);
+        ctx.lineTo(-8, 16);
+        ctx.lineTo(5, 10);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.7;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      function drawRing() {
+        const cx = CX, cy = WATER_Y - 40;
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = ringResultTimer > 0 ?
+          (ringResult === "good" ? COL.ringGood : COL.ringBad) : COL.ring;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, ringTargetRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(255, 215, 0, 0.5)";
+        ctx.lineWidth = 12;
+        ctx.stroke();
+
+        for (let i = 0; i < reelTarget; i++) {
+          const a = (i / reelTarget) * Math.PI * 2 - Math.PI / 2;
+          const dx = cx + Math.cos(a) * (ringTargetRadius + 25);
+          const dy = cy + Math.sin(a) * (ringTargetRadius + 25);
+          ctx.beginPath();
+          ctx.arc(dx, dy, 5, 0, Math.PI * 2);
+          ctx.fillStyle = i < reelProgress ? COL.success : "rgba(30, 80, 90, 0.3)";
+          ctx.fill();
+        }
+
+        if (ringRadius < ringTargetRadius + 20 && ringRadius > ringTargetRadius - 10) {
+          ctx.fillStyle = COL.ring;
+          ctx.font = "bold 18px 'Segoe UI', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("TAP!", cx, cy - ringTargetRadius - 20);
+        }
+      }
+
+      function drawRipples() {
+        for (const r of ripples) {
+          ctx.beginPath();
+          ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(255, 255, 255, ${r.life * 0.5})`;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text;
+        ctx.font = "600 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`${caught} / ${TARGET_CATCH}`, 24, 20);
+
+        ctx.textAlign = "right";
+        const hearts = MAX_MISS - missed;
+        let heartStr = "";
+        for (let i = 0; i < MAX_MISS; i++) {
+          heartStr += i < hearts ? "♥ " : "♡ ";
+        }
+        ctx.fillStyle = missed > 0 ? COL.fail : COL.text;
+        ctx.fillText(heartStr.trim(), W - 24, 20);
+
+        if (phase === "waiting") {
+          ctx.fillStyle = COL.textLight;
+          ctx.font = "400 14px 'Segoe UI', sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("입질을 기다리는 중...", CX, 50);
+        }
+      }
+
+      // --- Overlay cards ---
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+        ctx.closePath();
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 50 + lines.length * lineH + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(232, 244, 248, 0.96)";
+        roundRect(ctx, cardX, cardY, cardW, cardH, 10);
+        ctx.fill();
+
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 24px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "400 14px 'Segoe UI', sans-serif";
+        ctx.fillStyle = "rgba(30, 80, 90, 0.75)";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("TAP 또는 ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(232, 244, 248, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+
+        drawCard("리듬 낚시", [
+          "리듬에 맞춰 화면 터치로 물고기를 낚으세요",
+          "",
+          "조작: 화면 터치로 리듬에 맞춰 릴 감기",
+          "클리어: 물고기 5마리 낚기",
+          "실패: 3번 놓치면 실패",
+        ], COL.water);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(232, 244, 248, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+
+        if (clearAnim > 0.3) {
+          drawCard("대어 포획!", [
+            `${Math.ceil(elapsed)}초 만에 ${caught}마리 낚음`,
+          ], COL.success);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(30, 80, 90, 0.25)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("도망갔다...", [
+          `${caught}마리 낚음 / ${missed}번 놓침`,
+        ], COL.fail);
+      }
+
+      // --- Input ---
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset();
+          mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        handleTap();
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") handleStart();
+          else handleTap();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          caught, missed, phase,
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          caught = TARGET_CATCH;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          missed = MAX_MISS;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail");
+          draw();
+        },
+      };
+
+      // --- Init ---
+      startWaiting();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

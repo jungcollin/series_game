@@ -376,5 +376,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "15송이 꽃을 피우면 클리어",
     thumbnail: "./moon-greenhouse-weather-mixing-cursed/thumbnail.png",
     path: "./moon-greenhouse-weather-mixing-cursed/index.html",
+  },
+  {
+    id: "rhythm-fishing",
+    title: "리듬 낚시",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rhythm action",
+    clearCondition: "물고기 5마리 낚으면 클리어",
+    thumbnail: "./rhythm-fishing/thumbnail.png",
+    path: "./rhythm-fishing/index.html",
   }
 ];
