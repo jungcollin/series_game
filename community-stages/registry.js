@@ -493,5 +493,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "조개 15개를 수집하면 클리어",
     thumbnail: "./tidal-shells/thumbnail.png",
     path: "./tidal-shells/index.html",
+  },
+  {
+    id: "plate-spinner",
+    title: "접시 돌리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Multi-target management",
+    clearCondition: "30초 동안 접시를 떨어뜨리지 않으면 클리어",
+    thumbnail: "./plate-spinner/thumbnail.png",
+    path: "./plate-spinner/index.html",
   }
 ];
