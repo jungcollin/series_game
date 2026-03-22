@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>접기의 달인</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #FFF8F0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(200, 160, 140, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 60, 50, 0.92);
+        color: #FFF8F0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #FFF8F0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(200, 120, 100, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">접기의 달인. 화면을 터치하여 스와이프하거나 화살표 키로 종이접기 5작품을 완성하세요. 모바일에서는 화면 터치 스와이프로 조작합니다. 35초 제한. 틀린 접기 5회 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="접기의 달인" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "origami-master",
+        title: "접기의 달인",
+        description: "화살표 순서대로 스와이프하여 종이접기를 완성하세요",
+        creator: "jungcollin",
+        genre: "Swipe matching",
+        clearCondition: "종이접기 5작품 완성",
+        failCondition: "시간 초과 또는 틀린 접기 5회",
+        controls: "화살표 방향으로 스와이프",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const PAPER_COLORS = ["#F4A0A0", "#A8C5A0", "#A0C4E8", "#C4A8D8", "#E8A88C"];
+      const COL = {
+        bg: "#FFF8F0", bgDim: "#F0E6D8",
+        text: "#4A3728", textLight: "rgba(74, 55, 40, 0.5)",
+        accent: "#D4766A", success: "#7CAA6E", fail: "#C45B52",
+        arrow: "#B8A090", arrowActive: "#D4766A",
+      };
+
+      const DIR_ARROWS = { up: "\u2191", down: "\u2193", left: "\u2190", right: "\u2192" };
+      const ORIGAMI_SEQUENCES = [
+        { name: "학", steps: ["up", "right", "up", "left"] },
+        { name: "배", steps: ["down", "left", "right"] },
+        { name: "개구리", steps: ["up", "left", "down", "right", "up"] },
+        { name: "하트", steps: ["up", "right", "down"] },
+        { name: "별", steps: ["right", "up", "left", "down", "right"] },
+      ];
+
+      const DURATION = 35;
+      const TARGET_WORKS = 5;
+      const MAX_MISTAKES = 5;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      let currentWork = 0;
+      let currentStep = 0;
+      let mistakes = 0;
+      let shake = 0;
+      let flashAlpha = 0;
+      let flashColor = COL.success;
+      let clearAnim = 0;
+
+      let foldAnim = 0;
+      let foldDir = null;
+      let foldComplete = false;
+
+      let swipeStart = null;
+      const SWIPE_THRESHOLD = 30;
+
+      let particles = [];
+      let completedPulse = 0;
+      let paperFolds = [];
+      let paperScale = 1;
+      let paperTargetScale = 1;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(60, 180);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - rand(20, 60),
+            life: 1, color, size: rand(4, 10), rot: rand(0, Math.PI * 2), rotSpeed: rand(-3, 3),
+          });
+        }
+      }
+
+      function drawOrigamiShape(cx, cy, size, workIndex, progress) {
+        const shapes = [
+          (cx, cy, s) => { ctx.beginPath(); ctx.moveTo(cx, cy - s*0.6); ctx.lineTo(cx + s*0.5, cy + s*0.3); ctx.lineTo(cx + s*0.15, cy + s*0.1); ctx.lineTo(cx, cy + s*0.4); ctx.lineTo(cx - s*0.15, cy + s*0.1); ctx.lineTo(cx - s*0.5, cy + s*0.3); ctx.closePath(); },
+          (cx, cy, s) => { ctx.beginPath(); ctx.moveTo(cx - s*0.5, cy); ctx.lineTo(cx - s*0.3, cy + s*0.3); ctx.lineTo(cx + s*0.3, cy + s*0.3); ctx.lineTo(cx + s*0.5, cy); ctx.lineTo(cx + s*0.1, cy); ctx.lineTo(cx + s*0.1, cy - s*0.4); ctx.lineTo(cx - s*0.1, cy - s*0.4); ctx.lineTo(cx - s*0.1, cy); ctx.closePath(); },
+          (cx, cy, s) => { ctx.beginPath(); ctx.arc(cx - s*0.2, cy - s*0.2, s*0.18, 0, Math.PI*2); ctx.arc(cx + s*0.2, cy - s*0.2, s*0.18, 0, Math.PI*2); ctx.moveTo(cx - s*0.35, cy + s*0.1); ctx.lineTo(cx - s*0.4, cy + s*0.4); ctx.lineTo(cx - s*0.15, cy + s*0.25); ctx.lineTo(cx + s*0.15, cy + s*0.25); ctx.lineTo(cx + s*0.4, cy + s*0.4); ctx.lineTo(cx + s*0.35, cy + s*0.1); ctx.closePath(); },
+          (cx, cy, s) => { ctx.beginPath(); ctx.moveTo(cx, cy + s*0.35); ctx.bezierCurveTo(cx - s*0.5, cy + s*0.1, cx - s*0.5, cy - s*0.3, cx, cy - s*0.15); ctx.bezierCurveTo(cx + s*0.5, cy - s*0.3, cx + s*0.5, cy + s*0.1, cx, cy + s*0.35); ctx.closePath(); },
+          (cx, cy, s) => { ctx.beginPath(); for (let i = 0; i < 5; i++) { const oa = -Math.PI/2 + (i*Math.PI*2)/5; const ia = oa + Math.PI/5; ctx.lineTo(cx + Math.cos(oa)*s*0.4, cy + Math.sin(oa)*s*0.4); ctx.lineTo(cx + Math.cos(ia)*s*0.18, cy + Math.sin(ia)*s*0.18); } ctx.closePath(); },
+        ];
+        if (workIndex < shapes.length) shapes[workIndex](cx, cy, size * progress);
+      }
+
+      function reset() {
+        elapsed = 0; currentWork = 0; currentStep = 0; mistakes = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        foldAnim = 0; foldDir = null; foldComplete = false;
+        particles = []; paperFolds = [];
+        paperScale = 1; paperTargetScale = 1; completedPulse = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+      }
+
+      function processSwipe(dir) {
+        if (mode !== "running" || foldAnim > 0) return;
+        const seq = ORIGAMI_SEQUENCES[currentWork];
+        if (!seq) return;
+        if (dir === seq.steps[currentStep]) {
+          foldDir = dir; foldAnim = 1; foldComplete = false;
+        } else {
+          mistakes++; shake = 10; flashAlpha = 0.35; flashColor = COL.fail;
+          spawnParticles(CX, CY, reducedMotion ? 3 : 6, COL.fail);
+          if (mistakes >= MAX_MISTAKES) {
+            mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("틀린 접기 초과");
+          }
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running" && mode !== "clear") {
+          shake *= 0.88; if (shake < 0.3) shake = 0; flashAlpha *= 0.92;
+          if (mode === "clear") clearAnim = clamp(clearAnim + dt * 1.5, 0, 1);
+          for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i]; p.x += p.vx * dt; p.y += p.vy * dt;
+            p.vy += 120 * dt; p.vx *= 0.98; p.rot += p.rotSpeed * dt; p.life -= dt * 2;
+            if (p.life <= 0) particles.splice(i, 1);
+          }
+          return;
+        }
+        if (mode === "running") elapsed += dt;
+
+        if (foldAnim > 0) {
+          foldAnim -= dt * 4;
+          if (foldAnim <= 0) {
+            foldAnim = 0;
+            if (!foldComplete) {
+              foldComplete = true; paperFolds.push(foldDir); currentStep++;
+              const seq = ORIGAMI_SEQUENCES[currentWork];
+              if (currentStep >= seq.steps.length) {
+                currentWork++; currentStep = 0; paperFolds = []; completedPulse = 1;
+                spawnParticles(CX, CY, reducedMotion ? 6 : 15, PAPER_COLORS[currentWork - 1]);
+                flashAlpha = 0.2; flashColor = COL.success;
+                if (currentWork >= TARGET_WORKS) {
+                  mode = "clear"; clearAnim = 0;
+                  window.relayStageResult.status = "cleared"; reportCleared();
+                }
+              }
+            }
+          }
+        }
+
+        paperTargetScale = 1 - (currentStep / (ORIGAMI_SEQUENCES[currentWork]?.steps.length || 5)) * 0.3;
+        paperScale = lerp(paperScale, paperTargetScale, clamp(6 * dt, 0, 1));
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i]; p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 120 * dt; p.vx *= 0.98; p.rot += p.rotSpeed * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92; completedPulse *= 0.93;
+
+        if (mode === "running" && elapsed >= DURATION && currentWork < TARGET_WORKS) {
+          mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("시간 초과");
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.04; ctx.fillStyle = "#B8A090";
+          for (let x = 0; x < W; x += 30) for (let y = 0; y < H; y += 30) ctx.fillRect(x + ((y/30)%2)*15, y, 2, 2);
+          ctx.globalAlpha = 1;
+        }
+
+        if (mode === "running" || mode === "clear" || mode === "failed") drawGame();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = flashColor === COL.fail ? `rgba(196,91,82,${flashAlpha})` : `rgba(124,170,110,${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+        drawParticles();
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawGame() {
+        const seq = ORIGAMI_SEQUENCES[currentWork];
+        if (!seq) return;
+        const paperSize = 160 * paperScale;
+        const paperColor = PAPER_COLORS[currentWork] || PAPER_COLORS[0];
+
+        ctx.save(); ctx.translate(CX, CY + 10);
+
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.fillRect(-paperSize - 4, -paperSize + 4, paperSize * 2, paperSize * 2);
+
+        ctx.fillStyle = paperColor;
+        ctx.fillRect(-paperSize, -paperSize, paperSize * 2, paperSize * 2);
+
+        ctx.strokeStyle = "rgba(255,255,255,0.4)"; ctx.lineWidth = 2;
+        for (let i = 0; i < paperFolds.length; i++) {
+          const f = paperFolds[i]; const offset = (i + 1) * 12;
+          ctx.beginPath();
+          if (f === "up" || f === "down") {
+            const y = f === "up" ? -paperSize + offset : paperSize - offset;
+            ctx.moveTo(-paperSize, y); ctx.lineTo(paperSize, y);
+          } else {
+            const x = f === "left" ? -paperSize + offset : paperSize - offset;
+            ctx.moveTo(x, -paperSize); ctx.lineTo(x, paperSize);
+          }
+          ctx.stroke();
+        }
+
+        if (foldAnim > 0 && foldDir) {
+          const fp = 1 - foldAnim;
+          ctx.fillStyle = `rgba(255,255,255,${0.3 * (1 - fp)})`;
+          if (foldDir === "up") ctx.fillRect(-paperSize, -paperSize, paperSize * 2, paperSize * fp);
+          else if (foldDir === "down") ctx.fillRect(-paperSize, paperSize - paperSize * fp, paperSize * 2, paperSize * fp);
+          else if (foldDir === "left") ctx.fillRect(-paperSize, -paperSize, paperSize * fp, paperSize * 2);
+          else ctx.fillRect(paperSize - paperSize * fp, -paperSize, paperSize * fp, paperSize * 2);
+        }
+
+        const stepProgress = currentStep / seq.steps.length;
+        if (stepProgress > 0.3) {
+          ctx.globalAlpha = (stepProgress - 0.3) * 1.2;
+          ctx.fillStyle = "rgba(255,255,255,0.35)";
+          drawOrigamiShape(0, 0, paperSize * 1.8, currentWork, clamp(stepProgress * 1.5, 0, 1));
+          ctx.fill(); ctx.globalAlpha = 1;
+        }
+        ctx.restore();
+
+        ctx.fillStyle = COL.text; ctx.font = `bold 20px "Segoe UI", sans-serif`;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText(`"${seq.name}" 접기`, CX, CY - 200);
+
+        const arrowY = CY + 200;
+        const arrowSpacing = 50;
+        const totalW = (seq.steps.length - 1) * arrowSpacing;
+        const startX = CX - totalW / 2;
+        for (let i = 0; i < seq.steps.length; i++) {
+          const ax = startX + i * arrowSpacing;
+          const isActive = i === currentStep; const isDone = i < currentStep;
+          ctx.font = isDone ? `600 28px sans-serif` : isActive ? `bold 36px sans-serif` : `400 28px sans-serif`;
+          ctx.fillStyle = isDone ? COL.success : isActive ? COL.arrowActive : COL.arrow;
+          ctx.globalAlpha = isDone ? 0.4 : isActive ? 1 : 0.6;
+          ctx.fillText(isDone ? "\u2713" : DIR_ARROWS[seq.steps[i]], ax, arrowY);
+          ctx.globalAlpha = 1;
+          if (isActive) { ctx.fillStyle = COL.arrowActive; ctx.beginPath(); ctx.arc(ax, arrowY + 24, 3, 0, Math.PI * 2); ctx.fill(); }
+        }
+        drawHUD();
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = `500 16px "Segoe UI", sans-serif`;
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.fillStyle = timeLeft < 10 ? COL.fail : COL.text;
+        ctx.fillText(`${Math.ceil(timeLeft)}`, 24, 20);
+
+        ctx.fillStyle = COL.text; ctx.textAlign = "center";
+        ctx.fillText(`${currentWork} / ${TARGET_WORKS}`, CX, 20);
+        for (let i = 0; i < TARGET_WORKS; i++) {
+          const ix = CX - (TARGET_WORKS - 1) * 16 + i * 32; const iy = 46;
+          ctx.beginPath(); ctx.arc(ix, iy, 8, 0, Math.PI * 2);
+          if (i < currentWork) { ctx.fillStyle = PAPER_COLORS[i]; ctx.fill(); }
+          else { ctx.strokeStyle = COL.textLight; ctx.lineWidth = 1.5; ctx.stroke(); }
+        }
+
+        ctx.textAlign = "right";
+        ctx.fillStyle = mistakes > 2 ? COL.fail : COL.text;
+        ctx.fillText(`\u2717 ${mistakes}/${MAX_MISTAKES}`, W - 24, 20);
+
+        const barW = W - 48;
+        ctx.fillStyle = COL.bgDim; ctx.fillRect(24, 64, barW, 3);
+        const progress = clamp(elapsed / DURATION, 0, 1);
+        ctx.fillStyle = progress > 0.75 ? COL.fail : COL.accent;
+        ctx.fillRect(24, 64, barW * (1 - progress), 3);
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+          ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.color;
+          const s = p.size * clamp(p.life + 0.3, 0, 1);
+          ctx.fillRect(-s/2, -s/2, s, s); ctx.restore();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r); ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r); ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r); ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r); ctx.closePath();
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40); const lineH = 26;
+        const cardH = 50 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(255,248,240,0.96)"; roundRect(cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+        ctx.fillStyle = COL.text; ctx.font = `bold 24px "Segoe UI", sans-serif`;
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cardY + 16);
+        ctx.font = `400 14px "Segoe UI", sans-serif`; ctx.fillStyle = "rgba(74,55,40,0.7)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 50 + i * lineH);
+        ctx.fillStyle = "rgba(74,55,40,0.35)"; ctx.font = `400 13px "Segoe UI", sans-serif`;
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(255,248,240,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("접기의 달인", [
+          "화살표 순서대로 스와이프하여", "종이접기를 완성하세요", "",
+          "조작: 화면 터치 스와이프 (상하좌우)",
+          "클리어: 5작품 완성", "실패: 시간초과 또는 틀린접기 5회",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(255,248,240,${clearAnim * 0.6})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("접기 완성!", [`${Math.ceil(elapsed)}초 만에 완료`, `실수: ${mistakes}회`], COL.success);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80,40,30,0.25)"; ctx.fillRect(0, 0, W, H);
+        const reason = elapsed >= DURATION ? "시간이 다했습니다" : "실수가 너무 많습니다";
+        drawCard("실패", [reason, `완성: ${currentWork} / ${TARGET_WORKS}`, `실수: ${mistakes}회`], COL.fail);
+      }
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      function detectSwipeDir(dx, dy) {
+        const absDx = Math.abs(dx), absDy = Math.abs(dy);
+        if (Math.max(absDx, absDy) < SWIPE_THRESHOLD) return null;
+        if (absDx > absDy) return dx > 0 ? "right" : "left";
+        return dy > 0 ? "down" : "up";
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        swipeStart = { x: p.x, y: p.y, id: e.pointerId };
+      });
+      canvas.addEventListener("pointerup", (e) => {
+        if (!swipeStart || e.pointerId !== swipeStart.id) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        const dir = detectSwipeDir(p.x - swipeStart.x, p.y - swipeStart.y);
+        if (dir) processSwipe(dir);
+        swipeStart = null;
+      });
+      canvas.addEventListener("pointercancel", () => { swipeStart = null; });
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (mode !== "running") handleStart(); return; }
+        if (mode === "running") {
+          if (e.key === "ArrowUp") processSwipe("up");
+          else if (e.key === "ArrowDown") processSwipe("down");
+          else if (e.key === "ArrowLeft") processSwipe("left");
+          else if (e.key === "ArrowRight") processSwipe("right");
+        }
+      });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), currentWork, currentStep, mistakes, result: window.relayStageResult.status });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; currentWork = TARGET_WORKS; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; mistakes = MAX_MISTAKES; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
