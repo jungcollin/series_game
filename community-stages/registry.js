@@ -250,5 +250,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "템포 창을 놓치지 않고 모든 코어 문양을 연결하면 클리어",
     thumbnail: "./paper-temple-echo-weaving-tempo/thumbnail.png",
     path: "./paper-temple-echo-weaving-tempo/index.html",
+  },
+  {
+    id: "storm-archive-gravity-folding-collapse",
+    title: "Storm Archive: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
+    thumbnail: "./storm-archive-gravity-folding-collapse/thumbnail.png",
+    path: "./storm-archive-gravity-folding-collapse/index.html",
   }
 ];
