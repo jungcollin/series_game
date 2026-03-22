@@ -173,6 +173,33 @@ function findExistingPr(repoRoot, repositoryFullName, branch, headOwner) {
   };
 }
 
+function enableAutoMerge(repoRoot, prUrl) {
+  if (!prUrl) {
+    throw new Error("Cannot enable auto-merge without a PR URL.");
+  }
+  run("gh", ["pr", "merge", "--auto", "--squash", prUrl], repoRoot);
+}
+
+function readAutoMergeState(repoRoot, repositoryFullName, prNumber) {
+  if (!repositoryFullName || !prNumber) {
+    return null;
+  }
+  const raw = run(
+    "gh",
+    [
+      "pr",
+      "view",
+      String(prNumber),
+      "--repo",
+      repositoryFullName,
+      "--json",
+      "number,mergeStateStatus,autoMergeRequest",
+    ],
+    repoRoot
+  );
+  return JSON.parse(raw);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
@@ -223,6 +250,7 @@ function main() {
   const doPr = Boolean(args.pr);
   const doCommit = doPr || Boolean(args.commit);
   const doPush = doPr || Boolean(args.push);
+  const doAutoMerge = Boolean(args["auto-merge"]);
 
   let branch = "";
   let committed = false;
@@ -232,6 +260,8 @@ function main() {
   let prAction = "not_requested";
   let existingPr = null;
   let previousPr = null;
+  let autoMergeEnabled = false;
+  let autoMergeState = null;
 
   // Detect fork vs direct workflow
   const upstreamRepo = detectUpstreamRepo(repoRoot);
@@ -299,6 +329,18 @@ function main() {
       prUrl = ghOutput.trim();
       prAction = previousPr ? "created_after_closed_pr" : "created_new";
     }
+
+    if (doAutoMerge) {
+      enableAutoMerge(repoRoot, prUrl);
+      const prNumber =
+        existingPr?.number ||
+        (prUrl.match(/\/pull\/(\d+)/)?.[1] ? Number(prUrl.match(/\/pull\/(\d+)/)?.[1]) : null);
+      autoMergeState = readAutoMergeState(repoRoot, targetRepo, prNumber);
+      autoMergeEnabled = Boolean(autoMergeState?.autoMergeRequest);
+      if (!autoMergeEnabled) {
+        throw new Error(`Auto-merge was requested but is not enabled for PR: ${prUrl}`);
+      }
+    }
   }
 
   process.stdout.write(
@@ -322,6 +364,8 @@ function main() {
         existingPr,
         previousPr,
         prUrl,
+        autoMergeEnabled,
+        autoMergeState,
       },
       null,
       2
