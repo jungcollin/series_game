@@ -376,5 +376,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "15송이 꽃을 피우면 클리어",
     thumbnail: "./moon-greenhouse-weather-mixing-cursed/thumbnail.png",
     path: "./moon-greenhouse-weather-mixing-cursed/index.html",
+  },
+  {
+    id: "pottery-wheel",
+    title: "도자기 빚기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Shaping simulation",
+    clearCondition: "목표 형태와 일치하면 클리어",
+    thumbnail: "./pottery-wheel/thumbnail.png",
+    path: "./pottery-wheel/index.html",
   }
 ];
