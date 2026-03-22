@@ -484,5 +484,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "물이 출구에 도달하면 클리어",
     thumbnail: "./pipe-rush/thumbnail.png",
     path: "./pipe-rush/index.html",
+  },
+  {
+    id: "tidal-shells",
+    title: "조개 줍기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tide collection",
+    clearCondition: "조개 15개를 수집하면 클리어",
+    thumbnail: "./tidal-shells/thumbnail.png",
+    path: "./tidal-shells/index.html",
   }
 ];
