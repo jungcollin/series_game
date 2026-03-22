@@ -502,5 +502,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 동안 접시를 떨어뜨리지 않으면 클리어",
     thumbnail: "./plate-spinner/thumbnail.png",
     path: "./plate-spinner/index.html",
+  },
+  {
+    id: "shadow-dance",
+    title: "그림자 춤",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rhythm stealth",
+    clearCondition: "무대 끝까지 도달하면 클리어",
+    thumbnail: "./shadow-dance/thumbnail.png",
+    path: "./shadow-dance/index.html",
   }
 ];
