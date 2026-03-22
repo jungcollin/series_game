@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "biomech-theater-mirror-theft-witness",
+    title: "Biomech Theater: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./biomech-theater-mirror-theft-witness/thumbnail.png",
+    path: "./biomech-theater-mirror-theft-witness/index.html",
+  },
+  {
     id: "midnight-harbor-tide-anchoring-combo",
     title: "Midnight Harbor: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
