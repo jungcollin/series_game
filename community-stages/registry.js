@@ -664,5 +664,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "정상에 도달하면 클리어",
     thumbnail: "./summit-climber/thumbnail.png",
     path: "./summit-climber/index.html",
+  },
+  {
+    id: "mochi-pound",
+    title: "떡방아",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Dual-action rhythm",
+    clearCondition: "떡 8개를 완성하면 클리어",
+    thumbnail: "./mochi-pound/thumbnail.png",
+    path: "./mochi-pound/index.html",
   }
 ];
