@@ -538,5 +538,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "충전을 남기며 코어를 목적 슬롯까지 배달하기",
     thumbnail: "./neon-observatory-gravity-folding-charge/thumbnail.png",
     path: "./neon-observatory-gravity-folding-charge/index.html",
+  },
+  {
+    id: "dusk-subway-gravity-folding-tempo",
+    title: "Dusk Subway: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 코어를 균열 없이 슬롯까지 운반",
+    thumbnail: "./dusk-subway-gravity-folding-tempo/thumbnail.png",
+    path: "./dusk-subway-gravity-folding-tempo/index.html",
   }
 ];
