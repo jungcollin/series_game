@@ -621,6 +621,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./pottery-spin/index.html",
   },
   {
+    id: "origami-master",
+    title: "접기의 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Swipe matching",
+    clearCondition: "종이접기 5작품 완성",
+    thumbnail: "./origami-master/thumbnail.png",
+    path: "./origami-master/index.html",
+  },
+  {
     id: "ice-sculptor",
     title: "얼음 조각가",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
