@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "moon-greenhouse-tide-anchoring-shrink",
+    title: "Moon Greenhouse: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./moon-greenhouse-tide-anchoring-shrink/thumbnail.png",
+    path: "./moon-greenhouse-tide-anchoring-shrink/index.html",
+  },
+  {
     id: "glass-aquarium-shadow-stitch-collapse",
     title: "Glass Aquarium: Shadow Stitch",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
