@@ -565,5 +565,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
     thumbnail: "./paper-temple-magnet-braiding-heat/thumbnail.png",
     path: "./paper-temple-magnet-braiding-heat/index.html",
+  },
+  {
+    id: "midnight-harbor-debt-auction-shrink",
+    title: "Midnight Harbor: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./midnight-harbor-debt-auction-shrink/thumbnail.png",
+    path: "./midnight-harbor-debt-auction-shrink/index.html",
   }
 ];
