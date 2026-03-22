@@ -104,14 +104,12 @@ function ensureBranch(repoRoot, stageSlug) {
 }
 
 function detectUpstreamRepo(repoRoot) {
-  // Check if 'upstream' remote exists (fork workflow)
   try {
     const upstreamUrl = run("git", ["remote", "get-url", "upstream"], repoRoot);
     return parseRepoFullName(upstreamUrl);
   } catch (_err) {
-    // No upstream remote = working on the original repo directly
+    return null;
   }
-  return null;
 }
 
 function getOriginRepo(repoRoot) {
@@ -173,6 +171,47 @@ function findExistingPr(repoRoot, repositoryFullName, branch, headOwner) {
   };
 }
 
+function readPrStatus(repoRoot, repositoryFullName, prRef) {
+  return JSON.parse(
+    run(
+      "gh",
+      [
+        "pr",
+        "view",
+        String(prRef),
+        "--repo",
+        repositoryFullName,
+        "--json",
+        "number,url,state,mergeStateStatus,autoMergeRequest",
+      ],
+      repoRoot
+    )
+  );
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function enableAutoMerge(repoRoot, repositoryFullName, prRef) {
+  try {
+    run(
+      "gh",
+      ["pr", "merge", String(prRef), "--repo", repositoryFullName, "--auto", "--squash"],
+      repoRoot
+    );
+  } catch (_error) {
+    // gh may return non-zero even when auto-merge is already enabled.
+  }
+
+  let status = readPrStatus(repoRoot, repositoryFullName, prRef);
+  for (let attempt = 0; attempt < 5 && !status.autoMergeRequest; attempt += 1) {
+    sleep(400 * (attempt + 1));
+    status = readPrStatus(repoRoot, repositoryFullName, prRef);
+  }
+  return status;
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
@@ -191,7 +230,6 @@ function main() {
 
   syncRegistry(repoRoot);
 
-  // Run check
   const checkOutput = run(
     "node",
     ["relay-tools/scripts/check_stage.js", "--stage", stageMeta.id, "--base-url", baseUrl],
@@ -219,10 +257,10 @@ function main() {
     `- \`node relay-tools/scripts/check_stage.js --stage ${stageMeta.id}\``,
   ].join("\n");
 
-  // --pr implies --commit and --push, then creates a GitHub PR
   const doPr = Boolean(args.pr);
   const doCommit = doPr || Boolean(args.commit);
   const doPush = doPr || Boolean(args.push);
+  const doAutoMerge = Boolean(args["auto-merge"]);
 
   let branch = "";
   let committed = false;
@@ -232,8 +270,13 @@ function main() {
   let prAction = "not_requested";
   let existingPr = null;
   let previousPr = null;
+  let autoMergeEnabled = false;
+  let autoMergeState = null;
 
-  // Detect fork vs direct workflow
+  if (doAutoMerge && !doPr) {
+    throw new Error("--auto-merge requires --pr.");
+  }
+
   const upstreamRepo = detectUpstreamRepo(repoRoot);
   const originRepo = getOriginRepo(repoRoot);
   const originOwner = getOriginOwner(repoRoot);
@@ -256,7 +299,6 @@ function main() {
     if (!branch || branch === "HEAD") {
       throw new Error("Cannot push from detached HEAD.");
     }
-    // Always push to origin (which is the fork for forked repos)
     run("git", ["push", "-u", "origin", branch], repoRoot);
     pushed = true;
   }
@@ -299,6 +341,15 @@ function main() {
       prUrl = ghOutput.trim();
       prAction = previousPr ? "created_after_closed_pr" : "created_new";
     }
+
+    if (doAutoMerge) {
+      const prRef = existingPr?.number ? String(existingPr.number) : prUrl;
+      autoMergeState = enableAutoMerge(repoRoot, targetRepo, prRef);
+      autoMergeEnabled = Boolean(autoMergeState?.autoMergeRequest);
+      if (!autoMergeEnabled) {
+        throw new Error(`Auto-merge was requested but is not enabled for PR: ${prUrl}`);
+      }
+    }
   }
 
   process.stdout.write(
@@ -322,6 +373,8 @@ function main() {
         existingPr,
         previousPr,
         prUrl,
+        autoMergeEnabled,
+        autoMergeState,
       },
       null,
       2
