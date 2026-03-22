@@ -104,14 +104,12 @@ function ensureBranch(repoRoot, stageSlug) {
 }
 
 function detectUpstreamRepo(repoRoot) {
-  // Check if 'upstream' remote exists (fork workflow)
   try {
     const upstreamUrl = run("git", ["remote", "get-url", "upstream"], repoRoot);
     return parseRepoFullName(upstreamUrl);
   } catch (_err) {
-    // No upstream remote = working on the original repo directly
+    return null;
   }
-  return null;
 }
 
 function getOriginRepo(repoRoot) {
@@ -203,7 +201,7 @@ function enableAutoMerge(repoRoot, repositoryFullName, prRef) {
       repoRoot
     );
   } catch (_error) {
-    // If auto-merge was already enabled, gh may still report a non-zero exit.
+    // gh may return non-zero even when auto-merge is already enabled.
   }
 
   let status = readPrStatus(repoRoot, repositoryFullName, prRef);
@@ -232,7 +230,6 @@ function main() {
 
   syncRegistry(repoRoot);
 
-  // Run check
   const checkOutput = run(
     "node",
     ["relay-tools/scripts/check_stage.js", "--stage", stageMeta.id, "--base-url", baseUrl],
@@ -260,11 +257,10 @@ function main() {
     `- \`node relay-tools/scripts/check_stage.js --stage ${stageMeta.id}\``,
   ].join("\n");
 
-  // --pr implies --commit and --push, then creates a GitHub PR
   const doPr = Boolean(args.pr);
   const doCommit = doPr || Boolean(args.commit);
   const doPush = doPr || Boolean(args.push);
-  const requestAutoMerge = Boolean(args["auto-merge"]);
+  const doAutoMerge = Boolean(args["auto-merge"]);
 
   let branch = "";
   let committed = false;
@@ -274,17 +270,13 @@ function main() {
   let prAction = "not_requested";
   let existingPr = null;
   let previousPr = null;
-  let autoMerge = {
-    requested: requestAutoMerge,
-    enabled: false,
-    status: null,
-  };
+  let autoMergeEnabled = false;
+  let autoMergeState = null;
 
-  if (requestAutoMerge && !doPr) {
+  if (doAutoMerge && !doPr) {
     throw new Error("--auto-merge requires --pr.");
   }
 
-  // Detect fork vs direct workflow
   const upstreamRepo = detectUpstreamRepo(repoRoot);
   const originRepo = getOriginRepo(repoRoot);
   const originOwner = getOriginOwner(repoRoot);
@@ -307,7 +299,6 @@ function main() {
     if (!branch || branch === "HEAD") {
       throw new Error("Cannot push from detached HEAD.");
     }
-    // Always push to origin (which is the fork for forked repos)
     run("git", ["push", "-u", "origin", branch], repoRoot);
     pushed = true;
   }
@@ -351,16 +342,11 @@ function main() {
       prAction = previousPr ? "created_after_closed_pr" : "created_new";
     }
 
-    if (requestAutoMerge) {
-      const prRef = existingPr ? String(existingPr.number) : prUrl;
-      const autoMergeStatus = enableAutoMerge(repoRoot, targetRepo, prRef);
-      autoMerge = {
-        requested: true,
-        enabled: Boolean(autoMergeStatus.autoMergeRequest),
-        status: autoMergeStatus,
-      };
-
-      if (!autoMerge.enabled) {
+    if (doAutoMerge) {
+      const prRef = existingPr?.number ? String(existingPr.number) : prUrl;
+      autoMergeState = enableAutoMerge(repoRoot, targetRepo, prRef);
+      autoMergeEnabled = Boolean(autoMergeState?.autoMergeRequest);
+      if (!autoMergeEnabled) {
         throw new Error(`Auto-merge was requested but is not enabled for PR: ${prUrl}`);
       }
     }
@@ -387,7 +373,8 @@ function main() {
         existingPr,
         previousPr,
         prUrl,
-        autoMerge,
+        autoMergeEnabled,
+        autoMergeState,
       },
       null,
       2
