@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>달빛 다리</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #1A1A3E;
+      }
+      body { display: grid; place-items: center; }
+      a, canvas { -webkit-tap-highlight-color: rgba(148,163,184,0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0,0,0,0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(15,23,42,0.92);
+        color: #f8fafc; font-weight: 800; text-decoration: none;
+        white-space: nowrap; transition: transform 0.15s ease;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        background: #1A1A3E; touch-action: manipulation;
+      }
+      canvas:focus-visible {
+        outline: 4px solid rgba(180,180,220,0.5); outline-offset: -8px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">달빛 다리. 터치로 달 위상을 바꿔 다리를 드러내고 건너세요.</p>
+    <canvas id="game" width="960" height="540" aria-label="달빛 다리" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+    (function() {
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = 960, H = 540;
+      const FIXED_DT = 1/60, MAX_DT = 1/20;
+
+      const relayContext = window.RelayRuntime?.readContext("moonlit-bridge") || {
+        history: [], clearCount: 0, previousStageId: null
+      };
+      let animFrame = 0, lastTs = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      /* ── Colors (indigo night + silver moonlight) ── */
+      const C = {
+        skyTop: "#0D0D2B", skyBot: "#1A1A3E",
+        water: "#141432", waterLight: "rgba(100,120,180,0.15)",
+        waterShimmer: "rgba(180,190,230,0.08)",
+        moon: "#E8E0D0", moonGlow: "rgba(220,210,190,",
+        bridge: "rgba(180,170,210,", bridgeSolid: "#B0A8D0",
+        player: "#D0C8E8", playerGlow: "rgba(180,170,220,0.4)",
+        cliff: "#2A2850", cliffLight: "#3A3868",
+        star: "rgba(220,220,250,",
+        hud: "#C0B8D8", cardBg: "rgba(30,30,66,0.95)",
+        success: "#90C0A0", fail: "#C07070",
+        particle: "#D0D0F0"
+      };
+
+      /* ── Moon Phases ── */
+      // 0=new, 1=crescent, 2=half, 3=gibbous, 4=full
+      const PHASES = 5;
+      const PHASE_NAMES = ["신월", "초승달", "반달", "볼록달", "보름달"];
+
+      /* ── Bridge Layout ── */
+      // Bridge segments: each belongs to a specific moon phase
+      const BRIDGE_Y = H - 160;
+      const PLAT_H = 16;
+      const START_X = 60;
+      const END_X = W - 60;
+
+      let platforms = []; // { x, w, phase, visible }
+      let playerX = 0, playerY = 0, playerVY = 0;
+      let currentPhase = 4; // start full moon
+      let onGround = false;
+
+      function generateBridge() {
+        platforms = [];
+        // Start cliff platform (always visible, phase -1)
+        platforms.push({ x: 0, w: 100, phase: -1, visible: true });
+        // End cliff platform (always visible, phase -1)
+        platforms.push({ x: W - 100, w: 100, phase: -1, visible: true });
+
+        // Bridge segments across the gap
+        const segCount = 10;
+        const gapStart = 110;
+        const gapEnd = W - 110;
+        const totalW = gapEnd - gapStart;
+        const segW = totalW / segCount;
+
+        for (let i = 0; i < segCount; i++) {
+          const phase = Math.floor(Math.random() * PHASES);
+          platforms.push({
+            x: gapStart + i * segW,
+            w: segW + 2, // slight overlap
+            phase: phase,
+            visible: false
+          });
+        }
+      }
+
+      function updateBridgeVisibility() {
+        for (const p of platforms) {
+          if (p.phase === -1) { p.visible = true; continue; }
+          p.visible = (p.phase === currentPhase);
+        }
+      }
+
+      /* ── Stars ── */
+      let stars = [];
+      function generateStars() {
+        stars = [];
+        for (let i = 0; i < 60; i++) {
+          stars.push({ x: Math.random()*W, y: Math.random()*(H*0.5), size: Math.random()*2+0.5, phase: Math.random()*Math.PI*2, speed: Math.random()*2+1 });
+        }
+      }
+
+      /* ── State ── */
+      const TIME_LIMIT = 40;
+      const GRAVITY = 600;
+
+      const st = {
+        mode: "menu", elapsed: 0, lastRunTime: 0,
+        particles: [],
+        shakeTime: 0, shakeX: 0, shakeY: 0,
+        inputLeft: false, inputRight: false,
+        waterPhase: 0,
+        phaseTransition: 0, // visual transition
+        prevPhase: 4
+      };
+
+      function lerp(a,b,t) { return a+(b-a)*Math.min(1,Math.max(0,t)); }
+      function rand(a,b) { return a+Math.random()*(b-a); }
+      function shake(d) { st.shakeTime = Math.max(st.shakeTime, d); }
+
+      function spawnParticles(x,y,n,color) {
+        for (let i=0;i<n;i++) {
+          const ang=Math.random()*Math.PI*2, spd=rand(30,100);
+          st.particles.push({x,y,vx:Math.cos(ang)*spd,vy:Math.sin(ang)*spd-rand(20,60),
+            life:rand(0.4,0.8),maxLife:rand(0.4,0.8),size:rand(2,5),color});
+        }
+      }
+
+      /* ── Phase change ── */
+      function changePhase(dir) {
+        if (st.mode !== "running") return;
+        st.prevPhase = currentPhase;
+        currentPhase = (currentPhase + dir + PHASES) % PHASES;
+        st.phaseTransition = 1;
+        updateBridgeVisibility();
+        spawnParticles(W/2, 60, 6, C.particle);
+      }
+
+      /* ── Relay Host ── */
+      function inRelayHost() {
+        try { return window.parent&&window.parent!==window&&window.parent.RelayHost; } catch(e) { return false; }
+      }
+      function reportReadyToHost() { if(!inRelayHost()) return; window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailedToHost(reason) {
+        if(!inRelayHost()||hostFailedReported) return; hostFailedReported=true;
+        window.parent.RelayHost.onStageFailed?.({stageId:"moonlit-bridge",stageTitle:"달빛 다리",reason,durationSec:+st.lastRunTime.toFixed(1)});
+      }
+      function reportClearedToHost() {
+        if(!inRelayHost()||hostClearedReported) return; hostClearedReported=true;
+        window.parent.RelayHost.onStageCleared?.({stageId:"moonlit-bridge",stageTitle:"달빛 다리",clearCountAfter:relayContext.clearCount+1,durationSec:+st.lastRunTime.toFixed(1)});
+      }
+
+      function startStage() {
+        st.mode="running"; st.elapsed=0; st.lastRunTime=0;
+        st.particles=[]; st.shakeTime=0;
+        st.inputLeft=false; st.inputRight=false;
+        st.waterPhase=0; st.phaseTransition=0;
+        currentPhase=4; st.prevPhase=4;
+        hostFailedReported=false; hostClearedReported=false;
+        window.relayStageResult.status="running";
+        generateBridge(); generateStars();
+        updateBridgeVisibility();
+        playerX = 50; playerY = BRIDGE_Y - 20; playerVY = 0; onGround = true;
+      }
+      function failStage(reason) {
+        st.mode="failed"; st.lastRunTime=st.elapsed;
+        window.relayStageResult.status="failed"; shake(0.5); reportFailedToHost(reason);
+      }
+      function clearStage() {
+        st.mode="cleared"; st.lastRunTime=st.elapsed;
+        window.relayStageResult.status="cleared";
+        spawnParticles(playerX, playerY, 25, C.particle);
+        reportClearedToHost();
+      }
+
+      /* ── Update ── */
+      function update(dt) {
+        if (st.mode !== "running") { updateEffects(dt); return; }
+        st.elapsed += dt;
+        st.waterPhase += dt;
+        st.phaseTransition = Math.max(0, st.phaseTransition - dt * 3);
+
+        // Movement
+        const speed = 160;
+        if (st.inputLeft) playerX -= speed * dt;
+        if (st.inputRight) playerX += speed * dt;
+        playerX = Math.max(15, Math.min(W - 15, playerX));
+
+        // Gravity
+        playerVY += GRAVITY * dt;
+        playerY += playerVY * dt;
+
+        // Platform collision
+        onGround = false;
+        for (const p of platforms) {
+          if (!p.visible) continue;
+          if (playerX >= p.x && playerX <= p.x + p.w) {
+            if (playerY >= BRIDGE_Y - 20 && playerY <= BRIDGE_Y + 5 && playerVY >= 0) {
+              playerY = BRIDGE_Y - 20;
+              playerVY = 0;
+              onGround = true;
+              break;
+            }
+          }
+        }
+
+        // Fall into water
+        if (playerY > BRIDGE_Y + 60) {
+          spawnParticles(playerX, BRIDGE_Y + 40, 15, C.waterLight);
+          failStage("물에 빠졌습니다");
+          return;
+        }
+
+        // Reach end
+        if (playerX > END_X - 30) {
+          clearStage(); return;
+        }
+
+        // Time limit
+        if (st.elapsed >= TIME_LIMIT) { failStage("시간 초과"); return; }
+
+        // Shake
+        if (st.shakeTime > 0) {
+          st.shakeTime -= dt;
+          st.shakeX = rand(-3,3)*(st.shakeTime/0.5);
+          st.shakeY = rand(-3,3)*(st.shakeTime/0.5);
+        } else { st.shakeX=0; st.shakeY=0; }
+
+        updateEffects(dt);
+      }
+
+      function updateEffects(dt) {
+        for (let i=st.particles.length-1;i>=0;i--) {
+          const p=st.particles[i];
+          p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=80*dt; p.life-=dt;
+          if (p.life<=0) st.particles.splice(i,1);
+        }
+      }
+
+      /* ── Render ── */
+      function render() {
+        ctx.save(); ctx.translate(st.shakeX, st.shakeY);
+        if (st.mode==="menu") { renderMenu(); ctx.restore(); return; }
+        renderGame();
+        if (st.mode==="failed") renderOverlay("실패", C.fail, ["물에 빠지면 실패", "터치하여 재시작"]);
+        if (st.mode==="cleared") renderOverlay("클리어!", C.success, ["다리를 건넜습니다!", "시간: "+st.lastRunTime.toFixed(1)+"초", "터치하여 재시작"]);
+        ctx.restore();
+      }
+
+      function renderGame() {
+        // Sky
+        const sky = ctx.createLinearGradient(0,0,0,H);
+        sky.addColorStop(0, C.skyTop); sky.addColorStop(1, C.skyBot);
+        ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+        // Stars
+        for (const s of stars) {
+          const twinkle = 0.4 + 0.6 * Math.abs(Math.sin(st.waterPhase * s.speed + s.phase));
+          ctx.fillStyle = C.star + twinkle + ")";
+          ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI*2); ctx.fill();
+        }
+
+        // Moon
+        renderMoon(W - 120, 80, 35);
+
+        // Water
+        ctx.fillStyle = C.water;
+        ctx.fillRect(0, BRIDGE_Y + PLAT_H, W, H - BRIDGE_Y - PLAT_H);
+        // Water shimmer
+        for (let i = 0; i < 8; i++) {
+          const wx = (st.waterPhase * 30 + i * 130) % (W + 100) - 50;
+          const wy = BRIDGE_Y + PLAT_H + 15 + i * 12;
+          ctx.fillStyle = C.waterShimmer;
+          ctx.fillRect(wx, wy, 60 + Math.sin(st.waterPhase + i) * 20, 2);
+        }
+
+        // Cliffs
+        ctx.fillStyle = C.cliff;
+        ctx.fillRect(0, BRIDGE_Y - 40, 100, H - BRIDGE_Y + 40);
+        ctx.fillRect(W - 100, BRIDGE_Y - 40, 100, H - BRIDGE_Y + 40);
+        ctx.fillStyle = C.cliffLight;
+        ctx.fillRect(0, BRIDGE_Y - 40, 100, 4);
+        ctx.fillRect(W - 100, BRIDGE_Y - 40, 100, 4);
+
+        // Goal marker
+        ctx.fillStyle = C.success;
+        ctx.font = "700 16px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText("🏠", W - 50, BRIDGE_Y - 50);
+
+        // Bridge platforms
+        for (const p of platforms) {
+          if (p.phase === -1) continue; // cliffs drawn separately
+          const alpha = p.visible ? 0.8 : 0.08;
+          ctx.fillStyle = C.bridge + alpha + ")";
+          ctx.fillRect(p.x, BRIDGE_Y, p.w, PLAT_H);
+          if (p.visible) {
+            ctx.fillStyle = C.bridge + "0.4)";
+            ctx.fillRect(p.x, BRIDGE_Y, p.w, 3);
+            // Phase indicator (small moon icon)
+            ctx.fillStyle = C.bridge + "0.6)";
+            ctx.font = "600 10px Trebuchet MS"; ctx.textAlign = "center";
+            ctx.fillText(PHASE_NAMES[p.phase], p.x + p.w/2, BRIDGE_Y + 12);
+          }
+        }
+
+        // Player
+        const bounce = onGround ? 0 : Math.min(playerVY * 0.02, 5);
+        ctx.fillStyle = C.playerGlow;
+        ctx.beginPath(); ctx.arc(playerX, playerY + bounce, 18, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = C.player;
+        ctx.beginPath(); ctx.arc(playerX, playerY + bounce, 12, 0, Math.PI*2); ctx.fill();
+        // Eyes
+        ctx.fillStyle = C.skyTop;
+        ctx.beginPath(); ctx.arc(playerX - 4, playerY + bounce - 2, 2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(playerX + 4, playerY + bounce - 2, 2, 0, Math.PI*2); ctx.fill();
+
+        // Moonlight beam on player
+        const beam = ctx.createRadialGradient(playerX, playerY - 10, 0, playerX, playerY - 10, 50);
+        beam.addColorStop(0, C.moonGlow + "0.08)");
+        beam.addColorStop(1, C.moonGlow + "0)");
+        ctx.fillStyle = beam;
+        ctx.fillRect(playerX - 50, playerY - 60, 100, 100);
+
+        // Particles
+        for (const p of st.particles) {
+          ctx.globalAlpha = p.life/p.maxLife; ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x,p.y,p.size*(p.life/p.maxLife),0,Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // HUD
+        const pad = 16, top = 14;
+        ctx.fillStyle = C.hud; ctx.font = "700 20px Trebuchet MS"; ctx.textAlign = "left";
+        const timeLeft = Math.max(0, TIME_LIMIT - st.elapsed);
+        ctx.fillText("⏱ " + Math.ceil(timeLeft) + "초", pad, top + 20);
+        ctx.fillText("🌙 " + PHASE_NAMES[currentPhase], pad, top + 48);
+
+        // Phase change hint
+        ctx.textAlign = "right"; ctx.font = "600 15px Trebuchet MS";
+        ctx.fillText("상단 터치: 달 변경", W - pad, top + 20);
+        ctx.fillText("하단 좌우: 이동", W - pad, top + 42);
+      }
+
+      function renderMoon(mx, my, r) {
+        // Moon glow
+        const glow = ctx.createRadialGradient(mx, my, r * 0.5, mx, my, r * 3);
+        glow.addColorStop(0, C.moonGlow + "0.2)");
+        glow.addColorStop(1, C.moonGlow + "0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(mx - r*3, my - r*3, r*6, r*6);
+
+        // Moon body
+        ctx.fillStyle = C.moon;
+        ctx.beginPath(); ctx.arc(mx, my, r, 0, Math.PI*2); ctx.fill();
+
+        // Phase shadow
+        if (currentPhase < 4) {
+          ctx.fillStyle = C.skyTop;
+          ctx.beginPath();
+          const shadowOff = (4 - currentPhase) / 4 * r * 2;
+          ctx.arc(mx + r - shadowOff, my, r * 0.95, 0, Math.PI*2);
+          ctx.fill();
+        }
+
+        // Moon craters (subtle)
+        ctx.fillStyle = "rgba(200,190,170,0.3)";
+        ctx.beginPath(); ctx.arc(mx - 8, my - 5, 5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(mx + 10, my + 8, 4, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(mx + 3, my - 12, 3, 0, Math.PI*2); ctx.fill();
+      }
+
+      function renderMenu() {
+        const sky = ctx.createLinearGradient(0,0,0,H);
+        sky.addColorStop(0, C.skyTop); sky.addColorStop(1, C.skyBot);
+        ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+        // Decorative stars
+        for (let i = 0; i < 30; i++) {
+          ctx.fillStyle = C.star + rand(0.2,0.6) + ")";
+          ctx.beginPath(); ctx.arc(rand(0,W), rand(0,H*0.6), rand(0.5,2), 0, Math.PI*2); ctx.fill();
+        }
+
+        // Moon
+        renderMoon(W/2, 100, 40);
+
+        const cw = 420, ch = 310, cx = (W-cw)/2, cy = (H-ch)/2 + 20;
+        ctx.fillStyle = C.cardBg; ctx.strokeStyle = C.bridgeSolid; ctx.lineWidth = 3;
+        rr(cx,cy,cw,ch,18); ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = C.hud; ctx.textAlign = "center";
+        ctx.font = "800 34px Trebuchet MS";
+        ctx.fillText("달빛 다리", W/2, cy + 48);
+
+        ctx.font = "500 16px Trebuchet MS";
+        ["달의 위상을 바꿔 보이지 않는","다리를 드러내고 건너세요","",
+         "🌙 조작: 터치로 달 위상 변경 및 이동",
+         "🏠 클리어: 다리를 건너 반대편에 도달하면 클리어",
+         "🌊 실패: 물에 빠지면 실패","",
+         "터치 또는 Enter로 시작"
+        ].forEach((l,i) => ctx.fillText(l, W/2, cy + 84 + i * 28));
+      }
+
+      function renderOverlay(title, color, lines) {
+        ctx.fillStyle = "rgba(26,26,62,0.65)"; ctx.fillRect(0,0,W,H);
+        const cw = 380, ch = 190, cx = (W-cw)/2, cy = (H-ch)/2;
+        ctx.fillStyle = C.cardBg; ctx.strokeStyle = color; ctx.lineWidth = 3;
+        rr(cx,cy,cw,ch,18); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = color; ctx.font = "800 30px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText(title, W/2, cy + 45);
+        ctx.fillStyle = C.hud; ctx.font = "500 17px Trebuchet MS";
+        lines.forEach((l,i) => ctx.fillText(l, W/2, cy + 82 + i * 30));
+      }
+
+      function rr(x,y,w,h,r) {
+        ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+        ctx.quadraticCurveTo(x+w,y,x+w,y+r); ctx.lineTo(x+w,y+h-r);
+        ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h);
+        ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r);
+        ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+      }
+
+      /* ── Input ── */
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (st.mode !== "running") { startStage(); return; }
+        const rect = canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) / rect.width * W;
+        const my = (e.clientY - rect.top) / rect.height * H;
+
+        // Top half: change moon phase
+        if (my < H * 0.35) {
+          if (mx < W / 2) changePhase(-1);
+          else changePhase(1);
+          return;
+        }
+
+        // Bottom half: move
+        if (mx < W / 2) st.inputLeft = true;
+        else st.inputRight = true;
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (st.mode !== "running" || e.buttons === 0) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) / rect.width * W;
+        const my = (e.clientY - rect.top) / rect.height * H;
+        if (my >= H * 0.35) {
+          st.inputLeft = mx < W / 2;
+          st.inputRight = mx >= W / 2;
+        }
+      });
+
+      canvas.addEventListener("pointerup", () => { st.inputLeft = false; st.inputRight = false; });
+      canvas.addEventListener("pointercancel", () => { st.inputLeft = false; st.inputRight = false; });
+      canvas.addEventListener("click", () => canvas.focus());
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && st.mode !== "running") { e.preventDefault(); startStage(); return; }
+        if (st.mode !== "running") return;
+        if (e.key === "ArrowLeft" || e.key === "a") st.inputLeft = true;
+        if (e.key === "ArrowRight" || e.key === "d") st.inputRight = true;
+        if (e.key === "q") changePhase(-1);
+        if (e.key === "e") changePhase(1);
+      });
+      window.addEventListener("keyup", (e) => {
+        if (e.key === "ArrowLeft" || e.key === "a") st.inputLeft = false;
+        if (e.key === "ArrowRight" || e.key === "d") st.inputRight = false;
+      });
+
+      /* ── Main Loop ── */
+      function frame(ts) {
+        const dt = lastTs ? Math.min((ts-lastTs)/1000, MAX_DT) : FIXED_DT;
+        lastTs = ts; update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode: st.mode, elapsed: +(st.elapsed.toFixed(1)),
+          moonPhase: PHASE_NAMES[currentPhase],
+          playerX: Math.round(playerX),
+          result: window.relayStageResult.status
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms=16.67) => {
+        const steps = Math.max(1, Math.round(ms/(FIXED_DT*1000)));
+        for (let i=0;i<steps;i++) update(FIXED_DT);
+        render(); return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "moonlit-bridge", title: "달빛 다리",
+        creator: "jungcollin", genre: "Phase puzzle",
+        clearCondition: "다리를 건너 반대편에 도달하면 클리어"
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() { startStage(); clearStage(); render(); },
+        forceFail() { startStage(); failStage("debug_force_fail"); render(); }
+      };
+
+      reportReadyToHost(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>잉크 번짐</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #F5F0E1;
+      }
+      body { display: grid; place-items: center; }
+      a, canvas { -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0,0,0,0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(15,23,42,0.92);
+        color: #f8fafc; font-weight: 800; text-decoration: none;
+        white-space: nowrap; transition: transform 0.15s ease;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        background: #F5F0E1; touch-action: manipulation;
+      }
+      canvas:focus-visible {
+        outline: 4px solid rgba(27,42,74,0.5); outline-offset: -8px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">잉크 번짐. 터치로 잉크 방울을 떨어뜨려 목표 영역을 채우세요.</p>
+    <canvas id="game" width="960" height="540" aria-label="잉크 번짐" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+    (function() {
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const FIXED_DT = 1/60, MAX_DT = 1/20;
+
+      const relayContext = window.RelayRuntime?.readContext("ink-spread") || {
+        history: [], clearCount: 0, previousStageId: null
+      };
+
+      let animFrame = 0, lastTs = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      /* ── Colors ── */
+      const COL = {
+        paper: "#F5F0E1", paperDark: "#E8E0CC",
+        ink: "#1B2A4A", inkLight: "#2E4068", inkAlpha: "rgba(27,42,74,",
+        target: "#D4856A", targetFill: "#C97050",
+        accent: "#8B5E3C", title: "#1B2A4A",
+        success: "#4A7C59", fail: "#B85450",
+        hud: "#5C4A3A", cardBg: "rgba(245,240,225,0.96)"
+      };
+
+      /* ── Game State ── */
+      const st = {
+        mode: "menu", elapsed: 0, lastRunTime: 0,
+        inkLeft: 7, maxInk: 7,
+        blots: [],        // { x, y, r, maxR, growing, opacity }
+        targets: [],      // { x, y, r, filled }
+        particles: [],    // { x, y, vx, vy, life, maxLife, size }
+        shakeTime: 0, shakeX: 0, shakeY: 0,
+        coverages: [],
+        clearAnim: 0,
+        levelSeed: 0
+      };
+
+      const TIME_LIMIT = 35;
+      const TARGET_COUNT = 4;
+      const FILL_THRESHOLD = 0.7;
+
+      /* ── Helpers ── */
+      function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+      function lerp(a, b, t) { return a + (b - a) * Math.min(1, Math.max(0, t)); }
+      function rand(min, max) { return min + Math.random() * (max - min); }
+
+      function shake(dur) { st.shakeTime = Math.max(st.shakeTime, dur); }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = rand(30, 120);
+          st.particles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: rand(0.3, 0.8), maxLife: rand(0.3, 0.8),
+            size: rand(2, 6), color
+          });
+        }
+      }
+
+      /* ── Level Generation ── */
+      function generateTargets() {
+        st.targets = [];
+        const margin = 100;
+        const minDist = 120;
+        for (let i = 0; i < TARGET_COUNT; i++) {
+          let tries = 0, x, y, r;
+          do {
+            x = rand(margin, W - margin);
+            y = rand(margin + 40, H - margin);
+            r = rand(40, 65);
+            tries++;
+          } while (tries < 100 && st.targets.some(t => dist(t, {x, y}) < minDist));
+          st.targets.push({ x, y, r, filled: false });
+        }
+        st.coverages = st.targets.map(() => 0);
+      }
+
+      /* ── Coverage Calculation ── */
+      function calcCoverage(target) {
+        let covered = 0;
+        const samples = 60;
+        for (let i = 0; i < samples; i++) {
+          const angle = (i / samples) * Math.PI * 2;
+          for (let d = 0; d < target.r; d += 8) {
+            const px = target.x + Math.cos(angle) * d;
+            const py = target.y + Math.sin(angle) * d;
+            for (const blot of st.blots) {
+              if (dist(blot, {x: px, y: py}) < blot.r) {
+                covered++;
+                break;
+              }
+            }
+          }
+        }
+        const total = samples * Math.ceil(target.r / 8);
+        return covered / total;
+      }
+
+      /* ── Ink Drop ── */
+      function dropInk(x, y) {
+        if (st.mode !== "running" || st.inkLeft <= 0) return;
+        st.inkLeft--;
+        const maxR = rand(55, 80);
+        st.blots.push({ x, y, r: 5, maxR, growing: true, opacity: 0.85 });
+        spawnParticles(x, y, 12, COL.ink);
+      }
+
+      /* ── Paper Texture (drawn once) ── */
+      let paperCanvas = null;
+      function createPaperTexture() {
+        paperCanvas = document.createElement("canvas");
+        paperCanvas.width = W; paperCanvas.height = H;
+        const pc = paperCanvas.getContext("2d");
+        pc.fillStyle = COL.paper;
+        pc.fillRect(0, 0, W, H);
+        // fiber lines
+        pc.strokeStyle = "rgba(200,190,170,0.3)";
+        pc.lineWidth = 0.5;
+        for (let i = 0; i < 200; i++) {
+          const sx = rand(0, W), sy = rand(0, H);
+          pc.beginPath();
+          pc.moveTo(sx, sy);
+          pc.lineTo(sx + rand(-30, 30), sy + rand(-30, 30));
+          pc.stroke();
+        }
+        // spots
+        for (let i = 0; i < 80; i++) {
+          pc.fillStyle = `rgba(190,180,160,${rand(0.05, 0.15)})`;
+          pc.beginPath();
+          pc.arc(rand(0, W), rand(0, H), rand(1, 4), 0, Math.PI * 2);
+          pc.fill();
+        }
+      }
+
+      /* ── Inlay Host ── */
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch(e) { return false; }
+      }
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+      function reportFailedToHost(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: "ink-spread", stageTitle: "잉크 번짐",
+          reason, durationSec: +st.lastRunTime.toFixed(1)
+        });
+      }
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: "ink-spread", stageTitle: "잉크 번짐",
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: +st.lastRunTime.toFixed(1)
+        });
+      }
+
+      function startStage() {
+        st.mode = "running";
+        st.elapsed = 0; st.lastRunTime = 0;
+        st.inkLeft = st.maxInk;
+        st.blots = []; st.particles = [];
+        st.shakeTime = 0; st.clearAnim = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateTargets();
+      }
+      function failStage(reason) {
+        st.mode = "failed"; st.lastRunTime = st.elapsed;
+        window.relayStageResult.status = "failed";
+        shake(0.4);
+        reportFailedToHost(reason);
+      }
+      function clearStage() {
+        st.mode = "cleared"; st.lastRunTime = st.elapsed;
+        window.relayStageResult.status = "cleared";
+        st.targets.forEach(t => spawnParticles(t.x, t.y, 20, COL.success));
+        reportClearedToHost();
+      }
+
+      /* ── Update ── */
+      function update(dt) {
+        if (st.mode !== "running") {
+          if (st.mode === "cleared") st.clearAnim += dt;
+          // particles still update
+          updateParticles(dt);
+          return;
+        }
+        st.elapsed += dt;
+
+        // Grow ink blots
+        for (const b of st.blots) {
+          if (b.growing) {
+            b.r = lerp(b.r, b.maxR, dt * 2.5);
+            if (b.r >= b.maxR * 0.98) {
+              b.r = b.maxR;
+              b.growing = false;
+            }
+          }
+        }
+
+        // Check coverage
+        let allFilled = true;
+        for (let i = 0; i < st.targets.length; i++) {
+          const cov = calcCoverage(st.targets[i]);
+          st.coverages[i] = lerp(st.coverages[i], cov, dt * 8);
+          if (cov >= FILL_THRESHOLD) {
+            st.targets[i].filled = true;
+          } else {
+            allFilled = false;
+          }
+        }
+
+        if (allFilled) { clearStage(); return; }
+
+        // Fail conditions
+        if (st.elapsed >= TIME_LIMIT) { failStage("시간 초과"); return; }
+        if (st.inkLeft <= 0 && st.blots.every(b => !b.growing)) {
+          // Wait a beat for last ink to spread
+          const lastBlot = st.blots[st.blots.length - 1];
+          if (!lastBlot || !lastBlot.growing) {
+            if (!allFilled) { failStage("잉크 소진"); return; }
+          }
+        }
+
+        // Shake update
+        if (st.shakeTime > 0) {
+          st.shakeTime -= dt;
+          st.shakeX = rand(-3, 3) * (st.shakeTime / 0.4);
+          st.shakeY = rand(-3, 3) * (st.shakeTime / 0.4);
+        } else {
+          st.shakeX = 0; st.shakeY = 0;
+        }
+
+        updateParticles(dt);
+      }
+
+      function updateParticles(dt) {
+        for (let i = st.particles.length - 1; i >= 0; i--) {
+          const p = st.particles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vx *= 0.96; p.vy *= 0.96;
+          p.life -= dt;
+          if (p.life <= 0) st.particles.splice(i, 1);
+        }
+      }
+
+      /* ── Render ── */
+      function render() {
+        ctx.save();
+        ctx.translate(st.shakeX, st.shakeY);
+
+        if (st.mode === "menu") { renderMenu(); ctx.restore(); return; }
+        if (st.mode === "failed") { renderGame(); renderFailCard(); ctx.restore(); return; }
+        if (st.mode === "cleared") { renderGame(); renderClearCard(); ctx.restore(); return; }
+
+        renderGame();
+        ctx.restore();
+      }
+
+      function renderGame() {
+        // Paper background
+        if (paperCanvas) ctx.drawImage(paperCanvas, 0, 0);
+        else { ctx.fillStyle = COL.paper; ctx.fillRect(0, 0, W, H); }
+
+        // Target areas
+        for (let i = 0; i < st.targets.length; i++) {
+          const t = st.targets[i];
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2);
+          if (t.filled) {
+            ctx.fillStyle = "rgba(74,124,89,0.2)";
+            ctx.strokeStyle = COL.success;
+          } else {
+            ctx.fillStyle = "rgba(212,133,106,0.15)";
+            ctx.strokeStyle = COL.target;
+          }
+          ctx.fill();
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([6, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.restore();
+
+          // Coverage indicator
+          if (st.mode === "running") {
+            const pct = Math.round(st.coverages[i] * 100);
+            ctx.fillStyle = t.filled ? COL.success : COL.hud;
+            ctx.font = "600 14px Trebuchet MS";
+            ctx.textAlign = "center";
+            ctx.fillText(pct + "%", t.x, t.y - t.r - 8);
+          }
+        }
+
+        // Ink blots with organic edges
+        for (const b of st.blots) {
+          const grad = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+          grad.addColorStop(0, COL.inkAlpha + "0.9)");
+          grad.addColorStop(0.6, COL.inkAlpha + "0.75)");
+          grad.addColorStop(0.85, COL.inkAlpha + "0.4)");
+          grad.addColorStop(1, COL.inkAlpha + "0)");
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          // Organic blob shape
+          const segments = 24;
+          for (let i = 0; i <= segments; i++) {
+            const angle = (i / segments) * Math.PI * 2;
+            const wobble = 1 + Math.sin(angle * 3 + b.x * 0.1) * 0.12
+                         + Math.cos(angle * 5 + b.y * 0.1) * 0.08;
+            const r = b.r * wobble;
+            const px = b.x + Math.cos(angle) * r;
+            const py = b.y + Math.sin(angle) * r;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+
+          // Inner detail
+          ctx.fillStyle = COL.inkAlpha + "0.3)";
+          ctx.beginPath();
+          ctx.arc(b.x + b.r * 0.1, b.y - b.r * 0.1, b.r * 0.3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Particles
+        for (const p of st.particles) {
+          const alpha = p.life / p.maxLife;
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // HUD
+        renderHUD();
+      }
+
+      function renderHUD() {
+        const pad = 16, top = 16;
+        // Time
+        const timeLeft = Math.max(0, TIME_LIMIT - st.elapsed);
+        ctx.fillStyle = COL.hud;
+        ctx.font = "700 22px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText("⏱ " + Math.ceil(timeLeft) + "초", pad, top + 22);
+
+        // Ink meter
+        ctx.fillText("🖋 " + st.inkLeft + "/" + st.maxInk, pad, top + 52);
+
+        // Ink bar
+        const barX = pad + 90, barY = top + 38, barW = 100, barH = 12;
+        ctx.fillStyle = COL.paperDark;
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = COL.ink;
+        ctx.fillRect(barX, barY, barW * (st.inkLeft / st.maxInk), barH);
+
+        // Targets filled
+        const filled = st.targets.filter(t => t.filled).length;
+        ctx.fillStyle = COL.hud;
+        ctx.textAlign = "right";
+        ctx.fillText("🎯 " + filled + "/" + TARGET_COUNT, W - pad, top + 22);
+      }
+
+      function renderMenu() {
+        if (paperCanvas) ctx.drawImage(paperCanvas, 0, 0);
+        else { ctx.fillStyle = COL.paper; ctx.fillRect(0, 0, W, H); }
+
+        // Decorative ink splashes
+        const deco = [[200, 150, 40], [700, 400, 35], [150, 380, 30], [780, 160, 45]];
+        for (const [dx, dy, dr] of deco) {
+          ctx.fillStyle = COL.inkAlpha + "0.12)";
+          ctx.beginPath(); ctx.arc(dx, dy, dr, 0, Math.PI*2); ctx.fill();
+        }
+
+        // Card
+        const cw = 440, ch = 320;
+        const cx = (W - cw) / 2, cy = (H - ch) / 2;
+        ctx.fillStyle = COL.cardBg;
+        ctx.strokeStyle = COL.ink;
+        ctx.lineWidth = 3;
+        roundRect(cx, cy, cw, ch, 18);
+        ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = COL.title;
+        ctx.textAlign = "center";
+        ctx.font = "800 36px Trebuchet MS";
+        ctx.fillText("잉크 번짐", W/2, cy + 52);
+
+        ctx.font = "500 16px Trebuchet MS";
+        ctx.fillStyle = COL.hud;
+        const lines = [
+          "종이 위에 잉크를 떨어뜨려",
+          "목표 영역을 채우세요",
+          "",
+          "🖋 조작: 터치로 잉크 방울 떨어뜨리기",
+          "🎯 클리어: 목표 영역 70% 이상 채우기",
+          "💀 실패: 잉크를 모두 소진하면 실패",
+          "",
+          "터치 또는 Enter로 시작"
+        ];
+        lines.forEach((l, i) => {
+          ctx.fillText(l, W/2, cy + 90 + i * 28);
+        });
+      }
+
+      function renderFailCard() {
+        ctx.fillStyle = "rgba(245,240,225,0.7)";
+        ctx.fillRect(0, 0, W, H);
+        const cw = 380, ch = 200;
+        const cx = (W-cw)/2, cy = (H-ch)/2;
+        ctx.fillStyle = COL.cardBg;
+        ctx.strokeStyle = COL.fail;
+        ctx.lineWidth = 3;
+        roundRect(cx, cy, cw, ch, 18); ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = COL.fail;
+        ctx.font = "800 32px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("실패", W/2, cy + 50);
+
+        ctx.fillStyle = COL.hud;
+        ctx.font = "500 18px Trebuchet MS";
+        const filled = st.targets.filter(t => t.filled).length;
+        ctx.fillText("채운 영역: " + filled + "/" + TARGET_COUNT, W/2, cy + 90);
+        ctx.fillText("시간: " + st.lastRunTime.toFixed(1) + "초", W/2, cy + 120);
+        ctx.font = "500 15px Trebuchet MS";
+        ctx.fillText("터치하여 재시작", W/2, cy + 165);
+      }
+
+      function renderClearCard() {
+        ctx.fillStyle = "rgba(245,240,225,0.5)";
+        ctx.fillRect(0, 0, W, H);
+        const cw = 380, ch = 200;
+        const cx = (W-cw)/2, cy = (H-ch)/2;
+        ctx.fillStyle = COL.cardBg;
+        ctx.strokeStyle = COL.success;
+        ctx.lineWidth = 3;
+        roundRect(cx, cy, cw, ch, 18); ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = COL.success;
+        ctx.font = "800 32px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("클리어!", W/2, cy + 50);
+
+        ctx.fillStyle = COL.hud;
+        ctx.font = "500 18px Trebuchet MS";
+        ctx.fillText("모든 영역을 잉크로 채웠습니다", W/2, cy + 90);
+        ctx.fillText("시간: " + st.lastRunTime.toFixed(1) + "초", W/2, cy + 120);
+        ctx.font = "500 15px Trebuchet MS";
+        ctx.fillText("터치하여 재시작", W/2, cy + 165);
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      /* ── Input ── */
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) / rect.width * W,
+          y: (clientY - rect.top) / rect.height * H
+        };
+      }
+
+      function handleTap(cx, cy) {
+        if (st.mode === "menu" || st.mode === "failed" || st.mode === "cleared") {
+          startStage(); return;
+        }
+        if (st.mode === "running") {
+          dropInk(cx, cy);
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        handleTap(pos.x, pos.y);
+      });
+      canvas.addEventListener("click", () => canvas.focus());
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (st.mode !== "running") startStage();
+        }
+      });
+
+      /* ── Main Loop ── */
+      function frame(ts) {
+        const dt = lastTs ? Math.min((ts - lastTs) / 1000, MAX_DT) : FIXED_DT;
+        lastTs = ts;
+        update(dt);
+        render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode: st.mode, elapsed: +(st.elapsed.toFixed(1)),
+          inkLeft: st.inkLeft, targetsFilled: st.targets.filter(t=>t.filled).length,
+          result: window.relayStageResult.status
+        });
+      }
+
+      /* ── Relay Contract ── */
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "ink-spread", title: "잉크 번짐",
+        creator: "jungcollin", genre: "Fluid puzzle",
+        clearCondition: "목표 영역을 잉크로 채우면 클리어"
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() { startStage(); clearStage(); render(); },
+        forceFail() { startStage(); failStage("debug_force_fail"); render(); }
+      };
+
+      createPaperTexture();
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    })();
+    </script>
+  </body>
+</html>
