@@ -619,5 +619,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 모양에 맞게 성형하면 클리어",
     thumbnail: "./pottery-spin/thumbnail.png",
     path: "./pottery-spin/index.html",
+  },
+  {
+    id: "recipe-rush",
+    title: "레시피 러시",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Sorting puzzle",
+    clearCondition: "레시피 5개를 완성하면 클리어",
+    thumbnail: "./recipe-rush/thumbnail.png",
+    path: "./recipe-rush/index.html",
   }
 ];
