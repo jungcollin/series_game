@@ -619,5 +619,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 모양에 맞게 성형하면 클리어",
     thumbnail: "./pottery-spin/thumbnail.png",
     path: "./pottery-spin/index.html",
+  },
+  {
+    id: "origami-master",
+    title: "접기의 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Swipe matching",
+    clearCondition: "종이접기 5작품 완성",
+    thumbnail: "./origami-master/thumbnail.png",
+    path: "./origami-master/index.html",
   }
 ];
