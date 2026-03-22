@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "storm-archive-shadow-stitch-combo",
+    title: "Storm Archive: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./storm-archive-shadow-stitch-combo/thumbnail.png",
+    path: "./storm-archive-shadow-stitch-combo/index.html",
+  },
+  {
     id: "crystal-foundry-orbit-herding-tempo",
     title: "Crystal Foundry: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
