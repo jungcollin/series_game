@@ -261,6 +261,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./paper-temple-gravity-folding-sync/index.html",
   },
   {
+    id: "biomech-theater-orbit-herding-inverse",
+    title: "Biomech Theater: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./biomech-theater-orbit-herding-inverse/thumbnail.png",
+    path: "./biomech-theater-orbit-herding-inverse/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
