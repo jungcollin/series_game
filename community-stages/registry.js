@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "moon-greenhouse-tide-anchoring-shrink",
+    title: "Moon Greenhouse: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./moon-greenhouse-tide-anchoring-shrink/thumbnail.png",
+    path: "./moon-greenhouse-tide-anchoring-shrink/index.html",
+  },
+  {
     id: "glass-aquarium-shadow-stitch-collapse",
     title: "Glass Aquarium: Shadow Stitch",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -430,6 +439,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "콤보를 유지하며 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
     thumbnail: "./dusk-subway-debt-auction-combo/thumbnail.png",
     path: "./dusk-subway-debt-auction-combo/index.html",
+  },
+  {
+    id: "neon-observatory-debt-auction-witness",
+    title: "Neon Observatory: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 마지막 경매를 넘기기",
+    thumbnail: "./neon-observatory-debt-auction-witness/thumbnail.png",
+    path: "./neon-observatory-debt-auction-witness/index.html",
   },
   {
     id: "moon-greenhouse-gravity-folding-combo",
