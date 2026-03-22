@@ -205,5 +205,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 운석을 피해 생존하기",
     thumbnail: "./space-meteor-run/thumbnail.png",
     path: "./space-meteor-run/index.html",
+  },
+  {
+    id: "neon-shield",
+    title: "네온 쉴드",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드 퍼즐",
+    clearCondition: "20초 동안 네온 코어 방어하기",
+    thumbnail: "./neon-shield/thumbnail.png",
+    path: "./neon-shield/index.html",
   }
 ];
