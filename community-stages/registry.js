@@ -394,5 +394,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "물고기 5마리 낚으면 클리어",
     thumbnail: "./rhythm-fishing/thumbnail.png",
     path: "./rhythm-fishing/index.html",
+  },
+  {
+    id: "crystal-garden",
+    title: "수정 정원",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Growth simulation",
+    clearCondition: "결정으로 영역을 채우면 클리어",
+    thumbnail: "./crystal-garden/thumbnail.png",
+    path: "./crystal-garden/index.html",
   }
 ];
