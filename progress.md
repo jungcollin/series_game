@@ -92,3 +92,11 @@ TODO
 - 2026-03-20: `/check-stage`를 강화해 모바일 `menu / running / failed` 스크린샷을 자동 생성하고, 모바일 가로 오버플로와 캔버스 점유율을 검사하도록 확장. `lightning-dodge`로 실검증 통과.
 - 2026-03-20: `check_host_flow.js --mobile`를 추가 확장해 메인 모바일 홈, 참여 모달, 랭킹 모달, GAME OVER 오버레이까지 자동 검증하도록 변경. `node relay-tools/scripts/check_host_flow.js --base-url http://series-game.localhost:1355 --mobile` 실검증 통과.
 - 2026-03-20: `pr_review.js`가 메인 UI 파일 변경 시 모바일 호스트 검증까지 자동 실행하도록 갱신. `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `/make-stage`, `/check-stage`, `/publish-stage`, 스테이지 템플릿도 같은 모바일 기준으로 동기화.
+- 2026-03-22: `community-stages/dream-motel-debt-auction-heat/` 초안 생성. 배치 고정 slug/branch/base URL을 사용하기로 확정.
+- 2026-03-22: `Dream Motel: Debt Auction` 구현 시작. 시간-화폐 경매, 슬롯 배치 디펜스, 과열 식히기 버튼, 모바일 드래그/롱프레스 입력을 하나의 캔버스 스테이지로 구성.
+- 2026-03-22: `dream-motel-debt-auction-heat` 구현 완료. 드림 모텔 네온 배경, 라이브 경매 카드, 슬롯 배치 디펜스, 과열 팬 버튼, 클리어/실패 연출, `forceStart/forceClear/forceFail` 디버그 경로를 추가.
+- 2026-03-22: `node relay-tools/scripts/check_stage.js --stage dream-motel-debt-auction-heat --base-url http://127.0.0.1:4781` 검증 통과. 런처/직접 실행/모바일 `menu-running-failed`/호스트 콜백/썸네일 생성까지 모두 확인.
+- 2026-03-22: Playwright 환경 플래키니스 대응으로 `check_stage.js`와 `publish_stage.js`를 보강. 브라우저 재시도, 캔버스 `toDataURL()` 썸네일 저장, `--auto-merge` 설정 및 확인 경로를 추가.
+
+TODO
+- `publish_stage.js --auto-merge`가 생성 또는 갱신한 PR에서 auto-merge가 실제로 켜졌는지 마지막에 다시 확인하기.
