@@ -403,5 +403,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "결정으로 영역을 채우면 클리어",
     thumbnail: "./crystal-garden/thumbnail.png",
     path: "./crystal-garden/index.html",
+  },
+  {
+    id: "tightrope-walk",
+    title: "줄타기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Balance action",
+    clearCondition: "줄 끝까지 도달하면 클리어",
+    thumbnail: "./tightrope-walk/thumbnail.png",
+    path: "./tightrope-walk/index.html",
   }
 ];
