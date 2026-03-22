@@ -1033,5 +1033,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "붕괴선보다 먼저 20연속 파형 반사",
     thumbnail: "./dream-motel-pulse-fencing-collapse/thumbnail.png",
     path: "./dream-motel-pulse-fencing-collapse/index.html",
+  },
+  {
+    id: "crystal-foundry-pulse-fencing-inverse",
+    title: "Crystal Foundry: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 20연속 파형을 반사하면 클리어",
+    thumbnail: "./crystal-foundry-pulse-fencing-inverse/thumbnail.png",
+    path: "./crystal-foundry-pulse-fencing-inverse/index.html",
   }
 ];
