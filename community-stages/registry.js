@@ -421,5 +421,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "방울 10개를 목표 크기로 만들면 클리어",
     thumbnail: "./bubble-artist/thumbnail.png",
     path: "./bubble-artist/index.html",
+  },
+  {
+    id: "balloon-flight",
+    title: "풍선 여행",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Swipe action",
+    clearCondition: "하늘 끝까지 도달하면 클리어",
+    thumbnail: "./balloon-flight/thumbnail.png",
+    path: "./balloon-flight/index.html",
   }
 ];
