@@ -192,6 +192,30 @@ function stageThumbnailPath(repoRoot, stageDir) {
   return path.join(repoRoot, "community-stages", stageDir, "thumbnail.png");
 }
 
+async function launchBrowserWithRetries(chromium, attempts = 3) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await chromium.launch({ headless: true });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function retryAsync(attempts, callback) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await callback(attempt);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta }) {
   await page.goto(stageUrl, { waitUntil: "networkidle" });
   await page.waitForTimeout(150);
@@ -209,8 +233,16 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
     );
 
   const startStage = async (frames) => {
-    await canvas.click({ position: { x: 24, y: 24 } }).catch(() => {});
-    await page.keyboard.press("Enter").catch(() => {});
+    const usedForceStart = await page.evaluate(() => {
+      if (typeof window.relayStageDebug?.forceStart === "function") {
+        window.relayStageDebug.forceStart();
+        return true;
+      }
+      return false;
+    }).catch(() => false);
+    if (!usedForceStart) {
+      await canvas.click({ position: { x: 24, y: 24 } }).catch(() => {});
+    }
     await page.waitForTimeout(80);
     await page.evaluate((frameCount) => {
       if (typeof window.advanceTime === "function") {
@@ -240,7 +272,15 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
   }
 
   const thumbnailPath = stageThumbnailPath(repoRoot, stageMeta.dir);
-  await canvas.screenshot({ path: thumbnailPath });
+  const dataUrl = await page.evaluate(() => {
+    const liveCanvas = document.querySelector("#game");
+    return liveCanvas instanceof HTMLCanvasElement ? liveCanvas.toDataURL("image/png") : null;
+  });
+  if (!dataUrl) {
+    throw new Error(`Canvas toDataURL failed for thumbnail capture: ${stageMeta.id}`);
+  }
+  const base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
+  fs.writeFileSync(thumbnailPath, Buffer.from(base64, "base64"));
   return thumbnailPath;
 }
 
@@ -435,7 +475,7 @@ async function main() {
 
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchBrowserWithRetries(chromium);
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   const consoleErrors = [];
   page.on("console", (msg) => {
@@ -478,12 +518,21 @@ async function main() {
     repoRoot,
     stageMeta,
   });
-  const mobileChecks = await captureMobileStageState({
-    browser,
-    stageUrl,
-    outputDir,
-    stageMeta,
-    consoleErrors,
+  await browser.close();
+
+  const mobileChecks = await retryAsync(3, async () => {
+    const mobileBrowser = await launchBrowserWithRetries(chromium);
+    try {
+      return await captureMobileStageState({
+        browser: mobileBrowser,
+        stageUrl,
+        outputDir,
+        stageMeta,
+        consoleErrors,
+      });
+    } finally {
+      await mobileBrowser.close().catch(() => {});
+    }
   });
 
   if (!launcherCount) {
@@ -514,51 +563,59 @@ async function main() {
     );
   }
 
-  const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  hostPage.on("console", (msg) => {
-    if (msg.type() === "error") {
-      consoleErrors.push(msg.text());
+  const { clearEvents, failEvents } = await retryAsync(3, async () => {
+    const hostBrowser = await launchBrowserWithRetries(chromium);
+    try {
+      const hostPage = await hostBrowser.newPage({ viewport: { width: 1280, height: 800 } });
+      hostPage.on("console", (msg) => {
+        if (msg.type() === "error") {
+          consoleErrors.push(msg.text());
+        }
+      });
+      await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
+
+      async function runHostCase(iframeId, actionName) {
+        await hostPage.evaluate(
+          ({ stageDir, iframeId }) => {
+            window.__relayHostEvents = [];
+            window.RelayHost = {
+              onStageReady(meta) {
+                window.__relayHostEvents.push({ type: "ready", meta });
+              },
+              onStageCleared(payload) {
+                window.__relayHostEvents.push({ type: "cleared", payload });
+              },
+              onStageFailed(payload) {
+                window.__relayHostEvents.push({ type: "failed", payload });
+              },
+            };
+            document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
+          },
+          { stageDir: stageMeta.dir, iframeId }
+        );
+
+        const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
+        await frame.waitForFunction(() => !!window.relayStageDebug);
+        await frame.evaluate((actionName) => {
+          window.relayStageDebug[actionName]();
+        }, actionName);
+        await hostPage.waitForTimeout(250);
+        return hostPage.evaluate(() => window.__relayHostEvents);
+      }
+
+      const clearEvents = await runHostCase("stage-clear", "forceClear");
+      const failEvents = await runHostCase("stage-fail", "forceFail");
+
+      await hostPage.screenshot({
+        path: path.join(outputDir, `${stageMeta.dir}-host.png`),
+        fullPage: true,
+      });
+
+      return { clearEvents, failEvents };
+    } finally {
+      await hostBrowser.close().catch(() => {});
     }
   });
-  await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
-
-  async function runHostCase(iframeId, actionName) {
-    await hostPage.evaluate(
-      ({ stageDir, iframeId }) => {
-        window.__relayHostEvents = [];
-        window.RelayHost = {
-          onStageReady(meta) {
-            window.__relayHostEvents.push({ type: "ready", meta });
-          },
-          onStageCleared(payload) {
-            window.__relayHostEvents.push({ type: "cleared", payload });
-          },
-          onStageFailed(payload) {
-            window.__relayHostEvents.push({ type: "failed", payload });
-          },
-        };
-        document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
-      },
-      { stageDir: stageMeta.dir, iframeId }
-    );
-
-    const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
-    await frame.waitForFunction(() => !!window.relayStageDebug);
-    await frame.evaluate((actionName) => {
-      window.relayStageDebug[actionName]();
-    }, actionName);
-    await hostPage.waitForTimeout(250);
-    return hostPage.evaluate(() => window.__relayHostEvents);
-  }
-
-  const clearEvents = await runHostCase("stage-clear", "forceClear");
-  const failEvents = await runHostCase("stage-fail", "forceFail");
-
-  await hostPage.screenshot({
-    path: path.join(outputDir, `${stageMeta.dir}-host.png`),
-    fullPage: true,
-  });
-  await browser.close();
 
   const hasClearEvent = clearEvents.some((event) => event.type === "cleared");
   const hasFailEvent = failEvents.some((event) => event.type === "failed");
@@ -602,7 +659,7 @@ async function main() {
 
 if (require.main === module) {
   main().catch((error) => {
-    process.stderr.write(`${error.message}\n`);
+    process.stderr.write(`${error?.stack || error?.message || String(error)}\n`);
     process.exit(1);
   });
 }
