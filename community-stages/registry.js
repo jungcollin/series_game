@@ -486,6 +486,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./moon-greenhouse-gravity-folding-combo/index.html",
   },
   {
+    id: "neon-observatory-tide-anchoring-tempo",
+    title: "Neon Observatory: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./neon-observatory-tide-anchoring-tempo/thumbnail.png",
+    path: "./neon-observatory-tide-anchoring-tempo/index.html",
+  },
+  {
     id: "neon-observatory-echo-weaving-collapse",
     title: "Neon Observatory: Echo Loom",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
