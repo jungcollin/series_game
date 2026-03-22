@@ -468,6 +468,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./neon-observatory-debt-auction-witness/index.html",
   },
   {
+    id: "moon-greenhouse-gravity-folding-combo",
+    title: "Moon Greenhouse: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
+    thumbnail: "./moon-greenhouse-gravity-folding-combo/thumbnail.png",
+    path: "./moon-greenhouse-gravity-folding-combo/index.html",
+  },
+  {
     id: "neon-observatory-echo-weaving-collapse",
     title: "Neon Observatory: Echo Loom",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
