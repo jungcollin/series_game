@@ -270,6 +270,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./biomech-theater-orbit-herding-inverse/index.html",
   },
   {
+    id: "dream-motel-echo-weaving-combo",
+    title: "Dream Motel: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./dream-motel-echo-weaving-combo/thumbnail.png",
+    path: "./dream-motel-echo-weaving-combo/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
