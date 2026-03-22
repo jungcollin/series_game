@@ -549,6 +549,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./neon-observatory-gravity-folding-charge/index.html",
   },
   {
+    id: "dusk-subway-orbit-herding-shrink",
+    title: "Dusk Subway: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./dusk-subway-orbit-herding-shrink/thumbnail.png",
+    path: "./dusk-subway-orbit-herding-shrink/index.html",
+  },
+  {
     id: "dusk-subway-gravity-folding-tempo",
     title: "Dusk Subway: Gravity Fold",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
