@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "paper-temple-echo-weaving-tempo",
+    title: "Paper Temple: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./paper-temple-echo-weaving-tempo/thumbnail.png",
+    path: "./paper-temple-echo-weaving-tempo/index.html",
   }
 ];
