@@ -241,5 +241,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 도형 피하기",
     thumbnail: "./shape-dodger-3/thumbnail.png",
     path: "./shape-dodger-3/index.html",
+  },
+  {
+    id: "space-meteor-run",
+    title: "우주 운석 피하기",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드 생존",
+    clearCondition: "20초 동안 운석을 피해 생존하기",
+    thumbnail: "./space-meteor-run/thumbnail.png",
+    path: "./space-meteor-run/index.html",
   }
 ];
