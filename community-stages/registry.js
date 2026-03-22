@@ -243,6 +243,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./crystal-foundry-weather-mixing-combo/index.html",
   },
   {
+    id: "crystal-foundry-tide-anchoring-heat",
+    title: "Crystal Foundry: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./crystal-foundry-tide-anchoring-heat/thumbnail.png",
+    path: "./crystal-foundry-tide-anchoring-heat/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
