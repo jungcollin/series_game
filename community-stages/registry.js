@@ -826,5 +826,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "문을 모두 맞춘 뒤 위성 3기를 순서대로 링 통과",
     thumbnail: "./midnight-harbor-orbit-herding-sync/thumbnail.png",
     path: "./midnight-harbor-orbit-herding-sync/index.html",
+  },
+  {
+    id: "crystal-foundry-gravity-folding-cursed",
+    title: "Crystal Foundry: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 저주 픽업",
+    clearCondition: "저주를 버티며 코어를 균열 없이 슬롯까지 운반",
+    thumbnail: "./crystal-foundry-gravity-folding-cursed/thumbnail.png",
+    path: "./crystal-foundry-gravity-folding-cursed/index.html",
   }
 ];
