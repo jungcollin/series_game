@@ -376,5 +376,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "축소 구간 끝까지 버티며 20연속 파형을 반사하면 클리어",
     thumbnail: "./paper-temple-pulse-fencing-shrink/thumbnail.png",
     path: "./paper-temple-pulse-fencing-shrink/index.html",
+  },
+  {
+    id: "moon-greenhouse-magnet-braiding-inverse",
+    title: "Moon Greenhouse: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./moon-greenhouse-magnet-braiding-inverse/thumbnail.png",
+    path: "./moon-greenhouse-magnet-braiding-inverse/index.html",
   }
 ];
