@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "glass-aquarium-debt-auction-tempo",
+    title: "Glass Aquarium: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 시간을 0으로 만들지 않으며 마지막 경매를 넘기면 클리어",
+    thumbnail: "./glass-aquarium-debt-auction-tempo/thumbnail.png",
+    path: "./glass-aquarium-debt-auction-tempo/index.html",
   }
 ];
