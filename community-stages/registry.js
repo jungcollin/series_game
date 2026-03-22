@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "dream-motel-shadow-stitch-shrink",
+    title: "Dream Motel: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./dream-motel-shadow-stitch-shrink/thumbnail.png",
+    path: "./dream-motel-shadow-stitch-shrink/index.html",
   }
 ];
