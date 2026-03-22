@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "moon-greenhouse-pulse-fencing-witness",
+    title: "Moon Greenhouse: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 20연속 파형을 반사하면 클리어",
+    thumbnail: "./moon-greenhouse-pulse-fencing-witness/thumbnail.png",
+    path: "./moon-greenhouse-pulse-fencing-witness/index.html",
   }
 ];
