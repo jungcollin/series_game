@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "dusk-subway-shadow-stitch-cursed",
+    title: "Dusk Subway: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 저주 픽업",
+    clearCondition: "저주를 버티며 4개 제단을 모두 점등",
+    thumbnail: "./dusk-subway-shadow-stitch-cursed/thumbnail.png",
+    path: "./dusk-subway-shadow-stitch-cursed/index.html",
+  },
+  {
     id: "biomech-theater-tide-anchoring-sync",
     title: "Biomech Theater: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
