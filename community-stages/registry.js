@@ -781,5 +781,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "동기화 문을 모두 맞춘 뒤 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./crystal-foundry-shadow-stitch-sync/thumbnail.png",
     path: "./crystal-foundry-shadow-stitch-sync/index.html",
+  },
+  {
+    id: "storm-archive-orbit-herding-heat",
+    title: "Storm Archive: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./storm-archive-orbit-herding-heat/thumbnail.png",
+    path: "./storm-archive-orbit-herding-heat/index.html",
   }
 ];
