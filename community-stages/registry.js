@@ -448,5 +448,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 마지막 경매를 넘기기",
     thumbnail: "./neon-observatory-debt-auction-witness/thumbnail.png",
     path: "./neon-observatory-debt-auction-witness/index.html",
+  },
+  {
+    id: "neon-observatory-magnet-braiding-shrink",
+    title: "Neon Observatory: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./neon-observatory-magnet-braiding-shrink/thumbnail.png",
+    path: "./neon-observatory-magnet-braiding-shrink/index.html",
   }
 ];
