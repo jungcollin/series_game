@@ -511,5 +511,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "무대 끝까지 도달하면 클리어",
     thumbnail: "./shadow-dance/thumbnail.png",
     path: "./shadow-dance/index.html",
+  },
+  {
+    id: "wave-surfer",
+    title: "파도 서핑",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Wave riding",
+    clearCondition: "파도 8개를 성공적으로 타면 클리어",
+    thumbnail: "./wave-surfer/thumbnail.png",
+    path: "./wave-surfer/index.html",
   }
 ];
