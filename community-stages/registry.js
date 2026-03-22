@@ -313,5 +313,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "템포 창을 놓치지 않고 20연속 파형을 반사하면 클리어",
     thumbnail: "./midnight-harbor-pulse-fencing-tempo/thumbnail.png",
     path: "./midnight-harbor-pulse-fencing-tempo/index.html",
+  },
+  {
+    id: "glass-aquarium-orbit-herding-witness",
+    title: "Glass Aquarium: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./glass-aquarium-orbit-herding-witness/thumbnail.png",
+    path: "./glass-aquarium-orbit-herding-witness/index.html",
   }
 ];
