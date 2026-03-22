@@ -160,5 +160,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "출구에 도달하면 클리어",
     thumbnail: "./sound-maze/thumbnail.png",
     path: "./sound-maze/index.html",
+  },
+  {
+    id: "candle-guard",
+    title: "촛불 지키기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Protection action",
+    clearCondition: "촛불을 30초 동안 지키면 클리어",
+    thumbnail: "./candle-guard/thumbnail.png",
+    path: "./candle-guard/index.html",
   }
 ];

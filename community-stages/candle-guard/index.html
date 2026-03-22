@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>촛불 지키기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #2C2218;
+      }
+      body { display: grid; place-items: center; }
+      a, canvas { -webkit-tap-highlight-color: rgba(148,163,184,0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0,0,0,0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(15,23,42,0.92);
+        color: #f8fafc; font-weight: 800; text-decoration: none;
+        white-space: nowrap; transition: transform 0.15s ease;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        background: #2C2218; touch-action: manipulation;
+      }
+      canvas:focus-visible {
+        outline: 4px solid rgba(230,170,80,0.5); outline-offset: -8px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">촛불 지키기. 터치로 바람막이를 이동해 촛불을 지키세요.</p>
+    <canvas id="game" width="960" height="540" aria-label="촛불 지키기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+    (function() {
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = 960, H = 540;
+      const FIXED_DT = 1/60, MAX_DT = 1/20;
+
+      const relayContext = window.RelayRuntime?.readContext("candle-guard") || {
+        history: [], clearCount: 0, previousStageId: null
+      };
+      let animFrame = 0, lastTs = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      /* ── Colors (warm amber palette) ── */
+      const C = {
+        bgTop: "#3D2E1E", bgBot: "#2C2218",
+        floor: "#4A3828", floorLight: "#5A4838",
+        candle: "#E8C870", candleBody: "#F0E8D0", candleStroke: "#C4A860",
+        flame: "#FFB830", flameInner: "#FFE080", flameOuter: "#FF8820",
+        shield: "#8B6A48", shieldLight: "#A88060", shieldStroke: "#6A5038",
+        wind: "rgba(180,200,220,", windLine: "rgba(200,220,240,0.3)",
+        glow: "rgba(255,180,50,",
+        hud: "#E8D0A0", cardBg: "rgba(60,46,30,0.95)",
+        success: "#A0C878", fail: "#D06050",
+        particle: "#FFD060"
+      };
+
+      /* ── State ── */
+      const DURATION = 30;
+
+      const st = {
+        mode: "menu", elapsed: 0, lastRunTime: 0,
+        // Candle
+        candleX: W/2, candleY: H - 130,
+        flameHealth: 100, // 0 = out
+        flameSway: 0, flameSize: 1,
+        flameFlicker: 0,
+        // Shield (wind blocker)
+        shieldAngle: 0, // angle around candle (radians), 0 = right
+        shieldTargetAngle: 0,
+        shieldDist: 80,
+        // Wind gusts
+        gusts: [], // { angle, speed, timer, maxTimer, width }
+        gustTimer: 0,
+        gustInterval: 2.5,
+        // Particles
+        particles: [],
+        // Screen effects
+        shakeTime: 0, shakeX: 0, shakeY: 0,
+        // Ambient particles (floating embers)
+        embers: [],
+        // Difficulty
+        difficulty: 1
+      };
+
+      function lerp(a,b,t) { return a+(b-a)*Math.min(1,Math.max(0,t)); }
+      function rand(a,b) { return a+Math.random()*(b-a); }
+      function shake(d) { st.shakeTime = Math.max(st.shakeTime, d); }
+
+      function angleDiff(a, b) {
+        let d = b - a;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        return d;
+      }
+
+      function spawnParticles(x,y,n,color) {
+        for (let i=0;i<n;i++) {
+          const ang=Math.random()*Math.PI*2, spd=rand(20,80);
+          st.particles.push({x,y,vx:Math.cos(ang)*spd,vy:Math.sin(ang)*spd-rand(30,60),
+            life:rand(0.4,0.8),maxLife:rand(0.4,0.8),size:rand(2,5),color});
+        }
+      }
+
+      function initEmbers() {
+        st.embers = [];
+        for (let i = 0; i < 15; i++) {
+          st.embers.push({
+            x: rand(0, W), y: rand(0, H),
+            vx: rand(-10, 10), vy: rand(-30, -10),
+            size: rand(1, 3), alpha: rand(0.2, 0.5),
+            phase: rand(0, Math.PI * 2)
+          });
+        }
+      }
+
+      /* ── Wind Gusts ── */
+      function spawnGust() {
+        const angle = rand(0, Math.PI * 2);
+        const speed = rand(1.5, 3) * st.difficulty;
+        const duration = rand(1.5, 3);
+        const width = rand(0.4, 0.8); // angular width
+        st.gusts.push({ angle, speed, timer: duration, maxTimer: duration, width });
+      }
+
+      function isShieldBlocking(gustAngle, gustWidth) {
+        const diff = Math.abs(angleDiff(st.shieldAngle, gustAngle));
+        return diff < (gustWidth / 2 + 0.3); // shield covers ~0.3 rad
+      }
+
+      /* ── Relay Host ── */
+      function inRelayHost() {
+        try { return window.parent&&window.parent!==window&&window.parent.RelayHost; } catch(e) { return false; }
+      }
+      function reportReadyToHost() { if(!inRelayHost()) return; window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailedToHost(reason) {
+        if(!inRelayHost()||hostFailedReported) return; hostFailedReported=true;
+        window.parent.RelayHost.onStageFailed?.({stageId:"candle-guard",stageTitle:"촛불 지키기",reason,durationSec:+st.lastRunTime.toFixed(1)});
+      }
+      function reportClearedToHost() {
+        if(!inRelayHost()||hostClearedReported) return; hostClearedReported=true;
+        window.parent.RelayHost.onStageCleared?.({stageId:"candle-guard",stageTitle:"촛불 지키기",clearCountAfter:relayContext.clearCount+1,durationSec:+st.lastRunTime.toFixed(1)});
+      }
+
+      function startStage() {
+        st.mode="running"; st.elapsed=0; st.lastRunTime=0;
+        st.flameHealth=100; st.flameSway=0; st.flameSize=1; st.flameFlicker=0;
+        st.shieldAngle=0; st.shieldTargetAngle=0;
+        st.gusts=[]; st.particles=[];
+        st.gustTimer=1.5; st.gustInterval=2.5; st.difficulty=1;
+        st.shakeTime=0;
+        hostFailedReported=false; hostClearedReported=false;
+        window.relayStageResult.status="running";
+        initEmbers();
+      }
+      function failStage(reason) {
+        st.mode="failed"; st.lastRunTime=st.elapsed;
+        window.relayStageResult.status="failed"; shake(0.5); reportFailedToHost(reason);
+      }
+      function clearStage() {
+        st.mode="cleared"; st.lastRunTime=st.elapsed;
+        window.relayStageResult.status="cleared";
+        spawnParticles(st.candleX, st.candleY - 60, 30, C.particle);
+        reportClearedToHost();
+      }
+
+      /* ── Update ── */
+      function update(dt) {
+        if (st.mode !== "running") { updateEffects(dt); return; }
+        st.elapsed += dt;
+        st.flameFlicker += dt * 12;
+
+        // Difficulty ramp
+        st.difficulty = 1 + st.elapsed / DURATION * 1.5;
+        st.gustInterval = Math.max(0.8, 2.5 - st.elapsed / DURATION * 1.5);
+
+        // Shield lerp
+        st.shieldAngle = lerp(st.shieldAngle, st.shieldTargetAngle, dt * 10);
+        // Normalize
+        while (st.shieldAngle > Math.PI) st.shieldAngle -= Math.PI * 2;
+        while (st.shieldAngle < -Math.PI) st.shieldAngle += Math.PI * 2;
+
+        // Spawn gusts
+        st.gustTimer -= dt;
+        if (st.gustTimer <= 0) {
+          spawnGust();
+          st.gustTimer = st.gustInterval;
+          // Sometimes double gust
+          if (st.elapsed > 15 && Math.random() < 0.3) {
+            setTimeout(() => { if(st.mode==="running") spawnGust(); }, 400);
+          }
+        }
+
+        // Update gusts
+        let totalWindForce = 0;
+        let totalWindAngle = 0;
+        for (let i = st.gusts.length - 1; i >= 0; i--) {
+          const g = st.gusts[i];
+          g.timer -= dt;
+          if (g.timer <= 0) { st.gusts.splice(i, 1); continue; }
+
+          const intensity = Math.sin((1 - g.timer / g.maxTimer) * Math.PI); // peak in middle
+          if (!isShieldBlocking(g.angle, g.width)) {
+            totalWindForce += g.speed * intensity;
+            totalWindAngle = g.angle;
+          }
+        }
+
+        // Apply wind to flame
+        if (totalWindForce > 0) {
+          st.flameHealth -= totalWindForce * dt * 12;
+          st.flameSway = lerp(st.flameSway, Math.cos(totalWindAngle) * totalWindForce * 0.3, dt * 5);
+          st.flameSize = lerp(st.flameSize, Math.max(0.3, 1 - totalWindForce * 0.15), dt * 8);
+        } else {
+          // Recovery
+          st.flameHealth = Math.min(100, st.flameHealth + dt * 8);
+          st.flameSway = lerp(st.flameSway, 0, dt * 4);
+          st.flameSize = lerp(st.flameSize, 1, dt * 3);
+        }
+
+        // Check fail
+        if (st.flameHealth <= 0) { failStage("촛불이 꺼졌습니다"); return; }
+
+        // Check clear
+        if (st.elapsed >= DURATION) { clearStage(); return; }
+
+        // Shake on low health
+        if (st.flameHealth < 30) shake(0.1);
+
+        if (st.shakeTime > 0) {
+          st.shakeTime -= dt;
+          st.shakeX = rand(-2,2)*(st.shakeTime/0.5);
+          st.shakeY = rand(-2,2)*(st.shakeTime/0.5);
+        } else { st.shakeX=0; st.shakeY=0; }
+
+        // Embers
+        for (const e of st.embers) {
+          e.x += e.vx * dt; e.y += e.vy * dt;
+          e.phase += dt * 2;
+          e.x += Math.sin(e.phase) * 5 * dt;
+          if (e.y < -10) { e.y = H + 10; e.x = rand(0, W); }
+          if (e.x < -10) e.x = W + 10;
+          if (e.x > W + 10) e.x = -10;
+        }
+
+        updateEffects(dt);
+      }
+
+      function updateEffects(dt) {
+        for (let i=st.particles.length-1;i>=0;i--) {
+          const p=st.particles[i];
+          p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy-=20*dt; p.life-=dt;
+          if (p.life<=0) st.particles.splice(i,1);
+        }
+      }
+
+      /* ── Render ── */
+      function render() {
+        ctx.save(); ctx.translate(st.shakeX, st.shakeY);
+        if (st.mode==="menu") { renderMenu(); ctx.restore(); return; }
+        renderGame();
+        if (st.mode==="failed") renderOverlay("실패", C.fail, ["촛불이 꺼지면 실패", "터치하여 재시작"]);
+        if (st.mode==="cleared") renderOverlay("클리어!", C.success, ["촛불을 끝까지 지켰습니다!", "시간: "+st.lastRunTime.toFixed(1)+"초", "터치하여 재시작"]);
+        ctx.restore();
+      }
+
+      function renderGame() {
+        // Background gradient
+        const bg = ctx.createLinearGradient(0, 0, 0, H);
+        bg.addColorStop(0, C.bgTop); bg.addColorStop(1, C.bgBot);
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+        // Floor
+        ctx.fillStyle = C.floor; ctx.fillRect(0, H - 60, W, 60);
+        ctx.fillStyle = C.floorLight;
+        ctx.fillRect(0, H - 60, W, 2);
+
+        // Ambient glow from candle
+        const glowR = 180 * st.flameSize;
+        const glow = ctx.createRadialGradient(st.candleX, st.candleY - 40, 0, st.candleX, st.candleY - 40, glowR);
+        glow.addColorStop(0, C.glow + "0.15)");
+        glow.addColorStop(0.5, C.glow + "0.06)");
+        glow.addColorStop(1, C.glow + "0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, W, H);
+
+        // Embers
+        for (const e of st.embers) {
+          ctx.globalAlpha = e.alpha * (0.5 + 0.5 * Math.sin(e.phase));
+          ctx.fillStyle = C.particle;
+          ctx.beginPath(); ctx.arc(e.x, e.y, e.size, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // Wind gusts (visual)
+        for (const g of st.gusts) {
+          const intensity = Math.sin((1 - g.timer / g.maxTimer) * Math.PI);
+          const fromX = st.candleX + Math.cos(g.angle) * 250;
+          const fromY = st.candleY - 40 + Math.sin(g.angle) * 250;
+          ctx.strokeStyle = C.wind + (intensity * 0.3) + ")";
+          ctx.lineWidth = 2;
+          for (let j = 0; j < 5; j++) {
+            const off = (j - 2) * 15;
+            const ox = Math.sin(g.angle) * off;
+            const oy = -Math.cos(g.angle) * off;
+            ctx.beginPath();
+            ctx.moveTo(fromX + ox, fromY + oy);
+            const toX = st.candleX + Math.cos(g.angle) * 50;
+            const toY = st.candleY - 40 + Math.sin(g.angle) * 50;
+            ctx.lineTo(toX + ox, toY + oy);
+            ctx.stroke();
+          }
+          // Arrow indicator at edge
+          const indR = 130;
+          const indX = st.candleX + Math.cos(g.angle) * indR;
+          const indY = st.candleY - 40 + Math.sin(g.angle) * indR;
+          ctx.fillStyle = C.wind + (intensity * 0.6) + ")";
+          ctx.beginPath();
+          ctx.arc(indX, indY, 6 + intensity * 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Candle body
+        const cx = st.candleX, cy = st.candleY;
+        ctx.fillStyle = C.candleBody;
+        ctx.strokeStyle = C.candleStroke; ctx.lineWidth = 2;
+        rr(cx - 12, cy - 40, 24, 50, 4); ctx.fill(); ctx.stroke();
+        // Candle base
+        ctx.fillStyle = C.candleStroke;
+        rr(cx - 18, cy + 8, 36, 10, 3); ctx.fill();
+        // Wick
+        ctx.strokeStyle = "#4A3A2A"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(cx, cy - 40); ctx.lineTo(cx + st.flameSway * 8, cy - 50); ctx.stroke();
+
+        // Flame
+        if (st.flameHealth > 0) {
+          const fh = 30 * st.flameSize * (st.flameHealth / 100);
+          const fw = 12 * st.flameSize;
+          const fx = cx + st.flameSway * 20;
+          const fy = cy - 50;
+          const flicker = Math.sin(st.flameFlicker) * 2 + Math.sin(st.flameFlicker * 1.7) * 1.5;
+
+          // Outer flame
+          ctx.fillStyle = C.flameOuter;
+          ctx.beginPath();
+          ctx.moveTo(fx - fw, fy);
+          ctx.quadraticCurveTo(fx - fw * 0.5, fy - fh * 0.6, fx + flicker, fy - fh);
+          ctx.quadraticCurveTo(fx + fw * 0.5, fy - fh * 0.6, fx + fw, fy);
+          ctx.closePath(); ctx.fill();
+
+          // Inner flame
+          ctx.fillStyle = C.flameInner;
+          ctx.beginPath();
+          ctx.moveTo(fx - fw * 0.5, fy);
+          ctx.quadraticCurveTo(fx - fw * 0.3, fy - fh * 0.5, fx + flicker * 0.5, fy - fh * 0.7);
+          ctx.quadraticCurveTo(fx + fw * 0.3, fy - fh * 0.5, fx + fw * 0.5, fy);
+          ctx.closePath(); ctx.fill();
+
+          // Point glow
+          const pg = ctx.createRadialGradient(fx, fy - fh * 0.3, 0, fx, fy - fh * 0.3, fh);
+          pg.addColorStop(0, C.glow + "0.25)");
+          pg.addColorStop(1, C.glow + "0)");
+          ctx.fillStyle = pg;
+          ctx.fillRect(fx - fh, fy - fh * 1.5, fh * 2, fh * 2);
+        }
+
+        // Shield
+        const sx = st.candleX + Math.cos(st.shieldAngle) * st.shieldDist;
+        const sy = (st.candleY - 40) + Math.sin(st.shieldAngle) * st.shieldDist;
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(st.shieldAngle + Math.PI / 2);
+        ctx.fillStyle = C.shield;
+        ctx.strokeStyle = C.shieldStroke; ctx.lineWidth = 2;
+        rr(-20, -6, 40, 12, 4); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = C.shieldLight;
+        rr(-16, -4, 32, 3, 2); ctx.fill();
+        ctx.restore();
+
+        // Particles
+        for (const p of st.particles) {
+          ctx.globalAlpha = p.life/p.maxLife; ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x,p.y,p.size*(p.life/p.maxLife),0,Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // HUD
+        const pad = 16, top = 14;
+        ctx.fillStyle = C.hud; ctx.font = "700 20px Trebuchet MS"; ctx.textAlign = "left";
+        const timeLeft = Math.max(0, DURATION - st.elapsed);
+        ctx.fillText("⏱ " + Math.ceil(timeLeft) + "초", pad, top + 20);
+
+        // Health bar
+        ctx.fillText("🕯", pad, top + 48);
+        const barX = pad + 30, barY = top + 36, barW = 100, barH = 14;
+        ctx.fillStyle = "rgba(80,60,40,0.6)";
+        rr(barX, barY, barW, barH, 7); ctx.fill();
+        const hp = st.flameHealth / 100;
+        ctx.fillStyle = hp > 0.3 ? C.flame : C.fail;
+        rr(barX, barY, barW * hp, barH, 7); ctx.fill();
+      }
+
+      function renderMenu() {
+        const bg = ctx.createLinearGradient(0,0,0,H);
+        bg.addColorStop(0, C.bgTop); bg.addColorStop(1, C.bgBot);
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+        // Decorative candle glow
+        const glow = ctx.createRadialGradient(W/2, H/2+50, 0, W/2, H/2+50, 200);
+        glow.addColorStop(0, C.glow+"0.1)"); glow.addColorStop(1, C.glow+"0)");
+        ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+
+        const cw = 420, ch = 310, cx = (W-cw)/2, cy = (H-ch)/2;
+        ctx.fillStyle = C.cardBg; ctx.strokeStyle = C.candle; ctx.lineWidth = 3;
+        rr(cx,cy,cw,ch,18); ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = C.hud; ctx.textAlign = "center";
+        ctx.font = "800 34px Trebuchet MS";
+        ctx.fillText("촛불 지키기", W/2, cy + 48);
+
+        ctx.font = "500 16px Trebuchet MS";
+        ["바람으로부터 촛불을 지켜","끝까지 태우세요","",
+         "🛡 조작: 터치로 바람막이 이동",
+         "🕯 클리어: 촛불을 30초 동안 지키면 클리어",
+         "💨 실패: 촛불이 꺼지면 실패","",
+         "터치 또는 Enter로 시작"
+        ].forEach((l,i) => ctx.fillText(l, W/2, cy + 84 + i * 28));
+      }
+
+      function renderOverlay(title, color, lines) {
+        ctx.fillStyle = "rgba(44,34,24,0.65)"; ctx.fillRect(0,0,W,H);
+        const cw = 380, ch = 190, cx = (W-cw)/2, cy = (H-ch)/2;
+        ctx.fillStyle = C.cardBg; ctx.strokeStyle = color; ctx.lineWidth = 3;
+        rr(cx,cy,cw,ch,18); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = color; ctx.font = "800 30px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText(title, W/2, cy + 45);
+        ctx.fillStyle = C.hud; ctx.font = "500 17px Trebuchet MS";
+        lines.forEach((l,i) => ctx.fillText(l, W/2, cy + 82 + i * 30));
+      }
+
+      function rr(x,y,w,h,r) {
+        ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+        ctx.quadraticCurveTo(x+w,y,x+w,y+r); ctx.lineTo(x+w,y+h-r);
+        ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h);
+        ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r);
+        ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+      }
+
+      /* ── Input ── */
+      function updateShieldFromPointer(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        const mx = (clientX - rect.left) / rect.width * W;
+        const my = (clientY - rect.top) / rect.height * H;
+        const dx = mx - st.candleX;
+        const dy = my - (st.candleY - 40);
+        st.shieldTargetAngle = Math.atan2(dy, dx);
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (st.mode !== "running") { startStage(); return; }
+        updateShieldFromPointer(e.clientX, e.clientY);
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (st.mode !== "running" || e.buttons === 0) return;
+        updateShieldFromPointer(e.clientX, e.clientY);
+      });
+      canvas.addEventListener("click", () => canvas.focus());
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && st.mode !== "running") { e.preventDefault(); startStage(); return; }
+        if (st.mode !== "running") return;
+        if (e.key === "ArrowLeft" || e.key === "a") { e.preventDefault(); st.shieldTargetAngle -= 0.3; }
+        if (e.key === "ArrowRight" || e.key === "d") { e.preventDefault(); st.shieldTargetAngle += 0.3; }
+      });
+
+      /* ── Main Loop ── */
+      function frame(ts) {
+        const dt = lastTs ? Math.min((ts-lastTs)/1000, MAX_DT) : FIXED_DT;
+        lastTs = ts; update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode: st.mode, elapsed: +(st.elapsed.toFixed(1)),
+          flameHealth: Math.round(st.flameHealth),
+          shieldAngle: +(st.shieldAngle.toFixed(2)),
+          result: window.relayStageResult.status
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms=16.67) => {
+        const steps = Math.max(1, Math.round(ms/(FIXED_DT*1000)));
+        for (let i=0;i<steps;i++) update(FIXED_DT);
+        render(); return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "candle-guard", title: "촛불 지키기",
+        creator: "jungcollin", genre: "Protection action",
+        clearCondition: "촛불을 30초 동안 지키면 클리어"
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() { startStage(); clearStage(); render(); },
+        forceFail() { startStage(); failStage("debug_force_fail"); render(); }
+      };
+
+      reportReadyToHost(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    })();
+    </script>
+  </body>
+</html>
