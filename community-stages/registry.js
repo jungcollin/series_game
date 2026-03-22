@@ -205,5 +205,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "동기화 문을 모두 맞춘 뒤 모든 코어 문양을 연결하면 클리어",
     thumbnail: "./glass-aquarium-echo-weaving-sync/thumbnail.png",
     path: "./glass-aquarium-echo-weaving-sync/index.html",
+  },
+  {
+    id: "midnight-harbor-echo-weaving-cursed",
+    title: "Midnight Harbor: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./midnight-harbor-echo-weaving-cursed/thumbnail.png",
+    path: "./midnight-harbor-echo-weaving-cursed/index.html",
   }
 ];
