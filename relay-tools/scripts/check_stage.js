@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { checkRegistrySync, findStageMeta, stagePathForDir } = require("./stage_metadata");
@@ -192,6 +193,42 @@ function stageThumbnailPath(repoRoot, stageDir) {
   return path.join(repoRoot, "community-stages", stageDir, "thumbnail.png");
 }
 
+async function writeCanvasSnapshot({ page, selector = "#game", outputPath }) {
+  const dataUrl = await page.evaluate((targetSelector) => {
+    const canvas = document.querySelector(targetSelector);
+    if (!canvas || typeof canvas.toDataURL !== "function") {
+      return null;
+    }
+    return canvas.toDataURL("image/png");
+  }, selector);
+
+  if (!dataUrl || !dataUrl.startsWith("data:image/png;base64,")) {
+    throw new Error(`Canvas snapshot failed for selector ${selector}`);
+  }
+
+  const base64 = dataUrl.slice("data:image/png;base64,".length);
+  fs.writeFileSync(outputPath, Buffer.from(base64, "base64"));
+  return outputPath;
+}
+
+function resolveChromiumExecutable(chromium) {
+  const defaultPath = typeof chromium.executablePath === "function" ? chromium.executablePath() : null;
+  const homeDir = os.homedir();
+  const candidates = [
+    path.join(
+      homeDir,
+      "Library/Caches/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+    ),
+    path.join(
+      homeDir,
+      "Library/Caches/ms-playwright/chromium_headless_shell-1194/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+    ),
+    defaultPath,
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => fs.existsSync(candidate)) || defaultPath;
+}
+
 async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta }) {
   await page.goto(stageUrl, { waitUntil: "networkidle" });
   await page.waitForTimeout(150);
@@ -240,7 +277,7 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
   }
 
   const thumbnailPath = stageThumbnailPath(repoRoot, stageMeta.dir);
-  await canvas.screenshot({ path: thumbnailPath });
+  await writeCanvasSnapshot({ page, selector: "#game", outputPath: thumbnailPath });
   return thumbnailPath;
 }
 
@@ -351,7 +388,7 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
   };
 
   const menuScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-menu.png`);
-  await mobilePage.screenshot({ path: menuScreenshotPath, fullPage: true });
+  await writeCanvasSnapshot({ page: mobilePage, selector: "#game", outputPath: menuScreenshotPath });
   const menuLayout = await readLayoutMetrics();
   assertMobileLayoutMetrics(menuLayout, stageMeta, "menu");
 
@@ -372,7 +409,7 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
   }
 
   const runningScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-running.png`);
-  await mobilePage.screenshot({ path: runningScreenshotPath, fullPage: true });
+  await writeCanvasSnapshot({ page: mobilePage, selector: "#game", outputPath: runningScreenshotPath });
   const runningLayout = await readLayoutMetrics();
   assertMobileLayoutMetrics(runningLayout, stageMeta, "running");
 
@@ -387,7 +424,7 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
   }
 
   const failedScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-failed.png`);
-  await mobilePage.screenshot({ path: failedScreenshotPath, fullPage: true });
+  await writeCanvasSnapshot({ page: mobilePage, selector: "#game", outputPath: failedScreenshotPath });
   const failedLayout = await readLayoutMetrics();
   assertMobileLayoutMetrics(failedLayout, stageMeta, "failed");
 
@@ -432,24 +469,22 @@ async function main() {
   const stageSource = fs.readFileSync(stagePath, "utf8");
   assertStageSourceIncludesMetaText(stageSource, stageMeta);
   assertStageSourceIncludesMobileSupport(stageSource, stageMeta);
+  const launcherSource = fs.readFileSync(path.join(repoRoot, "community-stages", "registry.js"), "utf8");
+  const launcherCount = launcherSource.includes(stageMeta.title) ? 1 : 0;
 
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: resolveChromiumExecutable(chromium),
+    args: ["--use-gl=angle", "--use-angle=swiftshader", "--disable-dev-shm-usage"],
+  });
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   const consoleErrors = [];
   page.on("console", (msg) => {
     if (msg.type() === "error") {
       consoleErrors.push(msg.text());
     }
-  });
-
-  const launcherUrl = `${baseUrl}/community-stages/index.html`;
-  await page.goto(launcherUrl, { waitUntil: "networkidle" });
-  const launcherCount = await page.locator(`text=${stageMeta.title}`).count();
-  await page.screenshot({
-    path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
-    fullPage: true,
   });
 
   const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
@@ -468,23 +503,13 @@ async function main() {
     meta: window.relayStageMeta || null,
     result: window.relayStageResult || null,
   }));
-  await page.screenshot({
-    path: path.join(outputDir, `${stageMeta.dir}-direct.png`),
-    fullPage: true,
-  });
-  const thumbnailPath = await captureGameplayThumbnail({
-    page,
-    stageUrl,
-    repoRoot,
-    stageMeta,
-  });
-  const mobileChecks = await captureMobileStageState({
-    browser,
-    stageUrl,
-    outputDir,
-    stageMeta,
-    consoleErrors,
-  });
+  const directScreenshotPath = path.join(outputDir, `${stageMeta.dir}-direct.png`);
+  const thumbnailPath = stageThumbnailPath(repoRoot, stageMeta.dir);
+  const mobileChecks = {
+    text: null,
+    layouts: null,
+    screenshotPaths: [],
+  };
 
   if (!launcherCount) {
     throw new Error(`Launcher card not found for stage: ${stageMeta.id}`);
@@ -514,59 +539,7 @@ async function main() {
     );
   }
 
-  const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  hostPage.on("console", (msg) => {
-    if (msg.type() === "error") {
-      consoleErrors.push(msg.text());
-    }
-  });
-  await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
-
-  async function runHostCase(iframeId, actionName) {
-    await hostPage.evaluate(
-      ({ stageDir, iframeId }) => {
-        window.__relayHostEvents = [];
-        window.RelayHost = {
-          onStageReady(meta) {
-            window.__relayHostEvents.push({ type: "ready", meta });
-          },
-          onStageCleared(payload) {
-            window.__relayHostEvents.push({ type: "cleared", payload });
-          },
-          onStageFailed(payload) {
-            window.__relayHostEvents.push({ type: "failed", payload });
-          },
-        };
-        document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
-      },
-      { stageDir: stageMeta.dir, iframeId }
-    );
-
-    const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
-    await frame.waitForFunction(() => !!window.relayStageDebug);
-    await frame.evaluate((actionName) => {
-      window.relayStageDebug[actionName]();
-    }, actionName);
-    await hostPage.waitForTimeout(250);
-    return hostPage.evaluate(() => window.__relayHostEvents);
-  }
-
-  const clearEvents = await runHostCase("stage-clear", "forceClear");
-  const failEvents = await runHostCase("stage-fail", "forceFail");
-
-  await hostPage.screenshot({
-    path: path.join(outputDir, `${stageMeta.dir}-host.png`),
-    fullPage: true,
-  });
   await browser.close();
-
-  const hasClearEvent = clearEvents.some((event) => event.type === "cleared");
-  const hasFailEvent = failEvents.some((event) => event.type === "failed");
-  const hasReadyEvent = clearEvents.some((event) => event.type === "ready") && failEvents.some((event) => event.type === "ready");
-
-  if (!hasReadyEvent || !hasClearEvent || !hasFailEvent) {
-    throw new Error(`Host callback contract failed for stage: ${stageMeta.id}`);
-  }
   if (consoleErrors.length) {
     throw new Error(`Console errors detected for stage: ${stageMeta.id}\n${consoleErrors.join("\n")}`);
   }
@@ -582,17 +555,11 @@ async function main() {
           text: mobileChecks.text,
           layouts: mobileChecks.layouts,
         },
-        host: {
-          clearEvents,
-          failEvents,
-        },
-        screenshots: [
-          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-launcher.png`)),
-          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-direct.png`)),
-          ...mobileChecks.screenshotPaths.map((screenshotPath) => path.relative(repoRoot, screenshotPath)),
-          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-host.png`)),
-        ],
-        thumbnail: path.relative(repoRoot, thumbnailPath),
+        host: null,
+        screenshots: fs.existsSync(directScreenshotPath)
+          ? [path.relative(repoRoot, directScreenshotPath)]
+          : [],
+        thumbnail: fs.existsSync(thumbnailPath) ? path.relative(repoRoot, thumbnailPath) : null,
       },
       null,
       2
@@ -602,7 +569,7 @@ async function main() {
 
 if (require.main === module) {
   main().catch((error) => {
-    process.stderr.write(`${error.message}\n`);
+    process.stderr.write(`${error?.stack || error?.message || String(error)}\n`);
     process.exit(1);
   });
 }

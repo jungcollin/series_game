@@ -448,5 +448,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 마지막 경매를 넘기기",
     thumbnail: "./neon-observatory-debt-auction-witness/thumbnail.png",
     path: "./neon-observatory-debt-auction-witness/index.html",
+  },
+  {
+    id: "storm-archive-pulse-fencing-sync",
+    title: "Storm Archive: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 20연속 파형을 반사하면 클리어",
+    thumbnail: "./storm-archive-pulse-fencing-sync/thumbnail.png",
+    path: "./storm-archive-pulse-fencing-sync/index.html",
   }
 ];
