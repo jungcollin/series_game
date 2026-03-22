@@ -232,5 +232,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 모든 코어 문양을 연결하면 클리어",
     thumbnail: "./moon-greenhouse-echo-weaving-heat/thumbnail.png",
     path: "./moon-greenhouse-echo-weaving-heat/index.html",
+  },
+  {
+    id: "moon-greenhouse-pulse-fencing-witness",
+    title: "Moon Greenhouse: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 20연속 파형을 반사하면 클리어",
+    thumbnail: "./moon-greenhouse-pulse-fencing-witness/thumbnail.png",
+    path: "./moon-greenhouse-pulse-fencing-witness/index.html",
   }
 ];
