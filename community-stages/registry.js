@@ -207,6 +207,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./glass-aquarium-shadow-stitch-collapse/index.html",
   },
   {
+    id: "moon-greenhouse-shadow-stitch-charge",
+    title: "Moon Greenhouse: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 제한 충전",
+    clearCondition: "충전을 남기며 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./moon-greenhouse-shadow-stitch-charge/thumbnail.png",
+    path: "./moon-greenhouse-shadow-stitch-charge/index.html",
+  },
+  {
     id: "dusk-subway-shadow-stitch-cursed",
     title: "Dusk Subway: Shadow Stitch",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -394,6 +403,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "축소 구간 끝까지 버티며 20연속 파형을 반사하면 클리어",
     thumbnail: "./paper-temple-pulse-fencing-shrink/thumbnail.png",
     path: "./paper-temple-pulse-fencing-shrink/index.html",
+  },
+  {
+    id: "dream-motel-magnet-braiding-tempo",
+    title: "Dream Motel: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./dream-motel-magnet-braiding-tempo/thumbnail.png",
+    path: "./dream-motel-magnet-braiding-tempo/index.html",
   },
   {
     id: "moon-greenhouse-magnet-braiding-inverse",
