@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "crystal-foundry-echo-weaving-shrink",
+    title: "Crystal Foundry: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./crystal-foundry-echo-weaving-shrink/thumbnail.png",
+    path: "./crystal-foundry-echo-weaving-shrink/index.html",
   }
 ];
