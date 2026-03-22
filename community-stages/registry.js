@@ -493,5 +493,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
     thumbnail: "./dream-motel-debt-auction-heat/thumbnail.png",
     path: "./dream-motel-debt-auction-heat/index.html",
+  },
+  {
+    id: "midnight-harbor-shadow-stitch-heat",
+    title: "Midnight Harbor: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./midnight-harbor-shadow-stitch-heat/thumbnail.png",
+    path: "./midnight-harbor-shadow-stitch-heat/index.html",
   }
 ];
