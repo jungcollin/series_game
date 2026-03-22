@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "paper-temple-weather-mixing-charge",
+    title: "Paper Temple: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 제한 충전",
+    clearCondition: "충전을 남기며 활공체 3개를 관측대에 모두 착륙시키기",
+    thumbnail: "./paper-temple-weather-mixing-charge/thumbnail.png",
+    path: "./paper-temple-weather-mixing-charge/index.html",
   }
 ];
