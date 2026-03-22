@@ -421,5 +421,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "방울 10개를 목표 크기로 만들면 클리어",
     thumbnail: "./bubble-artist/thumbnail.png",
     path: "./bubble-artist/index.html",
+  },
+  {
+    id: "sky-kite",
+    title: "하늘 연",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Wind navigation",
+    clearCondition: "별 12개를 수집하면 클리어",
+    thumbnail: "./sky-kite/thumbnail.png",
+    path: "./sky-kite/index.html",
   }
 ];

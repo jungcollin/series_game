@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>하늘 연</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #87CEEB; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 220, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(40, 80, 120, 0.92);
+        color: #fff; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #87CEEB; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(40, 80, 120, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">하늘 연. 화면 터치를 길게 눌러 줄을 당기면 연이 올라가고, 놓으면 바람에 흘러갑니다. 별 12개를 수집하면 클리어. 연이 땅에 떨어지면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="하늘 연" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "sky-kite",
+        title: "하늘 연",
+        description: "하늘에 연을 띄우고 바람을 타며 별을 수집하는 게임",
+        creator: "jungcollin",
+        genre: "Wind navigation",
+        clearCondition: "별 12개를 수집하면 클리어",
+        failCondition: "연이 땅에 떨어지면 실패",
+        controls: "화면 터치를 길게 눌러 줄을 당기고 놓아서 연을 조종",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        skyTop: "#5BA3D9", skyBot: "#FFF8E7",
+        grass: "#7CB668", grassDark: "#5A9A48",
+        kite: "#FF7F7F", kiteDark: "#E06060",
+        string: "#8B6914", star: "#FFD700",
+        starGlow: "rgba(255, 215, 0, 0.3)",
+        text: "#3A5A3A", textLight: "rgba(58, 90, 58, 0.6)",
+        card: "rgba(255, 252, 245, 0.95)",
+        accent: "#E06040", damage: "#C03030",
+      };
+
+      const DURATION = 35, TARGET = 12;
+      const GROUND_Y = H - 50, ANCHOR_Y = GROUND_Y - 10, ANCHOR_X = CX;
+      const KITE_SIZE = 22, STRING_MAX = 380;
+      const GRAVITY = 120, LIFT_FORCE = 280, WIND_CHANGE_INTERVAL = 3;
+
+      let mode = "menu", elapsed = 0, collected = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, clearAnim = 0, holding = false;
+      let kite = { x: CX, y: CY, vx: 0, vy: 0 };
+      let stringLen = 200, tail = [];
+      let wind = { x: 30, y: 0 }, windTarget = { x: 30, y: 0 }, windTimer = 0;
+      let stars = [], particles = [], clouds = [], windLines = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnStar() {
+        stars.push({ x: rand(80, W - 80), y: rand(40, GROUND_Y - 120), r: rand(10, 14), pulse: rand(0, Math.PI * 2) });
+      }
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), sp = rand(50, 150);
+          particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+      function initClouds() {
+        clouds = [];
+        for (let i = 0; i < 6; i++) clouds.push({ x: rand(0, W), y: rand(20, GROUND_Y - 100), w: rand(60, 140), h: rand(25, 45), speed: rand(8, 20), alpha: rand(0.15, 0.35) });
+      }
+      function initWindLines() {
+        windLines = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 12; i++) windLines.push({ x: rand(0, W), y: rand(20, GROUND_Y - 30), len: rand(20, 50), alpha: rand(0.1, 0.3), speed: rand(60, 120) });
+      }
+
+      function reset() {
+        elapsed = 0; collected = 0; shake = 0; clearAnim = 0; holding = false;
+        kite = { x: CX, y: CY - 50, vx: 0, vy: 0 }; stringLen = 200; tail = [];
+        wind = { x: 30, y: 0 }; windTarget = { x: 30, y: 0 }; windTimer = 0;
+        stars = []; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        for (let i = 0; i < 5; i++) spawnStar();
+        initClouds(); initWindLines();
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        windTimer -= dt;
+        if (windTimer <= 0) { windTarget.x = rand(-80, 80); windTarget.y = rand(-15, 15); windTimer = WIND_CHANGE_INTERVAL + rand(-0.5, 0.5); }
+        wind.x = lerp(wind.x, windTarget.x, dt * 1.5);
+        wind.y = lerp(wind.y, windTarget.y, dt * 1.5);
+
+        let ax = wind.x * 0.8, ay = GRAVITY;
+        if (holding) { ay -= LIFT_FORCE; stringLen = Math.max(80, stringLen - 60 * dt); }
+        else { stringLen = Math.min(STRING_MAX, stringLen + 20 * dt); }
+
+        kite.vx += ax * dt; kite.vy += ay * dt;
+        kite.vx *= 0.985; kite.vy *= 0.985;
+        kite.x += kite.vx * dt; kite.y += kite.vy * dt;
+
+        const dx = kite.x - ANCHOR_X, dy = kite.y - ANCHOR_Y;
+        const d = Math.hypot(dx, dy);
+        if (d > stringLen) {
+          const nx = dx / d, ny = dy / d;
+          kite.x = ANCHOR_X + nx * stringLen; kite.y = ANCHOR_Y + ny * stringLen;
+          const dot = kite.vx * nx + kite.vy * ny;
+          if (dot > 0) { kite.vx -= dot * nx * 0.5; kite.vy -= dot * ny * 0.5; }
+        }
+        kite.x = clamp(kite.x, KITE_SIZE, W - KITE_SIZE);
+
+        if (!reducedMotion) { tail.unshift({ x: kite.x, y: kite.y + KITE_SIZE }); if (tail.length > 20) tail.pop(); }
+
+        for (const s of stars) {
+          if (dist(kite.x, kite.y, s.x, s.y) < KITE_SIZE + s.r) {
+            collected++;
+            spawnParticles(s.x, s.y, reducedMotion ? 4 : 10, COL.star, [3, 6]);
+            s.dead = true;
+          }
+        }
+        stars = stars.filter(s => !s.dead);
+        while (stars.length < 5 && collected < TARGET) spawnStar();
+        for (const s of stars) s.pulse += dt * 3;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.93; p.vy *= 0.93;
+          p.life -= dt * 2.5; if (p.life <= 0) particles.splice(i, 1);
+        }
+        for (const c of clouds) {
+          c.x += c.speed * (wind.x > 0 ? 1 : -1) * dt * 0.3;
+          if (c.x > W + c.w) c.x = -c.w; if (c.x < -c.w) c.x = W + c.w;
+        }
+        for (const wl of windLines) {
+          wl.x += wl.speed * (wind.x > 0 ? 1 : -1) * dt;
+          if (wl.x > W + 50) { wl.x = -50; wl.y = rand(20, GROUND_Y - 30); }
+          if (wl.x < -50) { wl.x = W + 50; wl.y = rand(20, GROUND_Y - 30); }
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+
+        if (collected >= TARGET) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared"; reportCleared();
+        } else if (kite.y >= GROUND_Y - KITE_SIZE) {
+          mode = "failed"; shake = 10;
+          window.relayStageResult.status = "failed"; reportFailed("연이 땅에 떨어짐");
+        } else if (elapsed >= DURATION) {
+          mode = "failed";
+          window.relayStageResult.status = "failed"; reportFailed("시간 초과");
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+        skyGrad.addColorStop(0, COL.skyTop); skyGrad.addColorStop(0.85, COL.skyBot); skyGrad.addColorStop(1, COL.grass);
+        ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = COL.grass; ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+        ctx.fillStyle = COL.grassDark; ctx.fillRect(0, GROUND_Y, W, 3);
+
+        for (const c of clouds) { ctx.beginPath(); ctx.ellipse(c.x, c.y, c.w / 2, c.h / 2, 0, 0, Math.PI * 2); ctx.fillStyle = `rgba(255,255,255,${c.alpha})`; ctx.fill(); }
+
+        const wd = wind.x > 0 ? 1 : -1;
+        for (const wl of windLines) { ctx.beginPath(); ctx.moveTo(wl.x, wl.y); ctx.lineTo(wl.x + wl.len * wd, wl.y); ctx.strokeStyle = `rgba(255,255,255,${wl.alpha})`; ctx.lineWidth = 1.5; ctx.stroke(); }
+
+        for (const s of stars) {
+          const pr = s.r + Math.sin(s.pulse) * 2;
+          ctx.beginPath(); ctx.arc(s.x, s.y, pr + 6, 0, Math.PI * 2); ctx.fillStyle = COL.starGlow; ctx.fill();
+          drawStarShape(s.x, s.y, pr, pr * 0.4, 5); ctx.fillStyle = COL.star; ctx.fill();
+        }
+
+        ctx.beginPath(); ctx.moveTo(ANCHOR_X, ANCHOR_Y);
+        ctx.quadraticCurveTo((ANCHOR_X + kite.x) / 2 + wind.x * 0.3, (ANCHOR_Y + kite.y) / 2 + 20, kite.x, kite.y + KITE_SIZE * 0.5);
+        ctx.strokeStyle = COL.string; ctx.lineWidth = 1.5; ctx.stroke();
+
+        ctx.save(); ctx.translate(kite.x, kite.y);
+        ctx.rotate(clamp(kite.vx * 0.005, -0.3, 0.3));
+        ctx.beginPath(); ctx.moveTo(0, -KITE_SIZE); ctx.lineTo(KITE_SIZE * 0.7, 0); ctx.lineTo(0, KITE_SIZE * 0.6); ctx.lineTo(-KITE_SIZE * 0.7, 0); ctx.closePath();
+        ctx.fillStyle = COL.kite; ctx.fill(); ctx.strokeStyle = COL.kiteDark; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, -KITE_SIZE); ctx.lineTo(0, KITE_SIZE * 0.6); ctx.moveTo(-KITE_SIZE * 0.7, 0); ctx.lineTo(KITE_SIZE * 0.7, 0);
+        ctx.strokeStyle = COL.kiteDark; ctx.lineWidth = 1; ctx.stroke();
+        ctx.restore();
+
+        if (tail.length >= 2) {
+          for (let i = 0; i < tail.length - 1; i++) {
+            const t = tail[i], n = tail[i + 1], a = 1 - i / tail.length;
+            ctx.beginPath(); ctx.moveTo(t.x, t.y); ctx.lineTo(n.x, n.y);
+            ctx.strokeStyle = `rgba(255,127,127,${a * 0.6})`; ctx.lineWidth = 3 - i * 0.12; ctx.lineCap = "round"; ctx.stroke();
+          }
+        }
+
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = p.life; ctx.fill(); ctx.globalAlpha = 1;
+        }
+
+        if (mode === "running") drawHUD();
+        ctx.restore();
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawStarShape(cx, cy, oR, iR, pts) {
+        ctx.beginPath();
+        for (let i = 0; i < pts * 2; i++) {
+          const r = i % 2 === 0 ? oR : iR, a = (i * Math.PI / pts) - Math.PI / 2;
+          if (i === 0) ctx.moveTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+          else ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+        }
+        ctx.closePath();
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "bold 16px Trebuchet MS,sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`\u2605 ${collected} / ${TARGET}`, 20, 16);
+        ctx.textAlign = "right"; ctx.fillText(`${Math.ceil(Math.max(0, DURATION - elapsed))}s`, W - 20, 16);
+        ctx.fillStyle = "rgba(58,90,58,0.15)"; ctx.fillRect(20, 40, W - 40, 3);
+        ctx.fillStyle = COL.text; ctx.fillRect(20, 40, (W - 40) * (1 - elapsed / DURATION), 3);
+        const wDir = wind.x > 0 ? "\u2192" : "\u2190";
+        ctx.textAlign = "center"; ctx.font = "14px Trebuchet MS,sans-serif"; ctx.fillStyle = COL.textLight;
+        ctx.fillText(`\uD83C\uDF2C ${wDir} ${Math.round(Math.abs(wind.x))}`, CX, 16);
+        if (holding) { ctx.fillStyle = "rgba(255,127,127,0.3)"; ctx.fillRect(0, H - 6, W, 6); }
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath(); c.moveTo(x + r, y); c.lineTo(x + w - r, y); c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r); c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h); c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+      function drawCard(title, lines, accent) {
+        const cW = Math.min(340, W - 40), lH = 24, cH = 44 + lines.length * lH + 36;
+        const cX = CX - cW / 2, cY = CY - cH / 2;
+        ctx.fillStyle = COL.card; roundRect(ctx, cX, cY, cW, cH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cX + 16, cY, cW - 32, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 22px Trebuchet MS,sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cY + 16);
+        ctx.font = "14px Trebuchet MS,sans-serif"; ctx.fillStyle = "rgba(58,90,58,0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cY + 48 + i * lH);
+        ctx.fillStyle = "rgba(58,90,58,0.35)"; ctx.font = "13px Trebuchet MS,sans-serif";
+        ctx.fillText("TAP or ENTER", CX, cY + cH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(255,252,245,0.4)"; ctx.fillRect(0, 0, W, H);
+        drawCard("하늘 연", ["하늘에 연을 띄우고 바람을 타며", "별을 수집하세요!", "", "조작: 화면 터치를 길게 누르면 연이 올라감", "클리어: 별 12개 수집", "실패: 연이 땅에 떨어지면"], COL.accent);
+      }
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(255,252,245,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, `\u2605 ${collected}개 수집`], COL.accent);
+      }
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80,30,20,0.25)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", [elapsed >= DURATION ? "시간이 다했습니다" : "연이 땅에 떨어졌습니다", `\u2605 ${collected} / ${TARGET}`], COL.damage);
+      }
+
+      function handleStart() { if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; } }
+
+      canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); if (mode !== "running") { handleStart(); return; } holding = true; });
+      canvas.addEventListener("pointerup", () => { holding = false; });
+      canvas.addEventListener("pointercancel", () => { holding = false; });
+      canvas.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (mode !== "running") { handleStart(); return; } holding = true; } });
+      canvas.addEventListener("keyup", (e) => { if (e.key === "Enter" || e.key === " ") holding = false; });
+
+      function gameLoop(ts) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = ts; return; }
+        let dt = Math.min((ts - lastTimestamp) / 1000, MAX_DT); lastTimestamp = ts;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), collected, kiteY: +kite.y.toFixed(0), wind: +wind.x.toFixed(0), result: window.relayStageResult.status, stars: stars.length });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => { const s = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < s; i++) update(FIXED_DT); draw(); return renderGameToText(); };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; collected = TARGET; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; kite.y = GROUND_Y; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      initClouds(); initWindLines(); reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
