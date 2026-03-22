@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "moon-greenhouse-orbit-herding-collapse",
+    title: "Moon Greenhouse: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./moon-greenhouse-orbit-herding-collapse/thumbnail.png",
+    path: "./moon-greenhouse-orbit-herding-collapse/index.html",
   }
 ];
