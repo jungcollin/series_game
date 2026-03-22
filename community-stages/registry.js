@@ -889,5 +889,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "템포 창을 놓치지 않고 활공체를 3개 관측대에 모두 착륙시키면 클리어",
     thumbnail: "./storm-archive-weather-mixing-tempo/thumbnail.png",
     path: "./storm-archive-weather-mixing-tempo/index.html",
+  },
+  {
+    id: "paper-temple-tide-anchoring-collapse",
+    title: "Paper Temple: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 조류 6파를 넘기며 발전기를 지키기",
+    thumbnail: "./paper-temple-tide-anchoring-collapse/thumbnail.png",
+    path: "./paper-temple-tide-anchoring-collapse/index.html",
   }
 ];
