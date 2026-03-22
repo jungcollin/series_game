@@ -421,5 +421,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "방울 10개를 목표 크기로 만들면 클리어",
     thumbnail: "./bubble-artist/thumbnail.png",
     path: "./bubble-artist/index.html",
+  },
+  {
+    id: "beacon-relay",
+    title: "봉화 릴레이",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Chain timing",
+    clearCondition: "5개 봉화대를 모두 점화하면 클리어",
+    thumbnail: "./beacon-relay/thumbnail.png",
+    path: "./beacon-relay/index.html",
   }
 ];
