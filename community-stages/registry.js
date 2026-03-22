@@ -423,6 +423,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./bubble-artist/index.html",
   },
   {
+    id: "sky-kite",
+    title: "하늘 연",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Wind navigation",
+    clearCondition: "별 12개를 수집하면 클리어",
+    thumbnail: "./sky-kite/thumbnail.png",
+    path: "./sky-kite/index.html",
+  },
+  {
     id: "wildlife-snap",
     title: "야생 포착",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
