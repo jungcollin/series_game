@@ -142,5 +142,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 영역을 잉크로 채우면 클리어",
     thumbnail: "./ink-spread/thumbnail.png",
     path: "./ink-spread/index.html",
+  },
+  {
+    id: "umbrella-walk",
+    title: "우산 산책",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tilt defense",
+    clearCondition: "편지 10개를 젖지 않게 수집하면 클리어",
+    thumbnail: "./umbrella-walk/thumbnail.png",
+    path: "./umbrella-walk/index.html",
   }
 ];
