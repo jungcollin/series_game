@@ -133,5 +133,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "30초 안에 버블 25개 터뜨리면 클리어",
     thumbnail: "./bubble-pop/thumbnail.png",
     path: "./bubble-pop/index.html",
+  },
+  {
+    id: "ink-spread",
+    title: "잉크 번짐",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Fluid puzzle",
+    clearCondition: "목표 영역을 잉크로 채우면 클리어",
+    thumbnail: "./ink-spread/thumbnail.png",
+    path: "./ink-spread/index.html",
   }
 ];
