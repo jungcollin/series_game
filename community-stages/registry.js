@@ -198,7 +198,6 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
-<<<<<<< HEAD
     id: "crystal-foundry-orbit-herding-tempo",
     title: "Crystal Foundry: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -206,7 +205,8 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "박자 창을 놓치지 않고 위성 3기를 목표 링에 순서대로 통과시키기",
     thumbnail: "./crystal-foundry-orbit-herding-tempo/thumbnail.png",
     path: "./crystal-foundry-orbit-herding-tempo/index.html",
-=======
+  },
+  {
     id: "dusk-subway-weather-mixing-collapse",
     title: "Dusk Subway: Weather Mix",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -799,6 +799,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
     thumbnail: "./storm-archive-orbit-herding-heat/thumbnail.png",
     path: "./storm-archive-orbit-herding-heat/index.html",
->>>>>>> origin/main
+  },
+  {
+    id: "midnight-harbor-orbit-herding-sync",
+    title: "Midnight Harbor: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 동기화 문",
+    clearCondition: "문을 모두 맞춘 뒤 위성 3기를 순서대로 링 통과",
+    thumbnail: "./midnight-harbor-orbit-herding-sync/thumbnail.png",
+    path: "./midnight-harbor-orbit-herding-sync/index.html",
   }
 ];
