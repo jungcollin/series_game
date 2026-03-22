@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "paper-temple-gravity-folding-sync",
+    title: "Paper Temple: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
+    thumbnail: "./paper-temple-gravity-folding-sync/thumbnail.png",
+    path: "./paper-temple-gravity-folding-sync/index.html",
   }
 ];
