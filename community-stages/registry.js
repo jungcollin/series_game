@@ -223,5 +223,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "붕괴선이 닿기 전에 모든 코어 문양을 연결하면 클리어",
     thumbnail: "./neon-observatory-echo-weaving-collapse/thumbnail.png",
     path: "./neon-observatory-echo-weaving-collapse/index.html",
+  },
+  {
+    id: "moon-greenhouse-echo-weaving-heat",
+    title: "Moon Greenhouse: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./moon-greenhouse-echo-weaving-heat/thumbnail.png",
+    path: "./moon-greenhouse-echo-weaving-heat/index.html",
   }
 ];
