@@ -522,6 +522,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./paper-temple-shadow-stitch-witness/index.html",
   },
   {
+    id: "neon-observatory-pulse-fencing-heat",
+    title: "Neon Observatory: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 20연속 파형을 반사하면 클리어",
+    thumbnail: "./neon-observatory-pulse-fencing-heat/thumbnail.png",
+    path: "./neon-observatory-pulse-fencing-heat/index.html",
+  },
+  {
     id: "neon-observatory-gravity-folding-charge",
     title: "Neon Observatory: Gravity Fold",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
