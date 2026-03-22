@@ -529,5 +529,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./paper-temple-shadow-stitch-witness/thumbnail.png",
     path: "./paper-temple-shadow-stitch-witness/index.html",
+  },
+  {
+    id: "neon-observatory-gravity-folding-charge",
+    title: "Neon Observatory: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 제한 충전",
+    clearCondition: "충전을 남기며 코어를 목적 슬롯까지 배달하기",
+    thumbnail: "./neon-observatory-gravity-folding-charge/thumbnail.png",
+    path: "./neon-observatory-gravity-folding-charge/index.html",
   }
 ];
