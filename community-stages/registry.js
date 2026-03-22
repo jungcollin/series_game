@@ -331,5 +331,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "충전을 남기며 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
     thumbnail: "./crystal-foundry-debt-auction-charge/thumbnail.png",
     path: "./crystal-foundry-debt-auction-charge/index.html",
+  },
+  {
+    id: "storm-archive-mirror-theft-shrink",
+    title: "Storm Archive: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./storm-archive-mirror-theft-shrink/thumbnail.png",
+    path: "./storm-archive-mirror-theft-shrink/index.html",
   }
 ];
