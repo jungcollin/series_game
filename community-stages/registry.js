@@ -198,6 +198,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+<<<<<<< HEAD
     id: "paper-temple-gravity-folding-sync",
     title: "Paper Temple: Gravity Fold",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -205,6 +206,24 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "동기화 문을 모두 맞춘 뒤 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
     thumbnail: "./paper-temple-gravity-folding-sync/thumbnail.png",
     path: "./paper-temple-gravity-folding-sync/index.html",
+=======
+    id: "moon-greenhouse-tide-anchoring-shrink",
+    title: "Moon Greenhouse: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./moon-greenhouse-tide-anchoring-shrink/thumbnail.png",
+    path: "./moon-greenhouse-tide-anchoring-shrink/index.html",
+  },
+  {
+    id: "glass-aquarium-shadow-stitch-collapse",
+    title: "Glass Aquarium: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./glass-aquarium-shadow-stitch-collapse/thumbnail.png",
+    path: "./glass-aquarium-shadow-stitch-collapse/index.html",
+>>>>>>> origin/main
   },
   {
     id: "moon-greenhouse-shadow-stitch-charge",
@@ -421,5 +440,23 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "역전 구간을 모두 견디고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
     thumbnail: "./moon-greenhouse-magnet-braiding-inverse/thumbnail.png",
     path: "./moon-greenhouse-magnet-braiding-inverse/index.html",
+  },
+  {
+    id: "dusk-subway-debt-auction-combo",
+    title: "Dusk Subway: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./dusk-subway-debt-auction-combo/thumbnail.png",
+    path: "./dusk-subway-debt-auction-combo/index.html",
+  },
+  {
+    id: "neon-observatory-debt-auction-witness",
+    title: "Neon Observatory: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 마지막 경매를 넘기기",
+    thumbnail: "./neon-observatory-debt-auction-witness/thumbnail.png",
+    path: "./neon-observatory-debt-auction-witness/index.html",
   }
 ];
