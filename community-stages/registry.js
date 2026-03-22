@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "biomech-theater-echo-weaving-charge",
+    title: "Biomech Theater: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 제한 충전",
+    clearCondition: "충전을 남기며 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./biomech-theater-echo-weaving-charge/thumbnail.png",
+    path: "./biomech-theater-echo-weaving-charge/index.html",
   }
 ];
