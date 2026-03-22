@@ -556,5 +556,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "템포 창을 놓치지 않고 코어를 균열 없이 슬롯까지 운반",
     thumbnail: "./dusk-subway-gravity-folding-tempo/thumbnail.png",
     path: "./dusk-subway-gravity-folding-tempo/index.html",
+  },
+  {
+    id: "paper-temple-magnet-braiding-heat",
+    title: "Paper Temple: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./paper-temple-magnet-braiding-heat/thumbnail.png",
+    path: "./paper-temple-magnet-braiding-heat/index.html",
   }
 ];
