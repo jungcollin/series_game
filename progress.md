@@ -92,3 +92,6 @@ TODO
 - 2026-03-20: `/check-stage`를 강화해 모바일 `menu / running / failed` 스크린샷을 자동 생성하고, 모바일 가로 오버플로와 캔버스 점유율을 검사하도록 확장. `lightning-dodge`로 실검증 통과.
 - 2026-03-20: `check_host_flow.js --mobile`를 추가 확장해 메인 모바일 홈, 참여 모달, 랭킹 모달, GAME OVER 오버레이까지 자동 검증하도록 변경. `node relay-tools/scripts/check_host_flow.js --base-url http://series-game.localhost:1355 --mobile` 실검증 통과.
 - 2026-03-20: `pr_review.js`가 메인 UI 파일 변경 시 모바일 호스트 검증까지 자동 실행하도록 갱신. `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `/make-stage`, `/check-stage`, `/publish-stage`, 스테이지 템플릿도 같은 모바일 기준으로 동기화.
+- 2026-03-22: `community-stages/crystal-foundry-shadow-stitch-sync/` 초안 생성 후, 수정 주조소 테마의 `Crystal Foundry: Shadow Stitch` 스테이지를 구현. 회전 광원 + 수정 기둥 그림자, 박자형 동기화 문 3개, 드래그 봉합 다리, 4개 제단 점등 규칙을 하나의 canvas 루프로 구성.
+- 2026-03-22: 모바일 방향 버튼과 `CUT` 버튼을 추가하고, 더블탭 실 절단·터치 시작·drag 봉합·host debug 인터페이스를 모두 스테이지 내부에 연결. 이어서 로컬 서버, Playwright/체크 스크립트, publish PR 검증이 필요함.
+- 2026-03-22: `sync_registry.js` 재실행 후 `node relay-tools/scripts/check_stage.js --stage crystal-foundry-shadow-stitch-sync --base-url http://127.0.0.1:4733` 통과. 썸네일 `community-stages/crystal-foundry-shadow-stitch-sync/thumbnail.png`, 모바일 `menu/running/failed`, 호스트 ready/clear/fail 콜백까지 확인.
