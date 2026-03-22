@@ -92,3 +92,6 @@ TODO
 - 2026-03-20: `/check-stage`를 강화해 모바일 `menu / running / failed` 스크린샷을 자동 생성하고, 모바일 가로 오버플로와 캔버스 점유율을 검사하도록 확장. `lightning-dodge`로 실검증 통과.
 - 2026-03-20: `check_host_flow.js --mobile`를 추가 확장해 메인 모바일 홈, 참여 모달, 랭킹 모달, GAME OVER 오버레이까지 자동 검증하도록 변경. `node relay-tools/scripts/check_host_flow.js --base-url http://series-game.localhost:1355 --mobile` 실검증 통과.
 - 2026-03-20: `pr_review.js`가 메인 UI 파일 변경 시 모바일 호스트 검증까지 자동 실행하도록 갱신. `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `/make-stage`, `/check-stage`, `/publish-stage`, 스테이지 템플릿도 같은 모바일 기준으로 동기화.
+- 2026-03-22: `moon-greenhouse-mirror-theft-tempo` 초안 생성 후 고정 메타 반영. 기획 차별점은 `패턴 복제 + 템포 윈도우 + 감시 콘 잠입` 조합으로 확정.
+- 2026-03-22: `community-stages/moon-greenhouse-mirror-theft-tempo/index.html`을 전면 구현. 월광 온실 배경, 감시 스포트라이트, 패턴 문양 3종, 복제/재생 핵심 입력, 박자 실수 2회 즉사, 모바일 드래그 + 버튼 조작, `render_game_to_text`/`advanceTime`/`relayStageDebug` 계약을 추가.
+- 2026-03-22: 다음 단계는 `python3 -m http.server 4765`로 로컬 서버 기동 후 Playwright 스모크와 `check_stage.js` 재검증. 실패 시 모바일 시작 흐름, 썸네일 캡처용 러닝 상태, 오버플로부터 우선 수정.
