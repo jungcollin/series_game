@@ -18,6 +18,27 @@ function loadPlaywright() {
   }
 }
 
+function resolveChromiumLaunchOptions() {
+  const launchOptions = {
+    headless: true,
+    args: ["--disable-gpu", "--single-process", "--no-zygote", "--renderer-process-limit=1"],
+  };
+  const candidates = [
+    process.env.PLAYWRIGHT_CHROME_EXECUTABLE,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      launchOptions.executablePath = candidate;
+      break;
+    }
+  }
+
+  return launchOptions;
+}
+
 function parseArgs(argv) {
   const result = {};
   for (let index = 2; index < argv.length; index += 1) {
@@ -192,6 +213,33 @@ function stageThumbnailPath(repoRoot, stageDir) {
   return path.join(repoRoot, "community-stages", stageDir, "thumbnail.png");
 }
 
+async function withBrowser(chromium, task) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    let browser = null;
+    try {
+      browser = await chromium.launch(resolveChromiumLaunchOptions());
+      return await task(browser);
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error || "");
+      const isRetriable =
+        /Target page, context or browser has been closed|Target closed|browser\.newPage|browserType\.launch/.test(
+          message
+        );
+      if (!isRetriable || attempt === 3) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    } finally {
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
+    }
+  }
+  throw lastError;
+}
+
 async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta }) {
   await page.goto(stageUrl, { waitUntil: "networkidle" });
   await page.waitForTimeout(150);
@@ -242,6 +290,19 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
   const thumbnailPath = stageThumbnailPath(repoRoot, stageMeta.dir);
   await canvas.screenshot({ path: thumbnailPath });
   return thumbnailPath;
+}
+
+async function safePageScreenshot(page, options) {
+  try {
+    await page.screenshot(options);
+    return true;
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    if (/Target page, context or browser has been closed|Target closed/.test(message)) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta, consoleErrors }) {
@@ -351,7 +412,7 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
   };
 
   const menuScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-menu.png`);
-  await mobilePage.screenshot({ path: menuScreenshotPath, fullPage: true });
+  await safePageScreenshot(mobilePage, { path: menuScreenshotPath, fullPage: true });
   const menuLayout = await readLayoutMetrics();
   assertMobileLayoutMetrics(menuLayout, stageMeta, "menu");
 
@@ -372,7 +433,7 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
   }
 
   const runningScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-running.png`);
-  await mobilePage.screenshot({ path: runningScreenshotPath, fullPage: true });
+  await safePageScreenshot(mobilePage, { path: runningScreenshotPath, fullPage: true });
   const runningLayout = await readLayoutMetrics();
   assertMobileLayoutMetrics(runningLayout, stageMeta, "running");
 
@@ -387,7 +448,7 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
   }
 
   const failedScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-failed.png`);
-  await mobilePage.screenshot({ path: failedScreenshotPath, fullPage: true });
+  await safePageScreenshot(mobilePage, { path: failedScreenshotPath, fullPage: true });
   const failedLayout = await readLayoutMetrics();
   assertMobileLayoutMetrics(failedLayout, stageMeta, "failed");
 
@@ -435,56 +496,71 @@ async function main() {
 
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
-  const consoleErrors = [];
-  page.on("console", (msg) => {
-    if (msg.type() === "error") {
-      consoleErrors.push(msg.text());
-    }
-  });
-
   const launcherUrl = `${baseUrl}/community-stages/index.html`;
-  await page.goto(launcherUrl, { waitUntil: "networkidle" });
-  const launcherCount = await page.locator(`text=${stageMeta.title}`).count();
-  await page.screenshot({
-    path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
-    fullPage: true,
+  const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
+  const consoleErrors = [];
+
+  const {
+    launcherCount,
+    directChecks,
+    thumbnailPath,
+  } = await withBrowser(chromium, async (browser) => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        consoleErrors.push(msg.text());
+      }
+    });
+
+    await page.goto(launcherUrl, { waitUntil: "networkidle" });
+    const nextLauncherCount = await page.locator(`text=${stageMeta.title}`).count();
+    await safePageScreenshot(page, {
+      path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
+      fullPage: true,
+    });
+
+    await page.goto(stageUrl, { waitUntil: "networkidle" });
+    await page.waitForTimeout(300);
+    const nextDirectChecks = await page.evaluate(() => ({
+      hasRender: typeof window.render_game_to_text === "function",
+      hasAdvance: typeof window.advanceTime === "function",
+      hasMeta: typeof window.relayStageMeta === "object" && window.relayStageMeta !== null,
+      hasResult: typeof window.relayStageResult === "object" && window.relayStageResult !== null,
+      hasDebug:
+        typeof window.relayStageDebug === "object" &&
+        typeof window.relayStageDebug?.forceClear === "function" &&
+        typeof window.relayStageDebug?.forceFail === "function",
+      text: typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null,
+      meta: window.relayStageMeta || null,
+      result: window.relayStageResult || null,
+    }));
+    await safePageScreenshot(page, {
+      path: path.join(outputDir, `${stageMeta.dir}-direct.png`),
+      fullPage: true,
+    });
+    const nextThumbnailPath = await captureGameplayThumbnail({
+      page,
+      stageUrl,
+      repoRoot,
+      stageMeta,
+    });
+
+    return {
+      launcherCount: nextLauncherCount,
+      directChecks: nextDirectChecks,
+      thumbnailPath: nextThumbnailPath,
+    };
   });
 
-  const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
-  await page.goto(stageUrl, { waitUntil: "networkidle" });
-  await page.waitForTimeout(300);
-  const directChecks = await page.evaluate(() => ({
-    hasRender: typeof window.render_game_to_text === "function",
-    hasAdvance: typeof window.advanceTime === "function",
-    hasMeta: typeof window.relayStageMeta === "object" && window.relayStageMeta !== null,
-    hasResult: typeof window.relayStageResult === "object" && window.relayStageResult !== null,
-    hasDebug:
-      typeof window.relayStageDebug === "object" &&
-      typeof window.relayStageDebug?.forceClear === "function" &&
-      typeof window.relayStageDebug?.forceFail === "function",
-    text: typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null,
-    meta: window.relayStageMeta || null,
-    result: window.relayStageResult || null,
-  }));
-  await page.screenshot({
-    path: path.join(outputDir, `${stageMeta.dir}-direct.png`),
-    fullPage: true,
-  });
-  const thumbnailPath = await captureGameplayThumbnail({
-    page,
-    stageUrl,
-    repoRoot,
-    stageMeta,
-  });
-  const mobileChecks = await captureMobileStageState({
-    browser,
-    stageUrl,
-    outputDir,
-    stageMeta,
-    consoleErrors,
-  });
+  const mobileChecks = await withBrowser(chromium, async (browser) =>
+    captureMobileStageState({
+      browser,
+      stageUrl,
+      outputDir,
+      stageMeta,
+      consoleErrors,
+    })
+  );
 
   if (!launcherCount) {
     throw new Error(`Launcher card not found for stage: ${stageMeta.id}`);
@@ -514,51 +590,54 @@ async function main() {
     );
   }
 
-  const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  hostPage.on("console", (msg) => {
-    if (msg.type() === "error") {
-      consoleErrors.push(msg.text());
+  const { clearEvents, failEvents } = await withBrowser(chromium, async (browser) => {
+    const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    hostPage.on("console", (msg) => {
+      if (msg.type() === "error") {
+        consoleErrors.push(msg.text());
+      }
+    });
+    await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
+
+    async function runHostCase(iframeId, actionName) {
+      await hostPage.evaluate(
+        ({ stageDir, iframeId }) => {
+          window.__relayHostEvents = [];
+          window.RelayHost = {
+            onStageReady(meta) {
+              window.__relayHostEvents.push({ type: "ready", meta });
+            },
+            onStageCleared(payload) {
+              window.__relayHostEvents.push({ type: "cleared", payload });
+            },
+            onStageFailed(payload) {
+              window.__relayHostEvents.push({ type: "failed", payload });
+            },
+          };
+          document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
+        },
+        { stageDir: stageMeta.dir, iframeId }
+      );
+
+      const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
+      await frame.waitForFunction(() => !!window.relayStageDebug);
+      await frame.evaluate((nextActionName) => {
+        window.relayStageDebug[nextActionName]();
+      }, actionName);
+      await hostPage.waitForTimeout(250);
+      return hostPage.evaluate(() => window.__relayHostEvents);
     }
+
+    const nextClearEvents = await runHostCase("stage-clear", "forceClear");
+    const nextFailEvents = await runHostCase("stage-fail", "forceFail");
+
+    await safePageScreenshot(hostPage, {
+      path: path.join(outputDir, `${stageMeta.dir}-host.png`),
+      fullPage: true,
+    });
+
+    return { clearEvents: nextClearEvents, failEvents: nextFailEvents };
   });
-  await hostPage.goto(launcherUrl, { waitUntil: "networkidle" });
-
-  async function runHostCase(iframeId, actionName) {
-    await hostPage.evaluate(
-      ({ stageDir, iframeId }) => {
-        window.__relayHostEvents = [];
-        window.RelayHost = {
-          onStageReady(meta) {
-            window.__relayHostEvents.push({ type: "ready", meta });
-          },
-          onStageCleared(payload) {
-            window.__relayHostEvents.push({ type: "cleared", payload });
-          },
-          onStageFailed(payload) {
-            window.__relayHostEvents.push({ type: "failed", payload });
-          },
-        };
-        document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
-      },
-      { stageDir: stageMeta.dir, iframeId }
-    );
-
-    const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
-    await frame.waitForFunction(() => !!window.relayStageDebug);
-    await frame.evaluate((actionName) => {
-      window.relayStageDebug[actionName]();
-    }, actionName);
-    await hostPage.waitForTimeout(250);
-    return hostPage.evaluate(() => window.__relayHostEvents);
-  }
-
-  const clearEvents = await runHostCase("stage-clear", "forceClear");
-  const failEvents = await runHostCase("stage-fail", "forceFail");
-
-  await hostPage.screenshot({
-    path: path.join(outputDir, `${stageMeta.dir}-host.png`),
-    fullPage: true,
-  });
-  await browser.close();
 
   const hasClearEvent = clearEvents.some((event) => event.type === "cleared");
   const hasFailEvent = failEvents.some((event) => event.type === "failed");

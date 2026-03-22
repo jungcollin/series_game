@@ -92,3 +92,5 @@ TODO
 - 2026-03-20: `/check-stage`를 강화해 모바일 `menu / running / failed` 스크린샷을 자동 생성하고, 모바일 가로 오버플로와 캔버스 점유율을 검사하도록 확장. `lightning-dodge`로 실검증 통과.
 - 2026-03-20: `check_host_flow.js --mobile`를 추가 확장해 메인 모바일 홈, 참여 모달, 랭킹 모달, GAME OVER 오버레이까지 자동 검증하도록 변경. `node relay-tools/scripts/check_host_flow.js --base-url http://series-game.localhost:1355 --mobile` 실검증 통과.
 - 2026-03-20: `pr_review.js`가 메인 UI 파일 변경 시 모바일 호스트 검증까지 자동 실행하도록 갱신. `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `/make-stage`, `/check-stage`, `/publish-stage`, 스테이지 템플릿도 같은 모바일 기준으로 동기화.
+- 2026-03-22: `biomech-theater-echo-weaving-charge` 작업 시작. 콘셉트는 바이오메크 극장 안에서 실을 깔아 4개 코어를 연결하고, 최근 3초 이동을 잔상으로 재생해 스위치를 대신 밟게 만드는 퍼즐 액션.
+- 2026-03-22: 고정 메타 사용. creator=`jungcollin`, genre=`Echo puzzler / 제한 충전`, slug/branch=`biomech-theater-echo-weaving-charge`, base URL=`http://127.0.0.1:4708`.
