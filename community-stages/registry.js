@@ -225,6 +225,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./biomech-theater-shadow-stitch-tempo/index.html",
   },
   {
+    id: "paper-temple-orbit-herding-cursed",
+    title: "Paper Temple: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./paper-temple-orbit-herding-cursed/thumbnail.png",
+    path: "./paper-temple-orbit-herding-cursed/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
