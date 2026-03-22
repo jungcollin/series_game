@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "10초 버티기",
     thumbnail: "./space-dodge/thumbnail.png",
     path: "./space-dodge/index.html",
+  },
+  {
+    id: "time-reversal-escape",
+    title: "Time Reversal Escape",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "Puzzle Action",
+    clearCondition: "시간을 되돌려 함정을 피하고 출구에 도달하기",
+    thumbnail: "./time-reversal-escape/thumbnail.png",
+    path: "./time-reversal-escape/index.html",
   }
 ];
