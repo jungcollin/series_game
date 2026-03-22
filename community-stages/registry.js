@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "moon-greenhouse-orbit-herding-collapse",
+    title: "Moon Greenhouse: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./moon-greenhouse-orbit-herding-collapse/thumbnail.png",
+    path: "./moon-greenhouse-orbit-herding-collapse/index.html",
+  },
+  {
     id: "glass-aquarium-debt-auction-tempo",
     title: "Glass Aquarium: Debt Auction",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
