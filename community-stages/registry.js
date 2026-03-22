@@ -475,5 +475,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "8개 현을 정확히 조율하면 클리어",
     thumbnail: "./tuning-master/thumbnail.png",
     path: "./tuning-master/index.html",
+  },
+  {
+    id: "pipe-rush",
+    title: "파이프 연결",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Spatial puzzle",
+    clearCondition: "물이 출구에 도달하면 클리어",
+    thumbnail: "./pipe-rush/thumbnail.png",
+    path: "./pipe-rush/index.html",
   }
 ];
