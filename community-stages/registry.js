@@ -466,5 +466,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "모래성 5층을 완성하면 클리어",
     thumbnail: "./sand-castle/thumbnail.png",
     path: "./sand-castle/index.html",
+  },
+  {
+    id: "plate-spinner",
+    title: "접시 돌리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Multi-target management",
+    clearCondition: "30초 동안 접시를 떨어뜨리지 않으면 클리어",
+    thumbnail: "./plate-spinner/thumbnail.png",
+    path: "./plate-spinner/index.html",
   }
 ];

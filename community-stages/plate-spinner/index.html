@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>접시 돌리기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #FFF5EB; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(205, 92, 92, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 50, 30, 0.92);
+        color: #FFF5EB; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #FFF5EB; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(205, 92, 92, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">접시 돌리기. 화면 터치로 흔들리는 접시 다시 돌리기. 30초 동안 접시를 떨어뜨리지 않으면 클리어. 접시 3개가 떨어지면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="접시 돌리기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = 960, H = 540, CX = W/2, CY = H/2;
+      const FIXED_DT = 1/60, MAX_DT = 1/20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id:"plate-spinner", title:"접시 돌리기",
+        description:"떨어지려는 접시를 탭해서 다시 돌리는 게임",
+        creator:"jungcollin", genre:"Multi-target management",
+        clearCondition:"30초 동안 접시를 떨어뜨리지 않으면 클리어",
+        failCondition:"접시 3개가 떨어지면 실패",
+        controls:"화면 터치로 흔들리는 접시 다시 돌리기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id)||{history:[],clearCount:0,previousStageId:null};
+      window.relayStageMeta = {id:META.id,title:META.title,description:META.description,creator:META.creator,genre:META.genre,clearCondition:META.clearCondition,failCondition:META.failCondition,controls:META.controls};
+      window.relayStageResult = {status:"running"};
+
+      const COL = {
+        bg:"#FFF5EB", stick:"#8B6914", stickLight:"#B8942A",
+        plate:"#F0E0D0", plateBorder:"#CD5C5C", plateShine:"rgba(255,255,255,0.6)",
+        danger:"#DC2626", warning:"#F59E0B", safe:"#22C55E",
+        text:"#4A3020", textLight:"rgba(74,48,32,0.5)",
+        gold:"#F59E0B", red:"#DC2626",
+        floor:"#E8D5C0",
+      };
+
+      const DURATION = 30, MAX_DROPS = 3;
+      const PLATE_COLORS = ["#E8B4B8","#B4D8E8","#C8E8B4","#E8D4B4","#D4B4E8","#E8E4B4"];
+
+      let mode="menu", elapsed=0, lastTimestamp=0, animFrame=0;
+      let hostFailedReported=false, hostClearedReported=false;
+      let drops=0, shake=0, flashA=0, clearAnim=0;
+      let particles=[];
+      let plates=[];
+
+      function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+      function lerp(a,b,t){return a+(b-a)*t;}
+      function rand(lo,hi){return lo+Math.random()*(hi-lo);}
+
+      function inRelayHost(){try{return window.parent&&window.parent!==window&&window.parent.RelayHost;}catch{return false;}}
+      function reportReady(){if(inRelayHost())window.parent.RelayHost.onStageReady?.(window.relayStageMeta);}
+      function reportFailed(reason){if(!inRelayHost()||hostFailedReported)return;hostFailedReported=true;window.parent.RelayHost.onStageFailed?.({stageId:META.id,stageTitle:META.title,reason,durationSec:+elapsed.toFixed(1)});}
+      function reportCleared(){if(!inRelayHost()||hostClearedReported)return;hostClearedReported=true;window.parent.RelayHost.onStageCleared?.({stageId:META.id,stageTitle:META.title,clearCountAfter:relayContext.clearCount+1,durationSec:+elapsed.toFixed(1)});}
+
+      function spawnP(x,y,n,col,sr){for(let i=0;i<n;i++){const a=rand(0,Math.PI*2),sp=rand(40,140);particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-40,life:1,color:col,size:rand(sr[0],sr[1])});}}
+
+      function createPlate(x) {
+        return {
+          x, stickY: H - 80,
+          energy: 1.0, // 1=full spin, 0=fallen
+          decayRate: rand(0.08, 0.14),
+          wobble: 0, wobbleSpeed: rand(4, 8),
+          color: PLATE_COLORS[Math.floor(rand(0, PLATE_COLORS.length))],
+          fallen: false, fallAnim: 0,
+          spinAnim: 0,
+        };
+      }
+
+      function reset(){
+        elapsed=0;drops=0;shake=0;flashA=0;clearAnim=0;particles=[];
+        hostFailedReported=false;hostClearedReported=false;
+        window.relayStageResult.status="running";
+        // Start with 3 plates, add more over time
+        plates = [];
+        const startCount = 3;
+        const spacing = W / (startCount + 1);
+        for(let i=0;i<startCount;i++){
+          plates.push(createPlate(spacing*(i+1)));
+        }
+      }
+
+      function spinPlate(idx) {
+        if(idx<0||idx>=plates.length) return;
+        const p = plates[idx];
+        if(p.fallen) return;
+        p.energy = Math.min(1.0, p.energy + 0.5);
+        p.spinAnim = 1.0;
+        spawnP(p.x, p.stickY - 80, reducedMotion?2:6, p.color, [2,4]);
+      }
+
+      function addPlate() {
+        // Find a gap to place new plate
+        const existing = plates.filter(p=>!p.fallen).map(p=>p.x).sort((a,b)=>a-b);
+        let bestX = CX, bestGap = 0;
+        // Check gaps between plates
+        const positions = [60, ...existing, W-60];
+        for(let i=0;i<positions.length-1;i++){
+          const gap = positions[i+1]-positions[i];
+          if(gap>bestGap){bestGap=gap;bestX=(positions[i]+positions[i+1])/2;}
+        }
+        if(bestGap > 100){
+          plates.push(createPlate(bestX));
+        }
+      }
+
+      function update(dt){
+        if(mode!=="running"&&mode!=="clear")return;
+        if(mode==="clear"){clearAnim=clamp(clearAnim+dt*1.5,0,1);updP(dt);return;}
+        elapsed+=dt;
+
+        // Add plates over time
+        const targetCount = Math.min(7, 3 + Math.floor(elapsed / 6));
+        if(plates.filter(p=>!p.fallen).length < targetCount) addPlate();
+
+        // Update plates
+        for(const p of plates){
+          if(p.fallen){p.fallAnim=clamp(p.fallAnim+dt*3,0,1);continue;}
+          // Energy decay (faster over time)
+          const speedMult = lerp(1, 1.8, elapsed/DURATION);
+          p.energy -= p.decayRate * speedMult * dt;
+          p.wobble += p.wobbleSpeed * dt;
+          p.spinAnim *= 0.92;
+
+          // Wobble increases as energy drops
+          if(p.energy < 0.3) p.wobbleSpeed = lerp(p.wobbleSpeed, 12, dt*2);
+
+          if(p.energy <= 0){
+            p.fallen = true;
+            p.fallAnim = 0;
+            drops++;
+            shake=6;flashA=0.25;
+            spawnP(p.x, p.stickY-30, reducedMotion?3:8, COL.red, [3,6]);
+            if(drops>=MAX_DROPS){
+              mode="failed";window.relayStageResult.status="failed";reportFailed("접시 3개 추락");
+              return;
+            }
+          }
+        }
+
+        shake*=0.88;if(shake<0.3)shake=0;flashA*=0.92;
+        updP(dt);
+
+        if(elapsed>=DURATION){
+          mode="clear";clearAnim=0;
+          window.relayStageResult.status="cleared";reportCleared();
+          for(const p of plates) if(!p.fallen) spawnP(p.x, p.stickY-80, reducedMotion?3:8, COL.gold, [3,6]);
+        }
+      }
+
+      function updP(dt){for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=100*dt;p.life-=dt*2.5;if(p.life<=0)particles.splice(i,1);}}
+
+      function draw(){
+        ctx.save();
+        const sx=shake>0.3?rand(-shake,shake):0,sy=shake>0.3?rand(-shake,shake):0;
+        ctx.translate(sx,sy);
+
+        // Background
+        ctx.fillStyle=COL.bg;ctx.fillRect(0,0,W,H);
+
+        // Stage floor
+        ctx.fillStyle=COL.floor;
+        ctx.fillRect(0, H-50, W, 50);
+        ctx.fillStyle="rgba(74,48,32,0.1)";
+        ctx.fillRect(0, H-50, W, 2);
+
+        // Curtain top
+        const curtG = ctx.createLinearGradient(0,0,0,40);
+        curtG.addColorStop(0,"#CD5C5C");curtG.addColorStop(1,"rgba(205,92,92,0)");
+        ctx.fillStyle=curtG;ctx.fillRect(0,0,W,40);
+
+        if(mode==="running"||mode==="clear"||mode==="failed"){
+          // Draw plates
+          for(const p of plates) drawPlate(p);
+          if(mode==="running") drawHUD();
+        }
+
+        drawParts();
+        if(flashA>0.01){ctx.fillStyle=`rgba(220,38,38,${flashA})`;ctx.fillRect(0,0,W,H);}
+        ctx.restore();
+
+        if(mode==="menu") drawMenu();
+        else if(mode==="clear") drawClearScreen();
+        else if(mode==="failed") drawFailedScreen();
+      }
+
+      function drawPlate(p){
+        if(p.fallen){
+          // Fallen plate on floor
+          const a = p.fallAnim;
+          ctx.save();ctx.translate(p.x, p.stickY);
+          ctx.globalAlpha = 1 - a*0.5;
+          // Broken plate effect
+          ctx.beginPath();ctx.ellipse(0, 0, 24*a+16, 6, 0.3, 0, Math.PI*2);
+          ctx.fillStyle=p.color;ctx.fill();
+          ctx.globalAlpha=1;ctx.restore();
+          return;
+        }
+
+        const wobbleAmt = (1 - p.energy) * 12;
+        const wobbleAngle = Math.sin(p.wobble) * wobbleAmt * Math.PI / 180;
+        const plateY = p.stickY - 80;
+
+        ctx.save();ctx.translate(p.x, p.stickY);
+
+        // Stick
+        ctx.fillStyle=COL.stick;ctx.fillRect(-3, -80, 6, 80);
+        ctx.fillStyle=COL.stickLight;ctx.fillRect(-1, -80, 2, 80);
+
+        // Plate
+        ctx.save();ctx.translate(0, -80);ctx.rotate(wobbleAngle);
+
+        // Plate shadow
+        ctx.beginPath();ctx.ellipse(3, 5, 30, 8, 0, 0, Math.PI*2);
+        ctx.fillStyle="rgba(74,48,32,0.1)";ctx.fill();
+
+        // Plate body
+        ctx.beginPath();ctx.ellipse(0, 0, 28, 8, 0, 0, Math.PI*2);
+        ctx.fillStyle=p.color;ctx.fill();
+        ctx.strokeStyle=COL.plateBorder;ctx.lineWidth=1.5;ctx.stroke();
+
+        // Shine
+        ctx.beginPath();ctx.ellipse(-6, -2, 10, 3, -0.3, 0, Math.PI*2);
+        ctx.fillStyle=COL.plateShine;ctx.fill();
+
+        // Spin indicator
+        if(p.spinAnim > 0.05){
+          ctx.beginPath();ctx.arc(0, 0, 32, 0, Math.PI*2*p.spinAnim);
+          ctx.strokeStyle=`rgba(34,197,94,${p.spinAnim*0.5})`;ctx.lineWidth=2;ctx.stroke();
+        }
+
+        ctx.restore();
+
+        // Energy indicator (colored dot at base)
+        const eCol = p.energy > 0.5 ? COL.safe : p.energy > 0.25 ? COL.warning : COL.danger;
+        ctx.beginPath();ctx.arc(0, 4, 4, 0, Math.PI*2);
+        ctx.fillStyle=eCol;ctx.fill();
+
+        // Energy bar
+        ctx.fillStyle="rgba(74,48,32,0.1)";ctx.fillRect(-14, 10, 28, 3);
+        ctx.fillStyle=eCol;ctx.fillRect(-14, 10, 28*p.energy, 3);
+
+        ctx.restore();
+      }
+
+      function drawHUD(){
+        ctx.fillStyle=COL.text;ctx.font="600 15px 'Segoe UI',sans-serif";
+        ctx.textAlign="left";ctx.textBaseline="top";
+        const tl = Math.max(0, DURATION-elapsed);
+        ctx.fillText(`남은 시간: ${Math.ceil(tl)}초`,24,10);
+        ctx.textAlign="right";
+        ctx.fillText(`접시: ${plates.filter(p=>!p.fallen).length}개 회전 중`,W-24,10);
+        // Lives
+        for(let i=0;i<MAX_DROPS;i++){
+          ctx.beginPath();ctx.arc(30+i*22,H-20,6,0,Math.PI*2);
+          ctx.fillStyle=i<MAX_DROPS-drops?COL.gold:"rgba(74,48,32,0.15)";ctx.fill();
+        }
+      }
+
+      function drawParts(){for(const p of particles){ctx.beginPath();ctx.arc(p.x,p.y,p.size*clamp(p.life,0,1),0,Math.PI*2);ctx.fillStyle=p.color;ctx.globalAlpha=clamp(p.life,0,1);ctx.fill();ctx.globalAlpha=1;}}
+
+      function rr(c2,x,y,w,h,r){c2.beginPath();c2.moveTo(x+r,y);c2.lineTo(x+w-r,y);c2.arcTo(x+w,y,x+w,y+r,r);c2.lineTo(x+w,y+h-r);c2.arcTo(x+w,y+h,x+w-r,y+h,r);c2.lineTo(x+r,y+h);c2.arcTo(x,y+h,x,y+h-r,r);c2.lineTo(x,y+r);c2.arcTo(x,y,x+r,y,r);c2.closePath();}
+
+      function drawCard(title,lines,accent){
+        const cw=Math.min(340,W-40),ch=44+lines.length*28+40,cx2=CX-cw/2,cy2=CY-ch/2;
+        ctx.fillStyle="rgba(255,245,235,0.96)";ctx.beginPath();rr(ctx,cx2,cy2,cw,ch,10);ctx.fill();
+        ctx.fillStyle=accent;ctx.fillRect(cx2+14,cy2,cw-28,3);
+        ctx.fillStyle=COL.text;ctx.font="bold 24px 'Segoe UI',sans-serif";
+        ctx.textAlign="center";ctx.textBaseline="top";ctx.fillText(title,CX,cy2+18);
+        ctx.font="400 14px 'Segoe UI',sans-serif";ctx.fillStyle="rgba(74,48,32,0.7)";
+        for(let i=0;i<lines.length;i++)ctx.fillText(lines[i],CX,cy2+52+i*28);
+        ctx.fillStyle="rgba(74,48,32,0.35)";ctx.font="400 12px 'Segoe UI',sans-serif";
+        ctx.fillText("TAP or ENTER",CX,cy2+ch-20);
+      }
+
+      function drawMenu(){
+        ctx.fillStyle="rgba(255,245,235,0.5)";ctx.fillRect(0,0,W,H);
+        drawCard("접시 돌리기",["떨어지려는 접시를 탭해서","다시 돌리세요!","","조작: 화면 터치로 접시 탭","클리어: 30초 동안 버티기","실패: 접시 3개 추락 시 게임 오버"],COL.plateBorder);
+      }
+
+      function drawClearScreen(){
+        clearAnim=clamp(clearAnim+0.02,0,1);
+        ctx.fillStyle=`rgba(255,245,235,${clearAnim*0.5})`;ctx.fillRect(0,0,W,H);
+        if(clearAnim>0.3)drawCard("공연 성공!",[`${plates.length}개 접시를 모두 지켰습니다!`,"대단한 곡예사!"],COL.gold);
+      }
+
+      function drawFailedScreen(){
+        ctx.fillStyle="rgba(60,30,20,0.25)";ctx.fillRect(0,0,W,H);
+        drawCard("공연 실패",[`접시 ${drops}개가 떨어졌습니다`,`버틴 시간: ${Math.ceil(elapsed)}초`],COL.red);
+      }
+
+      function handleStart(){if(mode==="menu"||mode==="clear"||mode==="failed"){reset();mode="running";}}
+
+      function getCanvasPos(cx,cy){const r=canvas.getBoundingClientRect();return{x:(cx-r.left)*(W/r.width),y:(cy-r.top)*(H/r.height)};}
+
+      function findClosestPlate(mx, my){
+        let bestIdx=-1, bestDist=80; // max tap distance
+        for(let i=0;i<plates.length;i++){
+          const p=plates[i];if(p.fallen)continue;
+          const d=Math.hypot(mx-p.x, my-(p.stickY-60));
+          if(d<bestDist){bestDist=d;bestIdx=i;}
+        }
+        return bestIdx;
+      }
+
+      canvas.addEventListener("pointerdown",(e)=>{
+        e.preventDefault();
+        if(mode!=="running"){handleStart();return;}
+        const pos=getCanvasPos(e.clientX,e.clientY);
+        const idx=findClosestPlate(pos.x,pos.y);
+        if(idx>=0)spinPlate(idx);
+      });
+
+      canvas.addEventListener("keydown",(e)=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();handleStart();}});
+
+      function gameLoop(ts){
+        animFrame=requestAnimationFrame(gameLoop);
+        if(!lastTimestamp){lastTimestamp=ts;return;}
+        let dt=Math.min((ts-lastTimestamp)/1000,MAX_DT);lastTimestamp=ts;
+        let steps=0;while(dt>=FIXED_DT&&steps<4){update(FIXED_DT);dt-=FIXED_DT;steps++;}
+        if(dt>0&&steps<4)update(dt);draw();
+      }
+
+      function renderGameToText(){
+        const active=plates.filter(p=>!p.fallen).length;
+        return JSON.stringify({mode,elapsed:+elapsed.toFixed(1),activePlates:active,drops,result:window.relayStageResult.status});
+      }
+
+      window.render_game_to_text=renderGameToText;
+      window.advanceTime=(ms=16.67)=>{const s=Math.max(1,Math.round(ms/(FIXED_DT*1000)));for(let i=0;i<s;i++)update(FIXED_DT);draw();return renderGameToText();};
+      window.relayStageDebug={
+        forceClear(){reset();mode="running";elapsed=DURATION;mode="clear";clearAnim=0;window.relayStageResult.status="cleared";reportCleared();draw();},
+        forceFail(){reset();mode="running";drops=MAX_DROPS;mode="failed";window.relayStageResult.status="failed";reportFailed("debug_force_fail");draw();},
+      };
+
+      reportReady();
+      animFrame=requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
