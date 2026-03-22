@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "crystal-foundry-orbit-herding-tempo",
+    title: "Crystal Foundry: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 템포 윈도우",
+    clearCondition: "박자 창을 놓치지 않고 위성 3기를 목표 링에 순서대로 통과시키기",
+    thumbnail: "./crystal-foundry-orbit-herding-tempo/thumbnail.png",
+    path: "./crystal-foundry-orbit-herding-tempo/index.html",
   }
 ];
