@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "storm-archive-tide-anchoring-inverse",
+    title: "Storm Archive: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./storm-archive-tide-anchoring-inverse/thumbnail.png",
+    path: "./storm-archive-tide-anchoring-inverse/index.html",
+  },
+  {
     id: "crystal-foundry-mirror-theft-collapse",
     title: "Crystal Foundry: Mirror Heist",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
