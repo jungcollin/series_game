@@ -603,6 +603,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./neon-observatory-pulse-fencing-heat/index.html",
   },
   {
+    id: "glass-aquarium-magnet-braiding-combo",
+    title: "Glass Aquarium: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./glass-aquarium-magnet-braiding-combo/thumbnail.png",
+    path: "./glass-aquarium-magnet-braiding-combo/index.html",
+  },
+  {
     id: "neon-observatory-gravity-folding-charge",
     title: "Neon Observatory: Gravity Fold",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
