@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "moon-greenhouse-tide-anchoring-shrink",
+    title: "Moon Greenhouse: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./moon-greenhouse-tide-anchoring-shrink/thumbnail.png",
+    path: "./moon-greenhouse-tide-anchoring-shrink/index.html",
   }
 ];
