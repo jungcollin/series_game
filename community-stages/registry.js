@@ -214,5 +214,32 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초간 상하 대칭으로 움직이며 생존",
     thumbnail: "./mirror-dash/thumbnail.png",
     path: "./mirror-dash/index.html",
+  },
+  {
+    id: "ninja-jump",
+    title: "닌자 점프",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "Arcade",
+    clearCondition: "15초 동안 수리검을 피해 살아남기",
+    thumbnail: "./ninja-jump/thumbnail.png",
+    path: "./ninja-jump/index.html",
+  },
+  {
+    id: "my-new-stage",
+    title: "새로운 스테이지",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./my-new-stage/thumbnail.png",
+    path: "./my-new-stage/index.html",
+  },
+  {
+    id: "space-dodge",
+    title: "스페이스 닷지",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "아케이드",
+    clearCondition: "10초 버티기",
+    thumbnail: "./space-dodge/thumbnail.png",
+    path: "./space-dodge/index.html",
   }
 ];
