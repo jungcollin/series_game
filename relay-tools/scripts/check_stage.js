@@ -435,8 +435,8 @@ async function main() {
 
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+  const desktopBrowser = await chromium.launch({ headless: true });
+  const page = await desktopBrowser.newPage({ viewport: { width: 1440, height: 960 } });
   const consoleErrors = [];
   page.on("console", (msg) => {
     if (msg.type() === "error") {
@@ -478,13 +478,17 @@ async function main() {
     repoRoot,
     stageMeta,
   });
+  await desktopBrowser.close();
+
+  const mobileBrowser = await chromium.launch({ headless: true });
   const mobileChecks = await captureMobileStageState({
-    browser,
+    browser: mobileBrowser,
     stageUrl,
     outputDir,
     stageMeta,
     consoleErrors,
   });
+  await mobileBrowser.close();
 
   if (!launcherCount) {
     throw new Error(`Launcher card not found for stage: ${stageMeta.id}`);
@@ -514,7 +518,8 @@ async function main() {
     );
   }
 
-  const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const hostBrowser = await chromium.launch({ headless: true });
+  const hostPage = await hostBrowser.newPage({ viewport: { width: 1280, height: 800 } });
   hostPage.on("console", (msg) => {
     if (msg.type() === "error") {
       consoleErrors.push(msg.text());
@@ -558,7 +563,7 @@ async function main() {
     path: path.join(outputDir, `${stageMeta.dir}-host.png`),
     fullPage: true,
   });
-  await browser.close();
+  await hostBrowser.close();
 
   const hasClearEvent = clearEvents.some((event) => event.type === "cleared");
   const hasFailEvent = failEvents.some((event) => event.type === "failed");
