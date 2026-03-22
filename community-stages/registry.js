@@ -511,5 +511,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "무대 끝까지 도달하면 클리어",
     thumbnail: "./shadow-dance/thumbnail.png",
     path: "./shadow-dance/index.html",
+  },
+  {
+    id: "parcel-cannon",
+    title: "택배 대포",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Projectile puzzle",
+    clearCondition: "택배 5개를 모두 배달하면 클리어",
+    thumbnail: "./parcel-cannon/thumbnail.png",
+    path: "./parcel-cannon/index.html",
   }
 ];
