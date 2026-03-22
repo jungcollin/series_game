@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "paper-temple-mirror-theft-combo",
+    title: "Paper Temple: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 콤보 임계치",
+    clearCondition: "콤보 유지하며 패턴 3개로 금고 열기",
+    thumbnail: "./paper-temple-mirror-theft-combo/thumbnail.png",
+    path: "./paper-temple-mirror-theft-combo/index.html",
+  },
+  {
     id: "neon-observatory-mirror-theft-cursed",
     title: "Neon Observatory: Mirror Heist",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
