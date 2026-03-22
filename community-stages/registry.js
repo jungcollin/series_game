@@ -232,5 +232,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 모든 코어 문양을 연결하면 클리어",
     thumbnail: "./moon-greenhouse-echo-weaving-heat/thumbnail.png",
     path: "./moon-greenhouse-echo-weaving-heat/index.html",
+  },
+  {
+    id: "storm-archive-echo-weaving-witness",
+    title: "Storm Archive: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./storm-archive-echo-weaving-witness/thumbnail.png",
+    path: "./storm-archive-echo-weaving-witness/index.html",
   }
 ];
