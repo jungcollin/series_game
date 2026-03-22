@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "biomech-theater-weather-mixing-heat",
+    title: "Biomech Theater: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./biomech-theater-weather-mixing-heat/thumbnail.png",
+    path: "./biomech-theater-weather-mixing-heat/index.html",
   }
 ];
