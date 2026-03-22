@@ -205,5 +205,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "저주 조합을 버티면서 모든 코어 문양을 연결하면 클리어",
     thumbnail: "./midnight-harbor-echo-weaving-cursed/thumbnail.png",
     path: "./midnight-harbor-echo-weaving-cursed/index.html",
+  },
+  {
+    id: "neon-observatory-echo-weaving-collapse",
+    title: "Neon Observatory: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./neon-observatory-echo-weaving-collapse/thumbnail.png",
+    path: "./neon-observatory-echo-weaving-collapse/index.html",
   }
 ];
