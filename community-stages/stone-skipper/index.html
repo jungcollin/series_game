@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>물수제비</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Georgia", "Noto Serif KR", serif;
+        background: #E6E0F0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(107, 152, 196, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(60, 60, 90, 0.92);
+        color: #E6E0F0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E6E0F0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(107, 152, 196, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">물수제비. 잔잔한 호수에 돌을 던져 물수제비를 뜨세요. 화면을 드래그하여 돌을 던집니다. 모바일에서는 터치 드래그로 플레이할 수 있습니다. 돌을 7번 이상 튕기면 클리어. 3번 연속 실패하면 게임 종료.</p>
+    <canvas id="game" width="960" height="540" aria-label="물수제비" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "stone-skipper",
+        title: "물수제비",
+        description: "잔잔한 호수에 돌을 던져 물수제비를 뜨세요",
+        creator: "jungcollin",
+        genre: "Flick physics",
+        clearCondition: "돌을 7번 이상 튕기면 클리어",
+        failCondition: "3번 연속 실패하면 게임 종료",
+        controls: "드래그로 돌을 던져 물수제비를 뜨세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        skyTop: "#C8B8E8",
+        skyBot: "#E6E0F0",
+        lake: "#6B98C4",
+        lakeDark: "#4A7AAA",
+        lakeLight: "#8BB8E0",
+        mountain: "#8E7CC3",
+        mountainDark: "#6B5B9A",
+        tree: "#5A7A5A",
+        treeDark: "#3E5A3E",
+        stone: "#DDD5C0",
+        stoneDark: "#B8AE98",
+        ripple: "rgba(255,255,255,0.5)",
+        splash: "rgba(200,220,240,0.8)",
+        accent: "#9B7ED8",
+        fail: "#C0392B",
+        clear: "#27AE60",
+      };
+
+      // --- Constants ---
+      const TARGET_SKIPS = 7;
+      const MAX_FAILS = 3;
+      const WATER_Y = 340;
+      const THROW_X = 100;
+      const THROW_Y = 380;
+      const GRAVITY = 300;
+
+      // --- State ---
+      let mode = "menu";
+      let elapsed = 0;
+      let totalSkips = 0;
+      let consecutiveFails = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let clearAnim = 0;
+
+      let stone = null;
+      let ripples = [];
+      let particles = [];
+      let dragging = false;
+      let dragStart = null;
+      let dragCurrent = null;
+      let currentSkips = 0;
+      let bestSkips = 0;
+      let throwCount = 0;
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function addRipple(x) {
+        ripples.push({ x, y: WATER_Y, radius: 5, maxRadius: rand(25, 50), life: 1 });
+      }
+
+      function addSplash(x) {
+        for (let i = 0; i < (reducedMotion ? 3 : 8); i++) {
+          const angle = rand(-Math.PI * 0.8, -Math.PI * 0.2);
+          const speed = rand(40, 120);
+          particles.push({
+            x, y: WATER_Y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 1, size: rand(2, 5),
+            color: COL.splash,
+          });
+        }
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; totalSkips = 0; consecutiveFails = 0;
+        clearAnim = 0;
+        stone = null; ripples = []; particles = [];
+        dragging = false; dragStart = null; dragCurrent = null;
+        currentSkips = 0; bestSkips = 0; throwCount = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+      }
+
+      function throwStone() {
+        if (!dragStart || !dragCurrent || stone) return;
+        const dx = dragCurrent.x - dragStart.x;
+        const dy = dragStart.y - dragCurrent.y;
+        const power = clamp(Math.hypot(dx, dy) / 150, 0.2, 1);
+        const angle = clamp(Math.atan2(dy, Math.abs(dx)), 0.1, 0.8);
+
+        const speed = power * 500;
+        stone = {
+          x: THROW_X, y: THROW_Y - 20,
+          vx: Math.cos(angle) * speed + 80,
+          vy: -Math.sin(angle) * speed,
+          skips: 0,
+          sinking: false,
+          sinkTimer: 0,
+          flatAngle: angle,
+        };
+        currentSkips = 0;
+        throwCount++;
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Stone physics
+        if (stone && !stone.sinking) {
+          stone.vy += GRAVITY * dt;
+          stone.x += stone.vx * dt;
+          stone.y += stone.vy * dt;
+
+          // Hit water surface
+          if (stone.y >= WATER_Y && stone.vy > 0) {
+            // Calculate skip quality based on angle and speed
+            const angleQuality = stone.flatAngle > 0.15 && stone.flatAngle < 0.6;
+            const speedOk = stone.vx > 60;
+
+            if (angleQuality && speedOk && stone.skips < 12) {
+              // Bounce!
+              stone.skips++;
+              currentSkips++;
+              totalSkips++;
+              stone.y = WATER_Y - 2;
+              stone.vy = -Math.abs(stone.vy) * 0.55;
+              stone.vx *= 0.82;
+              addRipple(stone.x);
+              addSplash(stone.x);
+
+              // Check clear
+              if (totalSkips >= TARGET_SKIPS) {
+                mode = "clear"; clearAnim = 0;
+                window.relayStageResult.status = "cleared";
+                reportCleared();
+                return;
+              }
+            } else {
+              // Sink
+              stone.sinking = true;
+              stone.sinkTimer = 0;
+              addRipple(stone.x);
+              addSplash(stone.x);
+
+              if (currentSkips === 0) {
+                consecutiveFails++;
+              } else {
+                consecutiveFails = 0;
+              }
+              bestSkips = Math.max(bestSkips, currentSkips);
+
+              if (consecutiveFails >= MAX_FAILS) {
+                mode = "failed";
+                window.relayStageResult.status = "failed";
+                reportFailed("연속 실패");
+                return;
+              }
+            }
+          }
+
+          // Off screen
+          if (stone.x > W + 50) {
+            if (currentSkips === 0) consecutiveFails++;
+            else consecutiveFails = 0;
+            bestSkips = Math.max(bestSkips, currentSkips);
+            stone = null;
+            if (consecutiveFails >= MAX_FAILS) {
+              mode = "failed";
+              window.relayStageResult.status = "failed";
+              reportFailed("연속 실패");
+            }
+          }
+        }
+
+        // Sinking stone
+        if (stone && stone.sinking) {
+          stone.sinkTimer += dt;
+          stone.y += 30 * dt;
+          if (stone.sinkTimer > 1) stone = null;
+        }
+
+        // Ripples
+        for (let i = ripples.length - 1; i >= 0; i--) {
+          const r = ripples[i];
+          r.radius += 40 * dt;
+          r.life -= dt * 1.2;
+          if (r.life <= 0) ripples.splice(i, 1);
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 150 * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+
+        // Sky
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, WATER_Y);
+        skyGrad.addColorStop(0, COL.skyTop);
+        skyGrad.addColorStop(1, COL.skyBot);
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, WATER_Y);
+
+        // Mountains
+        drawMountains();
+
+        // Trees along shore
+        drawTrees();
+
+        // Lake
+        const lakeGrad = ctx.createLinearGradient(0, WATER_Y, 0, H);
+        lakeGrad.addColorStop(0, COL.lake);
+        lakeGrad.addColorStop(1, COL.lakeDark);
+        ctx.fillStyle = lakeGrad;
+        ctx.fillRect(0, WATER_Y, W, H - WATER_Y);
+
+        // Lake reflection shimmer
+        drawLakeShimmer();
+
+        // Ripples
+        drawRipples();
+
+        // Shore
+        ctx.fillStyle = COL.stone;
+        ctx.beginPath();
+        ctx.moveTo(0, WATER_Y + 10);
+        ctx.quadraticCurveTo(60, WATER_Y - 15, 140, WATER_Y + 5);
+        ctx.lineTo(140, H);
+        ctx.lineTo(0, H);
+        ctx.fill();
+        ctx.fillStyle = COL.stoneDark;
+        ctx.beginPath();
+        ctx.moveTo(0, WATER_Y + 20);
+        ctx.quadraticCurveTo(50, WATER_Y, 130, WATER_Y + 15);
+        ctx.lineTo(130, H);
+        ctx.lineTo(0, H);
+        ctx.fill();
+
+        // Stone in hand (when not thrown)
+        if (!stone && mode === "running") {
+          drawStoneInHand();
+        }
+
+        // Flying stone
+        if (stone) {
+          drawFlyingStone();
+        }
+
+        // Aim line
+        if (dragging && !stone) drawAimLine();
+
+        // Particles
+        drawParticles();
+
+        // Skip counter floating text
+        if (stone && currentSkips > 0 && !stone.sinking) {
+          ctx.fillStyle = COL.accent;
+          ctx.font = "bold 28px Georgia, serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(`${currentSkips}`, stone.x, stone.y - 20);
+        }
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawMountains() {
+        ctx.fillStyle = COL.mountain;
+        ctx.beginPath();
+        ctx.moveTo(200, WATER_Y);
+        ctx.lineTo(350, 140);
+        ctx.lineTo(500, WATER_Y);
+        ctx.fill();
+
+        ctx.fillStyle = COL.mountainDark;
+        ctx.beginPath();
+        ctx.moveTo(450, WATER_Y);
+        ctx.lineTo(620, 170);
+        ctx.lineTo(780, WATER_Y);
+        ctx.fill();
+
+        ctx.fillStyle = COL.mountain;
+        ctx.globalAlpha = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(680, WATER_Y);
+        ctx.lineTo(820, 200);
+        ctx.lineTo(960, WATER_Y);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      function drawTrees() {
+        const treePositions = [160, 195, 230, 780, 820, 860, 900];
+        for (const tx of treePositions) {
+          const th = rand(30, 50);
+          ctx.fillStyle = COL.treeDark;
+          ctx.fillRect(tx - 2, WATER_Y - th - 10, 4, th + 10);
+          ctx.fillStyle = COL.tree;
+          ctx.beginPath();
+          ctx.moveTo(tx, WATER_Y - th - 25);
+          ctx.lineTo(tx - 12, WATER_Y - 10);
+          ctx.lineTo(tx + 12, WATER_Y - 10);
+          ctx.fill();
+        }
+      }
+
+      function drawLakeShimmer() {
+        if (reducedMotion) return;
+        ctx.globalAlpha = 0.08;
+        ctx.fillStyle = COL.lakeLight;
+        for (let i = 0; i < 15; i++) {
+          const sx = ((i * 73 + Math.floor(elapsed * 10)) % W);
+          const sy = WATER_Y + 10 + ((i * 37) % (H - WATER_Y - 20));
+          ctx.fillRect(sx, sy, rand(20, 50), 2);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawRipples() {
+        for (const r of ripples) {
+          ctx.globalAlpha = r.life * 0.5;
+          ctx.strokeStyle = COL.ripple;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.ellipse(r.x, r.y, r.radius, r.radius * 0.3, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawStoneInHand() {
+        ctx.fillStyle = COL.stoneDark;
+        ctx.beginPath();
+        ctx.ellipse(THROW_X + 10, THROW_Y - 25, 10, 6, -0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = COL.stone;
+        ctx.beginPath();
+        ctx.ellipse(THROW_X + 10, THROW_Y - 27, 9, 5, -0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawFlyingStone() {
+        const alpha = stone.sinking ? clamp(1 - stone.sinkTimer, 0, 1) : 1;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = COL.stoneDark;
+        ctx.beginPath();
+        ctx.ellipse(stone.x, stone.y, 8, 4, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = COL.stone;
+        ctx.beginPath();
+        ctx.ellipse(stone.x, stone.y - 1, 7, 3.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      function drawAimLine() {
+        if (!dragStart || !dragCurrent) return;
+        const dx = dragCurrent.x - dragStart.x;
+        const dy = dragStart.y - dragCurrent.y;
+        const power = clamp(Math.hypot(dx, dy) / 150, 0, 1);
+
+        ctx.setLineDash([4, 6]);
+        ctx.strokeStyle = `rgba(155, 126, 216, ${0.3 + power * 0.4})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(THROW_X + 10, THROW_Y - 25);
+        const endX = THROW_X + 10 + power * 200;
+        const endY = THROW_Y - 25 - power * 80;
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Power indicator
+        ctx.fillStyle = "rgba(155,126,216,0.5)";
+        ctx.font = "14px Georgia, serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`${Math.round(power * 100)}%`, THROW_X + 10, THROW_Y - 50);
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = "rgba(230,224,240,0.75)";
+        ctx.fillRect(0, 0, W, 40);
+        ctx.font = "bold 16px Georgia, serif";
+        ctx.textBaseline = "middle";
+
+        ctx.fillStyle = COL.accent;
+        ctx.textAlign = "left";
+        ctx.fillText(`튕김: ${totalSkips}/${TARGET_SKIPS}`, 20, 20);
+
+        ctx.fillStyle = consecutiveFails > 0 ? COL.fail : "#888";
+        ctx.textAlign = "center";
+        ctx.fillText(`연속실패: ${consecutiveFails}/${MAX_FAILS}`, CX, 20);
+
+        ctx.fillStyle = "#777";
+        ctx.textAlign = "right";
+        ctx.fillText(`던짐: ${throwCount}`, W - 20, 20);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 52 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2;
+        const cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 12);
+        ctx.fill();
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+        ctx.fillStyle = "#333";
+        ctx.font = "bold 24px Georgia, serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+        ctx.font = "500 14px Georgia, serif";
+        ctx.fillStyle = "#555";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.font = "400 13px Georgia, serif";
+        ctx.fillText("탭 또는 Enter로 시작", CX, cardY + cardH - 24);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(230,224,240,0.5)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("물수제비", [
+          "잔잔한 호수에 돌을 던져보세요",
+          "",
+          "조작: 드래그로 던지기",
+          "클리어: 총 7번 튕기기",
+          "실패: 3번 연속 튕김 없이 실패",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(255,255,255,${clearAnim * 0.4})`;
+        ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) {
+          drawCard("멋진 물수제비!", [
+            `${throwCount}번 던져서 ${totalSkips}번 튕김`,
+            `${Math.ceil(elapsed)}초 만에 완료`,
+          ], COL.clear);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(0,0,0,0.2)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("풍덩!", [
+          "돌이 3번 연속 가라앉았습니다",
+          `총 튕김: ${totalSkips}/${TARGET_SKIPS}`,
+        ], COL.fail);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset(); mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        if (stone) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        dragging = true; dragStart = p; dragCurrent = p;
+        canvas.setPointerCapture(e.pointerId);
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        dragCurrent = getCanvasPos(e.clientX, e.clientY);
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (!dragging) return;
+        dragging = false;
+        if (dragStart && dragCurrent) {
+          const d = Math.hypot(dragCurrent.x - dragStart.x, dragCurrent.y - dragStart.y);
+          if (d > 20) throwStone();
+        }
+        dragStart = null; dragCurrent = null;
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleStart();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT); dt -= FIXED_DT; steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          totalSkips, consecutiveFails, throwCount,
+          bestSkips, currentSkips,
+          result: window.relayStageResult.status,
+          stoneFlying: !!stone,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          totalSkips = TARGET_SKIPS;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          consecutiveFails = MAX_FAILS;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      // --- Init ---
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
