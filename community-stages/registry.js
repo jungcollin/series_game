@@ -207,6 +207,24 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./biomech-theater-echo-weaving-charge/index.html",
   },
   {
+    id: "glass-aquarium-debt-auction-tempo",
+    title: "Glass Aquarium: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 시간을 0으로 만들지 않으며 마지막 경매를 넘기면 클리어",
+    thumbnail: "./glass-aquarium-debt-auction-tempo/thumbnail.png",
+    path: "./glass-aquarium-debt-auction-tempo/index.html",
+  },
+  {
+    id: "glass-aquarium-tide-anchoring-charge",
+    title: "Glass Aquarium: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 제한 충전",
+    clearCondition: "충전을 남기고 조류 6파 동안 발전기를 지키기",
+    thumbnail: "./glass-aquarium-tide-anchoring-charge/thumbnail.png",
+    path: "./glass-aquarium-tide-anchoring-charge/index.html",
+  },
+  {
     id: "dream-motel-tide-anchoring-cursed",
     title: "Dream Motel: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -475,5 +493,23 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "축소 구간 끝까지 버티며 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
     thumbnail: "./neon-observatory-magnet-braiding-shrink/thumbnail.png",
     path: "./neon-observatory-magnet-braiding-shrink/index.html",
+  },
+  {
+    id: "dream-motel-debt-auction-heat",
+    title: "Dream Motel: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./dream-motel-debt-auction-heat/thumbnail.png",
+    path: "./dream-motel-debt-auction-heat/index.html",
+  },
+  {
+    id: "midnight-harbor-shadow-stitch-heat",
+    title: "Midnight Harbor: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./midnight-harbor-shadow-stitch-heat/thumbnail.png",
+    path: "./midnight-harbor-shadow-stitch-heat/index.html",
   }
 ];
