@@ -610,5 +610,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "편지 10개를 젖지 않게 수집하면 클리어",
     thumbnail: "./umbrella-walk/thumbnail.png",
     path: "./umbrella-walk/index.html",
+  },
+  {
+    id: "pottery-spin",
+    title: "도자기 빚기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Crafting",
+    clearCondition: "목표 모양에 맞게 성형하면 클리어",
+    thumbnail: "./pottery-spin/thumbnail.png",
+    path: "./pottery-spin/index.html",
   }
 ];
