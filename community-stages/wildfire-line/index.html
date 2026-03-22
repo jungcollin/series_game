@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>들불 진화</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #f4edd8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(200, 140, 60, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 50, 20, 0.92);
+        color: #f4edd8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #f4edd8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(200, 120, 40, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">들불 진화. 빈 칸을 터치하여 방화선을 설치하고 불의 확산을 막으세요. 모바일에서는 화면 터치로 방화선을 놓습니다. 마을 5개를 보호하면 클리어.</p>
+    <canvas id="game" width="960" height="540" aria-label="들불 진화" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "wildfire-line",
+        title: "들불 진화",
+        description: "방화선을 설치해 불의 확산을 막으세요",
+        creator: "jungcollin",
+        genre: "Strategic placement",
+        clearCondition: "마을 5개를 보호하면 클리어",
+        failCondition: "마을 3개가 불타면 실패",
+        controls: "빈 칸을 터치하여 방화선 설치",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      // Colors: warm orange / green / earth
+      const COL = {
+        bg: "#f4edd8", grass: "#8cb860", grassDark: "#6a9040",
+        fire: "#e85020", fireGlow: "rgba(232, 80, 32, 0.4)",
+        fireLight: "#f0a030", ash: "#4a4040",
+        firebreak: "#c8b888", village: "#4a78b8",
+        villageDark: "#385a8a", tree: "#4a8a30",
+        text: "#3a2a14", accent: "#d07020",
+        fail: "#b03030", success: "#2e8b57",
+      };
+
+      const COLS = 10, ROWS = 7;
+      const CELL = 52;
+      const GX = CX - (COLS * CELL) / 2;
+      const GY = CY - (ROWS * CELL) / 2 + 15;
+      const MAX_FIREBREAKS = 8;
+      const SPREAD_INTERVAL = 0.6;
+      const MAX_VILLAGE_BURN = 3;
+      const TARGET_VILLAGES = 5;
+
+      // Cell types: "grass", "fire", "firebreak", "village", "ash", "tree"
+      let grid = [];
+      let mode = "menu", elapsed = 0, villagesSaved = 0, villagesBurned = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, clearAnim = 0, successFlash = 0;
+      let spreadTimer = 0, firebreaksLeft = 0;
+      let roundNum = 0, fireActive = false;
+      let particles = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), spd = rand(20, 60);
+          particles.push({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 30, life: 1, color, size: rand(2, 5) });
+        }
+      }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) }); }
+      function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) }); }
+
+      function idx(r, c) { return r * COLS + c; }
+
+      function generateRound() {
+        grid = [];
+        for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) grid.push({ type: "grass", fireAge: 0 });
+
+        // Place trees (decorative, burnable)
+        const numTrees = 8 + Math.floor(Math.random() * 6);
+        for (let i = 0; i < numTrees; i++) {
+          const r = Math.floor(Math.random() * ROWS), c = Math.floor(Math.random() * COLS);
+          grid[idx(r, c)].type = "tree";
+        }
+
+        // Place villages (need to protect)
+        const numVillages = 2 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < numVillages; i++) {
+          const r = 1 + Math.floor(Math.random() * (ROWS - 2));
+          const c = Math.floor(COLS / 2) + Math.floor(Math.random() * (COLS / 2 - 1));
+          grid[idx(r, c)].type = "village";
+        }
+
+        // Start fire on left edge
+        const fireRow = 1 + Math.floor(Math.random() * (ROWS - 2));
+        grid[idx(fireRow, 0)].type = "fire";
+        grid[idx(fireRow, 0)].fireAge = 0;
+        if (fireRow > 0) { grid[idx(fireRow - 1, 0)].type = "fire"; grid[idx(fireRow - 1, 0)].fireAge = 0; }
+        if (fireRow < ROWS - 1) { grid[idx(fireRow + 1, 0)].type = "fire"; grid[idx(fireRow + 1, 0)].fireAge = 0; }
+
+        firebreaksLeft = MAX_FIREBREAKS;
+        spreadTimer = 1.5; // grace period before first spread
+        fireActive = true;
+      }
+
+      function spreadFire() {
+        const newFires = [];
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            if (grid[idx(r, c)].type !== "fire") continue;
+            // Spread to neighbors
+            const neighbors = [[r-1,c],[r+1,c],[r,c-1],[r,c+1]];
+            for (const [nr, nc] of neighbors) {
+              if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+              const n = grid[idx(nr, nc)];
+              if (n.type === "grass" || n.type === "tree") {
+                newFires.push({ r: nr, c: nc });
+              } else if (n.type === "village") {
+                n.type = "fire"; n.fireAge = 0;
+                villagesBurned++;
+                shake = 12;
+                const px = GX + nc * CELL + CELL / 2, py = GY + nr * CELL + CELL / 2;
+                spawnParticles(px, py, reducedMotion ? 4 : 12, COL.fire);
+                if (villagesBurned >= MAX_VILLAGE_BURN) {
+                  mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("마을 3개 소실");
+                  return;
+                }
+              }
+            }
+          }
+        }
+        for (const f of newFires) {
+          grid[idx(f.r, f.c)].type = "fire";
+          grid[idx(f.r, f.c)].fireAge = 0;
+        }
+
+        // Check if fire is done spreading (no more burnable neighbors)
+        let canSpread = false;
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            if (grid[idx(r, c)].type !== "fire") continue;
+            const neighbors = [[r-1,c],[r+1,c],[r,c-1],[r,c+1]];
+            for (const [nr, nc] of neighbors) {
+              if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+              const t = grid[idx(nr, nc)].type;
+              if (t === "grass" || t === "tree" || t === "village") { canSpread = true; break; }
+            }
+            if (canSpread) break;
+          }
+          if (canSpread) break;
+        }
+
+        if (!canSpread) {
+          // Round complete
+          fireActive = false;
+          // Count surviving villages
+          const surviving = grid.filter(c => c.type === "village").length;
+          villagesSaved += surviving;
+          successFlash = surviving > 0 ? 1 : 0;
+
+          if (villagesSaved >= TARGET_VILLAGES) {
+            mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared();
+          } else {
+            roundNum++;
+            setTimeout(() => { if (mode === "running") generateRound(); }, 700);
+          }
+        }
+      }
+
+      function reset() {
+        elapsed = 0; villagesSaved = 0; villagesBurned = 0; roundNum = 0;
+        shake = 0; clearAnim = 0; successFlash = 0; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateRound();
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        if (fireActive) {
+          spreadTimer -= dt;
+          if (spreadTimer <= 0) {
+            spreadFire();
+            spreadTimer = SPREAD_INTERVAL;
+          }
+
+          // Age fire cells
+          for (const c of grid) { if (c.type === "fire") c.fireAge += dt; }
+          // Turn old fire to ash
+          for (const c of grid) { if (c.type === "fire" && c.fireAge > 3) c.type = "ash"; }
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy -= 40 * dt; // float up
+          p.life -= dt * 1.8;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        successFlash *= 0.92;
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+
+        if (mode === "running" || mode === "clear" || mode === "failed") {
+          drawGrid();
+          drawParticles();
+          if (mode === "running") drawHUD();
+        }
+
+        if (successFlash > 0.01) { ctx.fillStyle = `rgba(46, 139, 87, ${successFlash * 0.12})`; ctx.fillRect(0, 0, W, H); }
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawGrid() {
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const cell = grid[idx(r, c)];
+            const x = GX + c * CELL, y = GY + r * CELL;
+            const cx = x + CELL / 2, cy = y + CELL / 2;
+
+            // Base grass
+            ctx.fillStyle = (r + c) % 2 === 0 ? COL.grass : COL.grassDark;
+            ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+
+            if (cell.type === "tree") {
+              // Tree trunk
+              ctx.fillStyle = "#6b4226";
+              ctx.fillRect(cx - 3, cy, 6, 14);
+              // Canopy
+              ctx.beginPath(); ctx.arc(cx, cy - 2, 12, 0, Math.PI * 2);
+              ctx.fillStyle = COL.tree; ctx.fill();
+              ctx.beginPath(); ctx.arc(cx - 5, cy + 2, 8, 0, Math.PI * 2);
+              ctx.fillStyle = "#5a9a38"; ctx.fill();
+            } else if (cell.type === "village") {
+              // House
+              ctx.fillStyle = COL.village;
+              ctx.fillRect(cx - 10, cy - 4, 20, 16);
+              // Roof
+              ctx.beginPath();
+              ctx.moveTo(cx - 14, cy - 4);
+              ctx.lineTo(cx, cy - 18);
+              ctx.lineTo(cx + 14, cy - 4);
+              ctx.closePath();
+              ctx.fillStyle = COL.villageDark; ctx.fill();
+              // Window
+              ctx.fillStyle = "#f0d060";
+              ctx.fillRect(cx - 4, cy, 8, 6);
+            } else if (cell.type === "fire") {
+              // Fire
+              ctx.fillStyle = "rgba(40, 20, 10, 0.3)"; ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+              const flicker = Math.sin(elapsed * 8 + r * 3 + c * 5) * 4;
+              ctx.beginPath(); ctx.arc(cx, cy - 4 + flicker * 0.3, 14 + flicker, 0, Math.PI * 2);
+              ctx.fillStyle = COL.fire; ctx.fill();
+              ctx.beginPath(); ctx.arc(cx - 3, cy - 8, 8 + flicker * 0.5, 0, Math.PI * 2);
+              ctx.fillStyle = COL.fireLight; ctx.fill();
+              // Glow
+              if (!reducedMotion) {
+                ctx.beginPath(); ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+                ctx.fillStyle = COL.fireGlow; ctx.fill();
+              }
+            } else if (cell.type === "firebreak") {
+              // Dirt line
+              ctx.fillStyle = COL.firebreak; ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+              // Shovel marks
+              ctx.strokeStyle = "#a09060"; ctx.lineWidth = 1;
+              ctx.beginPath(); ctx.moveTo(x + 8, y + 8); ctx.lineTo(x + CELL - 8, y + CELL - 8); ctx.stroke();
+              ctx.beginPath(); ctx.moveTo(x + CELL - 8, y + 8); ctx.lineTo(x + 8, y + CELL - 8); ctx.stroke();
+            } else if (cell.type === "ash") {
+              ctx.fillStyle = COL.ash; ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+            }
+          }
+        }
+
+        // Grid lines
+        ctx.strokeStyle = "rgba(50, 80, 30, 0.15)"; ctx.lineWidth = 1;
+        for (let r = 0; r <= ROWS; r++) { ctx.beginPath(); ctx.moveTo(GX, GY + r * CELL); ctx.lineTo(GX + COLS * CELL, GY + r * CELL); ctx.stroke(); }
+        for (let c = 0; c <= COLS; c++) { ctx.beginPath(); ctx.moveTo(GX + c * CELL, GY); ctx.lineTo(GX + c * CELL, GY + ROWS * CELL); ctx.stroke(); }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fill(); ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "600 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`마을 ${villagesSaved} / ${TARGET_VILLAGES}`, 24, 16);
+        ctx.textAlign = "center";
+        ctx.fillStyle = COL.accent;
+        ctx.fillText(`방화선: ${firebreaksLeft}`, CX, 16);
+        ctx.textAlign = "right";
+        const safe = MAX_VILLAGE_BURN - villagesBurned;
+        let h = "";
+        for (let i = 0; i < MAX_VILLAGE_BURN; i++) h += i < safe ? "●" : "○";
+        ctx.fillStyle = villagesBurned > 0 ? COL.fail : COL.text;
+        ctx.fillText(h, W - 24, 16);
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r); ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h); ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40), cardH = 42 + lines.length * 28 + 44;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(244, 237, 216, 0.95)"; ctx.beginPath(); roundRect(cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 14, cardY, cardW - 28, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 22px 'Segoe UI', sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 16);
+        ctx.font = "400 14px 'Segoe UI', sans-serif"; ctx.fillStyle = "rgba(58, 42, 20, 0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 48 + i * 28);
+        ctx.fillStyle = "rgba(58, 42, 20, 0.4)"; ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("TAP 또는 ENTER", CX, cardY + cardH - 24);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(244, 237, 216, 0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("들불 진화", ["방화선으로 마을을 지키세요", "", "조작: 빈 칸 터치로 방화선 설치", "클리어: 마을 5개 보호", "실패: 마을 3개 소실"], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(244, 237, 216, ${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("진화 성공!", [`${Math.ceil(elapsed)}초 만에 완료`, `마을 ${villagesSaved}개 보호`], COL.success);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80, 30, 10, 0.3)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["마을이 너무 많이 불탔습니다", `마을 ${villagesSaved} / ${TARGET_VILLAGES} 보호`], COL.fail);
+      }
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() { if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; } }
+
+      function handleTap(cx, cy) {
+        if (mode !== "running" || firebreaksLeft <= 0) return;
+        const col = Math.floor((cx - GX) / CELL);
+        const row = Math.floor((cy - GY) / CELL);
+        if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
+        const cell = grid[idx(row, col)];
+        if (cell.type === "grass" || cell.type === "tree") {
+          cell.type = "firebreak";
+          firebreaksLeft--;
+          const px = GX + col * CELL + CELL / 2, py = GY + row * CELL + CELL / 2;
+          spawnParticles(px, py, reducedMotion ? 3 : 6, COL.firebreak);
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY); handleTap(p.x, p.y);
+      });
+      canvas.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); } });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT); lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), villagesSaved, villagesBurned, firebreaksLeft, result: window.relayStageResult.status });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT); draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; villagesSaved = TARGET_VILLAGES; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; villagesBurned = MAX_VILLAGE_BURN; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      generateRound(); reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

@@ -664,5 +664,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "정상에 도달하면 클리어",
     thumbnail: "./summit-climber/thumbnail.png",
     path: "./summit-climber/index.html",
+  },
+  {
+    id: "wildfire-line",
+    title: "들불 진화",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Strategic placement",
+    clearCondition: "마을 5개를 보호하면 클리어",
+    thumbnail: "./wildfire-line/thumbnail.png",
+    path: "./wildfire-line/index.html",
   }
 ];
