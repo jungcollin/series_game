@@ -466,5 +466,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "모래성 5층을 완성하면 클리어",
     thumbnail: "./sand-castle/thumbnail.png",
     path: "./sand-castle/index.html",
+  },
+  {
+    id: "pipe-rush",
+    title: "파이프 연결",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Spatial puzzle",
+    clearCondition: "물이 출구에 도달하면 클리어",
+    thumbnail: "./pipe-rush/thumbnail.png",
+    path: "./pipe-rush/index.html",
   }
 ];
