@@ -835,5 +835,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "저주를 버티며 코어를 균열 없이 슬롯까지 운반",
     thumbnail: "./crystal-foundry-gravity-folding-cursed/thumbnail.png",
     path: "./crystal-foundry-gravity-folding-cursed/index.html",
+  },
+  {
+    id: "dusk-subway-tide-anchoring-witness",
+    title: "Dusk Subway: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./dusk-subway-tide-anchoring-witness/thumbnail.png",
+    path: "./dusk-subway-tide-anchoring-witness/index.html",
   }
 ];
