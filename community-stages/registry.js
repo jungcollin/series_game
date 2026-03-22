@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "biomech-theater-debt-auction-collapse",
+    title: "Biomech Theater: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./biomech-theater-debt-auction-collapse/thumbnail.png",
+    path: "./biomech-theater-debt-auction-collapse/index.html",
+  },
+  {
     id: "glass-aquarium-weather-mixing-shrink",
     title: "Glass Aquarium: Weather Mix",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
