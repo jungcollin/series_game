@@ -1033,5 +1033,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "붕괴선보다 먼저 20연속 파형 반사",
     thumbnail: "./dream-motel-pulse-fencing-collapse/thumbnail.png",
     path: "./dream-motel-pulse-fencing-collapse/index.html",
+  },
+  {
+    id: "glass-aquarium-pulse-fencing-cursed",
+    title: "Glass Aquarium: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 저주 픽업",
+    clearCondition: "저주를 견디며 20연속 파형 반사",
+    thumbnail: "./glass-aquarium-pulse-fencing-cursed/thumbnail.png",
+    path: "./glass-aquarium-pulse-fencing-cursed/index.html",
   }
 ];
