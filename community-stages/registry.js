@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "moon-greenhouse-mirror-theft-tempo",
+    title: "Moon Greenhouse: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./moon-greenhouse-mirror-theft-tempo/thumbnail.png",
+    path: "./moon-greenhouse-mirror-theft-tempo/index.html",
   }
 ];
