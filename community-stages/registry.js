@@ -198,6 +198,24 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "dusk-subway-shadow-stitch-cursed",
+    title: "Dusk Subway: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 저주 픽업",
+    clearCondition: "저주를 버티며 4개 제단을 모두 점등",
+    thumbnail: "./dusk-subway-shadow-stitch-cursed/thumbnail.png",
+    path: "./dusk-subway-shadow-stitch-cursed/index.html",
+  },
+  {
+    id: "biomech-theater-tide-anchoring-sync",
+    title: "Biomech Theater: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./biomech-theater-tide-anchoring-sync/thumbnail.png",
+    path: "./biomech-theater-tide-anchoring-sync/index.html",
+  },
+  {
     id: "dream-motel-shadow-stitch-shrink",
     title: "Dream Motel: Shadow Stitch",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -376,5 +394,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "템포 창을 놓치지 않고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
     thumbnail: "./dream-motel-magnet-braiding-tempo/thumbnail.png",
     path: "./dream-motel-magnet-braiding-tempo/index.html",
+  },
+  {
+    id: "moon-greenhouse-magnet-braiding-inverse",
+    title: "Moon Greenhouse: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 역전 버스트",
+    clearCondition: "역전 구간을 모두 견디고 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./moon-greenhouse-magnet-braiding-inverse/thumbnail.png",
+    path: "./moon-greenhouse-magnet-braiding-inverse/index.html",
   }
 ];
