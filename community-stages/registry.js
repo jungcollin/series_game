@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "storm-archive-debt-auction-cursed",
+    title: "Storm Archive: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./storm-archive-debt-auction-cursed/thumbnail.png",
+    path: "./storm-archive-debt-auction-cursed/index.html",
   }
 ];
