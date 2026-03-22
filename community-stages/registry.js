@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "glass-aquarium-shadow-stitch-collapse",
+    title: "Glass Aquarium: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./glass-aquarium-shadow-stitch-collapse/thumbnail.png",
+    path: "./glass-aquarium-shadow-stitch-collapse/index.html",
   }
 ];
