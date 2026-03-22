@@ -637,5 +637,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "조각 3개를 완성하면 클리어",
     thumbnail: "./ice-sculptor/thumbnail.png",
     path: "./ice-sculptor/index.html",
+  },
+  {
+    id: "thread-needle",
+    title: "실 꿰기 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Precision drag",
+    clearCondition: "바늘 8개를 꿰면 클리어",
+    thumbnail: "./thread-needle/thumbnail.png",
+    path: "./thread-needle/index.html",
   }
 ];
