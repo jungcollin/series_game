@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "neon-observatory-orbit-herding-combo",
+    title: "Neon Observatory: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./neon-observatory-orbit-herding-combo/thumbnail.png",
+    path: "./neon-observatory-orbit-herding-combo/index.html",
+  },
+  {
     id: "dusk-subway-echo-weaving-inverse",
     title: "Dusk Subway: Echo Loom",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -547,5 +556,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "축소 구간 끝까지 버티며 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
     thumbnail: "./dusk-subway-orbit-herding-shrink/thumbnail.png",
     path: "./dusk-subway-orbit-herding-shrink/index.html",
+  },
+  {
+    id: "dusk-subway-gravity-folding-tempo",
+    title: "Dusk Subway: Gravity Fold",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Gravity courier / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 코어를 균열 없이 슬롯까지 운반",
+    thumbnail: "./dusk-subway-gravity-folding-tempo/thumbnail.png",
+    path: "./dusk-subway-gravity-folding-tempo/index.html",
   }
 ];
