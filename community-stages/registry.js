@@ -214,5 +214,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 네온 코어 방어하기",
     thumbnail: "./neon-shield/thumbnail.png",
     path: "./neon-shield/index.html",
+  },
+  {
+    id: "memory-dodge",
+    title: "기억의 파편",
+    creator: { name: "Jules", avatar: null, github: null },
+    genre: "기억 / 닷지",
+    clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
+    thumbnail: "./memory-dodge/thumbnail.png",
+    path: "./memory-dodge/index.html",
   }
 ];
