@@ -511,5 +511,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./paper-temple-shadow-stitch-witness/thumbnail.png",
     path: "./paper-temple-shadow-stitch-witness/index.html",
+  },
+  {
+    id: "glass-aquarium-magnet-braiding-combo",
+    title: "Glass Aquarium: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./glass-aquarium-magnet-braiding-combo/thumbnail.png",
+    path: "./glass-aquarium-magnet-braiding-combo/index.html",
   }
 ];
