@@ -288,6 +288,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./biomech-theater-echo-weaving-charge/index.html",
   },
   {
+    id: "dusk-subway-magnet-braiding-sync",
+    title: "Dusk Subway: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./dusk-subway-magnet-braiding-sync/thumbnail.png",
+    path: "./dusk-subway-magnet-braiding-sync/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
