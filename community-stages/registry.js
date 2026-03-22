@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "neon-observatory-weather-mixing-sync",
+    title: "Neon Observatory: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./neon-observatory-weather-mixing-sync/thumbnail.png",
+    path: "./neon-observatory-weather-mixing-sync/index.html",
+  },
+  {
     id: "biomech-theater-debt-auction-collapse",
     title: "Biomech Theater: Debt Auction",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
