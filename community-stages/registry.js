@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "midnight-harbor-pulse-fencing-tempo",
+    title: "Midnight Harbor: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 20연속 파형을 반사하면 클리어",
+    thumbnail: "./midnight-harbor-pulse-fencing-tempo/thumbnail.png",
+    path: "./midnight-harbor-pulse-fencing-tempo/index.html",
   }
 ];
