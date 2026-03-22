@@ -191,13 +191,27 @@ function readPrStatus(repoRoot, repositoryFullName, prRef) {
   );
 }
 
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function enableAutoMerge(repoRoot, repositoryFullName, prRef) {
-  run(
-    "gh",
-    ["pr", "merge", String(prRef), "--repo", repositoryFullName, "--auto", "--squash"],
-    repoRoot
-  );
-  return readPrStatus(repoRoot, repositoryFullName, prRef);
+  try {
+    run(
+      "gh",
+      ["pr", "merge", String(prRef), "--repo", repositoryFullName, "--auto", "--squash"],
+      repoRoot
+    );
+  } catch (_error) {
+    // If auto-merge was already enabled, gh may still report a non-zero exit.
+  }
+
+  let status = readPrStatus(repoRoot, repositoryFullName, prRef);
+  for (let attempt = 0; attempt < 5 && !status.autoMergeRequest; attempt += 1) {
+    sleep(400 * (attempt + 1));
+    status = readPrStatus(repoRoot, repositoryFullName, prRef);
+  }
+  return status;
 }
 
 function main() {
