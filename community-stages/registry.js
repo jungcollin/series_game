@@ -207,6 +207,24 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./glass-aquarium-debt-auction-tempo/index.html",
   },
   {
+    id: "glass-aquarium-tide-anchoring-charge",
+    title: "Glass Aquarium: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 제한 충전",
+    clearCondition: "충전을 남기고 조류 6파 동안 발전기를 지키기",
+    thumbnail: "./glass-aquarium-tide-anchoring-charge/thumbnail.png",
+    path: "./glass-aquarium-tide-anchoring-charge/index.html",
+  },
+  {
+    id: "dream-motel-tide-anchoring-cursed",
+    title: "Dream Motel: Tide Anchor",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Prediction survival / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 조류 6파를 넘기며 발전기를 지키면 클리어",
+    thumbnail: "./dream-motel-tide-anchoring-cursed/thumbnail.png",
+    path: "./dream-motel-tide-anchoring-cursed/index.html",
+  },
+  {
     id: "moon-greenhouse-tide-anchoring-shrink",
     title: "Moon Greenhouse: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -457,5 +475,23 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 마지막 경매를 넘기기",
     thumbnail: "./neon-observatory-debt-auction-witness/thumbnail.png",
     path: "./neon-observatory-debt-auction-witness/index.html",
+  },
+  {
+    id: "neon-observatory-magnet-braiding-shrink",
+    title: "Neon Observatory: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./neon-observatory-magnet-braiding-shrink/thumbnail.png",
+    path: "./neon-observatory-magnet-braiding-shrink/index.html",
+  },
+  {
+    id: "dream-motel-debt-auction-heat",
+    title: "Dream Motel: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./dream-motel-debt-auction-heat/thumbnail.png",
+    path: "./dream-motel-debt-auction-heat/index.html",
   }
 ];
