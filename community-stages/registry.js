@@ -151,5 +151,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "편지 10개를 젖지 않게 수집하면 클리어",
     thumbnail: "./umbrella-walk/thumbnail.png",
     path: "./umbrella-walk/index.html",
+  },
+  {
+    id: "sound-maze",
+    title: "소리 미로",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzle",
+    clearCondition: "출구에 도달하면 클리어",
+    thumbnail: "./sound-maze/thumbnail.png",
+    path: "./sound-maze/index.html",
   }
 ];
