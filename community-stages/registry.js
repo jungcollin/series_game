@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "paper-temple-orbit-herding-cursed",
+    title: "Paper Temple: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./paper-temple-orbit-herding-cursed/thumbnail.png",
+    path: "./paper-temple-orbit-herding-cursed/index.html",
   }
 ];
