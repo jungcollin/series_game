@@ -198,7 +198,6 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
-<<<<<<< HEAD
     id: "paper-temple-gravity-folding-sync",
     title: "Paper Temple: Gravity Fold",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -206,7 +205,8 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "동기화 문을 모두 맞춘 뒤 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
     thumbnail: "./paper-temple-gravity-folding-sync/thumbnail.png",
     path: "./paper-temple-gravity-folding-sync/index.html",
-=======
+  },
+  {
     id: "moon-greenhouse-tide-anchoring-shrink",
     title: "Moon Greenhouse: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -223,7 +223,6 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "붕괴선이 닿기 전에 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./glass-aquarium-shadow-stitch-collapse/thumbnail.png",
     path: "./glass-aquarium-shadow-stitch-collapse/index.html",
->>>>>>> origin/main
   },
   {
     id: "moon-greenhouse-shadow-stitch-charge",
