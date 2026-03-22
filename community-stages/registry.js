@@ -322,5 +322,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목격 게이지를 낮게 유지한 채 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
     thumbnail: "./glass-aquarium-orbit-herding-witness/thumbnail.png",
     path: "./glass-aquarium-orbit-herding-witness/index.html",
+  },
+  {
+    id: "crystal-foundry-debt-auction-charge",
+    title: "Crystal Foundry: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 제한 충전",
+    clearCondition: "충전을 남기며 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./crystal-foundry-debt-auction-charge/thumbnail.png",
+    path: "./crystal-foundry-debt-auction-charge/index.html",
   }
 ];
