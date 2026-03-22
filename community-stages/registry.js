@@ -1042,5 +1042,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "역전 구간을 모두 견디고 20연속 파형을 반사하면 클리어",
     thumbnail: "./crystal-foundry-pulse-fencing-inverse/thumbnail.png",
     path: "./crystal-foundry-pulse-fencing-inverse/index.html",
+  },
+  {
+    id: "biomech-theater-pulse-fencing-combo",
+    title: "Biomech Theater: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 20연속 파형을 반사하면 클리어",
+    thumbnail: "./biomech-theater-pulse-fencing-combo/thumbnail.png",
+    path: "./biomech-theater-pulse-fencing-combo/index.html",
   }
 ];
