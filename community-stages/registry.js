@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "crystal-foundry-mirror-theft-collapse",
+    title: "Crystal Foundry: Mirror Heist",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern theft stealth / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 서로 다른 패턴 3개로 금고 문을 열면 클리어",
+    thumbnail: "./crystal-foundry-mirror-theft-collapse/thumbnail.png",
+    path: "./crystal-foundry-mirror-theft-collapse/index.html",
   }
 ];
