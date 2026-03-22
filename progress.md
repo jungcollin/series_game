@@ -100,6 +100,9 @@ TODO
 - 2026-03-22: `dream-motel-debt-auction-heat` 구현 완료. 드림 모텔 네온 배경, 라이브 경매 카드, 슬롯 배치 디펜스, 과열 팬 버튼, 클리어/실패 연출, `forceStart/forceClear/forceFail` 디버그 경로를 추가.
 - 2026-03-22: `node relay-tools/scripts/check_stage.js --stage dream-motel-debt-auction-heat --base-url http://127.0.0.1:4781` 검증 통과. 런처/직접 실행/모바일 `menu-running-failed`/호스트 콜백/썸네일 생성까지 모두 확인.
 - 2026-03-22: Playwright 환경 플래키니스 대응으로 `check_stage.js`와 `publish_stage.js`를 보강. 브라우저 재시도, 캔버스 `toDataURL()` 썸네일 저장, `--auto-merge` 설정 및 확인 경로를 추가.
+- 2026-03-22: `community-stages/neon-observatory-mirror-theft-cursed/` 구현 완료. 네온 천문대 배경, 감시 드론 시야 원뿔 회피, 기둥 엄폐, 패턴 절도 후 금고 재생, 보너스/페널티가 함께 붙는 저주 픽업, 모바일 드래그+두 손가락 탭 입력, 호스트 debug 계약을 한 스테이지 안에 연결.
+- 2026-03-22: `python3 -m http.server 4764` 기준으로 `node relay-tools/scripts/check_stage.js --stage neon-observatory-mirror-theft-cursed --base-url http://127.0.0.1:4764` 재검증 통과. 런처/직접 실행/썸네일/모바일 `menu-running-failed`/host ready-clear-fail 확인.
+- 2026-03-22: `node relay-tools/scripts/publish_stage.js --stage neon-observatory-mirror-theft-cursed --pr --base-url http://127.0.0.1:4764 --auto-merge` 실행 후 PR `#139` 생성. 이후 `origin/main` 최신 변경을 두 차례 병합해 `registry.js` 충돌을 정리했고, 최종적으로 `gh pr view 139 --json autoMergeRequest,mergeable,mergeStateStatus`에서 auto-merge 활성화와 `mergeable: MERGEABLE` 상태를 확인.
 
 TODO
 - `publish_stage.js --auto-merge`가 생성 또는 갱신한 PR에서 auto-merge가 실제로 켜졌는지 마지막에 다시 확인하기.
