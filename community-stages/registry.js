@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "dusk-subway-weather-mixing-collapse",
+    title: "Dusk Subway: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./dusk-subway-weather-mixing-collapse/thumbnail.png",
+    path: "./dusk-subway-weather-mixing-collapse/index.html",
+  },
+  {
     id: "neon-observatory-orbit-herding-combo",
     title: "Neon Observatory: Orbit Shepherd",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
