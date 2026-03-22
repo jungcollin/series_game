@@ -198,7 +198,6 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
-<<<<<<< HEAD
     id: "paper-temple-gravity-folding-sync",
     title: "Paper Temple: Gravity Fold",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -206,7 +205,8 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "동기화 문을 모두 맞춘 뒤 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
     thumbnail: "./paper-temple-gravity-folding-sync/thumbnail.png",
     path: "./paper-temple-gravity-folding-sync/index.html",
-=======
+  },
+  {
     id: "glass-aquarium-tide-anchoring-charge",
     title: "Glass Aquarium: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -223,7 +223,6 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "저주 조합을 버티면서 조류 6파를 넘기며 발전기를 지키면 클리어",
     thumbnail: "./dream-motel-tide-anchoring-cursed/thumbnail.png",
     path: "./dream-motel-tide-anchoring-cursed/index.html",
->>>>>>> origin/main
   },
   {
     id: "moon-greenhouse-tide-anchoring-shrink",
