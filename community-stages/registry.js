@@ -502,5 +502,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 봉합 다리로 4개 제단을 모두 점등하면 클리어",
     thumbnail: "./midnight-harbor-shadow-stitch-heat/thumbnail.png",
     path: "./midnight-harbor-shadow-stitch-heat/index.html",
+  },
+  {
+    id: "paper-temple-shadow-stitch-witness",
+    title: "Paper Temple: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./paper-temple-shadow-stitch-witness/thumbnail.png",
+    path: "./paper-temple-shadow-stitch-witness/index.html",
   }
 ];
