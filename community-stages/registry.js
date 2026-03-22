@@ -997,5 +997,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "저주 조합을 버티면서 활공체를 3개 관측대에 모두 착륙시키면 클리어",
     thumbnail: "./moon-greenhouse-weather-mixing-cursed/thumbnail.png",
     path: "./moon-greenhouse-weather-mixing-cursed/index.html",
+  },
+  {
+    id: "moon-greenhouse-debt-auction-sync",
+    title: "Moon Greenhouse: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 동기화 문",
+    clearCondition: "동기화 문을 모두 맞춘 뒤 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./moon-greenhouse-debt-auction-sync/thumbnail.png",
+    path: "./moon-greenhouse-debt-auction-sync/index.html",
   }
 ];
