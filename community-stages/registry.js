@@ -268,5 +268,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "역전 구간을 모두 견디고 코어를 균열 없이 목적 슬롯까지 옮기면 클리어",
     thumbnail: "./dream-motel-gravity-folding-inverse/thumbnail.png",
     path: "./dream-motel-gravity-folding-inverse/index.html",
+  },
+  {
+    id: "biomech-theater-weather-mixing-heat",
+    title: "Biomech Theater: Weather Mix",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Climate puzzler / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 활공체를 3개 관측대에 모두 착륙시키면 클리어",
+    thumbnail: "./biomech-theater-weather-mixing-heat/thumbnail.png",
+    path: "./biomech-theater-weather-mixing-heat/index.html",
   }
 ];
