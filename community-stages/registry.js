@@ -520,5 +520,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "빨래 10개를 모두 고정하면 클리어",
     thumbnail: "./laundry-master/thumbnail.png",
     path: "./laundry-master/index.html",
+  },
+  {
+    id: "parcel-cannon",
+    title: "택배 대포",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Projectile puzzle",
+    clearCondition: "택배 5개를 모두 배달하면 클리어",
+    thumbnail: "./parcel-cannon/thumbnail.png",
+    path: "./parcel-cannon/index.html",
   }
 ];
