@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "dream-motel-echo-weaving-combo",
+    title: "Dream Motel: Echo Loom",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Echo puzzler / 콤보 임계치",
+    clearCondition: "콤보를 유지하며 모든 코어 문양을 연결하면 클리어",
+    thumbnail: "./dream-motel-echo-weaving-combo/thumbnail.png",
+    path: "./dream-motel-echo-weaving-combo/index.html",
   }
 ];
