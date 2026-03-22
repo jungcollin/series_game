@@ -196,5 +196,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "20초 동안 안전 구역을 기억하고 생존하기",
     thumbnail: "./memory-dodge/thumbnail.png",
     path: "./memory-dodge/index.html",
+  },
+  {
+    id: "biomech-theater-magnet-braiding-cursed",
+    title: "Biomech Theater: Magnet Braid",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic routing / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 에너지 구슬 5개를 다른 극 문에 모두 인도하면 클리어",
+    thumbnail: "./biomech-theater-magnet-braiding-cursed/thumbnail.png",
+    path: "./biomech-theater-magnet-braiding-cursed/index.html",
   }
 ];
