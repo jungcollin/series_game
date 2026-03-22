@@ -207,6 +207,24 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./dream-motel-echo-weaving-combo/index.html",
   },
   {
+    id: "moon-greenhouse-orbit-herding-collapse",
+    title: "Moon Greenhouse: Orbit Shepherd",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Orbital survival / 붕괴하는 라인",
+    clearCondition: "붕괴선이 닿기 전에 위성 3기를 목표 링에 순서대로 통과시키면 클리어",
+    thumbnail: "./moon-greenhouse-orbit-herding-collapse/thumbnail.png",
+    path: "./moon-greenhouse-orbit-herding-collapse/index.html",
+  },
+  {
+    id: "glass-aquarium-debt-auction-tempo",
+    title: "Glass Aquarium: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 템포 윈도우",
+    clearCondition: "템포 창을 놓치지 않고 시간을 0으로 만들지 않으며 마지막 경매를 넘기면 클리어",
+    thumbnail: "./glass-aquarium-debt-auction-tempo/thumbnail.png",
+    path: "./glass-aquarium-debt-auction-tempo/index.html",
+  },
+  {
     id: "glass-aquarium-tide-anchoring-charge",
     title: "Glass Aquarium: Tide Anchor",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
@@ -493,5 +511,23 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과열을 폭주시키지 않고 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
     thumbnail: "./dream-motel-debt-auction-heat/thumbnail.png",
     path: "./dream-motel-debt-auction-heat/index.html",
+  },
+  {
+    id: "midnight-harbor-shadow-stitch-heat",
+    title: "Midnight Harbor: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 과열 관리",
+    clearCondition: "과열을 폭주시키지 않고 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./midnight-harbor-shadow-stitch-heat/thumbnail.png",
+    path: "./midnight-harbor-shadow-stitch-heat/index.html",
+  },
+  {
+    id: "paper-temple-shadow-stitch-witness",
+    title: "Paper Temple: Shadow Stitch",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light-shadow action / 목격 게이지",
+    clearCondition: "목격 게이지를 낮게 유지한 채 봉합 다리로 4개 제단을 모두 점등하면 클리어",
+    thumbnail: "./paper-temple-shadow-stitch-witness/thumbnail.png",
+    path: "./paper-temple-shadow-stitch-witness/index.html",
   }
 ];
