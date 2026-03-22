@@ -511,5 +511,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "무대 끝까지 도달하면 클리어",
     thumbnail: "./shadow-dance/thumbnail.png",
     path: "./shadow-dance/index.html",
+  },
+  {
+    id: "stone-skipper",
+    title: "물수제비",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Flick physics",
+    clearCondition: "돌을 7번 이상 튕기면 클리어",
+    thumbnail: "./stone-skipper/thumbnail.png",
+    path: "./stone-skipper/index.html",
   }
 ];
