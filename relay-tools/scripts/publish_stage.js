@@ -173,6 +173,33 @@ function findExistingPr(repoRoot, repositoryFullName, branch, headOwner) {
   };
 }
 
+function readPrStatus(repoRoot, repositoryFullName, prRef) {
+  return JSON.parse(
+    run(
+      "gh",
+      [
+        "pr",
+        "view",
+        String(prRef),
+        "--repo",
+        repositoryFullName,
+        "--json",
+        "number,url,state,mergeStateStatus,autoMergeRequest",
+      ],
+      repoRoot
+    )
+  );
+}
+
+function enableAutoMerge(repoRoot, repositoryFullName, prRef) {
+  run(
+    "gh",
+    ["pr", "merge", String(prRef), "--repo", repositoryFullName, "--auto", "--squash"],
+    repoRoot
+  );
+  return readPrStatus(repoRoot, repositoryFullName, prRef);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const repoRoot = path.resolve(__dirname, "../..");
@@ -223,6 +250,7 @@ function main() {
   const doPr = Boolean(args.pr);
   const doCommit = doPr || Boolean(args.commit);
   const doPush = doPr || Boolean(args.push);
+  const requestAutoMerge = Boolean(args["auto-merge"]);
 
   let branch = "";
   let committed = false;
@@ -232,6 +260,15 @@ function main() {
   let prAction = "not_requested";
   let existingPr = null;
   let previousPr = null;
+  let autoMerge = {
+    requested: requestAutoMerge,
+    enabled: false,
+    status: null,
+  };
+
+  if (requestAutoMerge && !doPr) {
+    throw new Error("--auto-merge requires --pr.");
+  }
 
   // Detect fork vs direct workflow
   const upstreamRepo = detectUpstreamRepo(repoRoot);
@@ -299,6 +336,20 @@ function main() {
       prUrl = ghOutput.trim();
       prAction = previousPr ? "created_after_closed_pr" : "created_new";
     }
+
+    if (requestAutoMerge) {
+      const prRef = existingPr ? String(existingPr.number) : prUrl;
+      const autoMergeStatus = enableAutoMerge(repoRoot, targetRepo, prRef);
+      autoMerge = {
+        requested: true,
+        enabled: Boolean(autoMergeStatus.autoMergeRequest),
+        status: autoMergeStatus,
+      };
+
+      if (!autoMerge.enabled) {
+        throw new Error(`Auto-merge was requested but is not enabled for PR: ${prUrl}`);
+      }
+    }
   }
 
   process.stdout.write(
@@ -322,6 +373,7 @@ function main() {
         existingPr,
         previousPr,
         prUrl,
+        autoMerge,
       },
       null,
       2
