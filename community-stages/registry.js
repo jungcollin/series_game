@@ -198,6 +198,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./memory-dodge/index.html",
   },
   {
+    id: "storm-archive-debt-auction-cursed",
+    title: "Storm Archive: Debt Auction",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Risk market defense / 저주 픽업",
+    clearCondition: "저주 조합을 버티면서 시간을 0으로 만들지 않고 마지막 경매를 넘기면 클리어",
+    thumbnail: "./storm-archive-debt-auction-cursed/thumbnail.png",
+    path: "./storm-archive-debt-auction-cursed/index.html",
+  },
+  {
     id: "neon-observatory-weather-mixing-sync",
     title: "Neon Observatory: Weather Mix",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
