@@ -376,5 +376,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "15송이 꽃을 피우면 클리어",
     thumbnail: "./moon-greenhouse-weather-mixing-cursed/thumbnail.png",
     path: "./moon-greenhouse-weather-mixing-cursed/index.html",
+  },
+  {
+    id: "tightrope-walk",
+    title: "줄타기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Balance action",
+    clearCondition: "줄 끝까지 도달하면 클리어",
+    thumbnail: "./tightrope-walk/thumbnail.png",
+    path: "./tightrope-walk/index.html",
   }
 ];
