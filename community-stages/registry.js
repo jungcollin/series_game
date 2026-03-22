@@ -619,5 +619,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 모양에 맞게 성형하면 클리어",
     thumbnail: "./pottery-spin/thumbnail.png",
     path: "./pottery-spin/index.html",
+  },
+  {
+    id: "ice-sculptor",
+    title: "얼음 조각가",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tap sculpting",
+    clearCondition: "조각 3개를 완성하면 클리어",
+    thumbnail: "./ice-sculptor/thumbnail.png",
+    path: "./ice-sculptor/index.html",
   }
 ];
