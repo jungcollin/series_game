@@ -349,5 +349,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "역전 구간을 모두 견디고 서로 다른 패턴 3개로 금고 문을 열면 클리어",
     thumbnail: "./glass-aquarium-mirror-theft-inverse/thumbnail.png",
     path: "./glass-aquarium-mirror-theft-inverse/index.html",
+  },
+  {
+    id: "paper-temple-pulse-fencing-shrink",
+    title: "Paper Temple: Pulse Fence",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reactive shield action / 축소 아레나",
+    clearCondition: "축소 구간 끝까지 버티며 20연속 파형을 반사하면 클리어",
+    thumbnail: "./paper-temple-pulse-fencing-shrink/thumbnail.png",
+    path: "./paper-temple-pulse-fencing-shrink/index.html",
   }
 ];
