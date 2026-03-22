@@ -619,5 +619,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 모양에 맞게 성형하면 클리어",
     thumbnail: "./pottery-spin/thumbnail.png",
     path: "./pottery-spin/index.html",
+  },
+  {
+    id: "thread-needle",
+    title: "실 꿰기 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Precision drag",
+    clearCondition: "바늘 8개를 꿰면 클리어",
+    thumbnail: "./thread-needle/thumbnail.png",
+    path: "./thread-needle/index.html",
   }
 ];
