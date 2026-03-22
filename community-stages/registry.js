@@ -448,5 +448,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "5개 봉화대를 모두 점화하면 클리어",
     thumbnail: "./beacon-relay/thumbnail.png",
     path: "./beacon-relay/index.html",
+  },
+  {
+    id: "balloon-flight",
+    title: "풍선 여행",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Swipe action",
+    clearCondition: "하늘 끝까지 도달하면 클리어",
+    thumbnail: "./balloon-flight/thumbnail.png",
+    path: "./balloon-flight/index.html",
   }
 ];
