@@ -513,6 +513,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./shadow-dance/index.html",
   },
   {
+    id: "laundry-master",
+    title: "빨래 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tap timing",
+    clearCondition: "빨래 10개를 모두 고정하면 클리어",
+    thumbnail: "./laundry-master/thumbnail.png",
+    path: "./laundry-master/index.html",
+  },
+  {
     id: "parcel-cannon",
     title: "택배 대포",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },

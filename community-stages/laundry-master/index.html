@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>빨래 달인</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #87CEEB; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 200, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(60, 80, 100, 0.92);
+        color: #f0f6fc; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #87CEEB; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(80, 130, 180, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">빨래 달인. 바람에 날리는 빨래를 빨랫줄에 제때 집게로 고정하세요. 화면을 탭하여 빨래를 고정합니다. 모바일에서는 화면 터치로 플레이할 수 있습니다. 빨래 10개를 모두 고정하면 클리어. 빨래 3개가 날아가면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="빨래 달인" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "laundry-master",
+        title: "빨래 달인",
+        description: "바람에 날리는 빨래를 빨랫줄에 제때 집게로 고정하세요",
+        creator: "jungcollin",
+        genre: "Tap timing",
+        clearCondition: "빨래 10개를 모두 고정하면 클리어",
+        failCondition: "빨래 3개가 날아가면 실패",
+        controls: "화면 탭으로 빨래를 집게에 고정",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        sky: "#87CEEB",
+        skyLight: "#B0E0F0",
+        cloud: "#FFFFFF",
+        pole: "#C49A6C",
+        poleDark: "#A07A4C",
+        rope: "#8B7355",
+        clip: "#D4D4D4",
+        clipShine: "#F0F0F0",
+        grass: "#7CB342",
+        grassDark: "#558B2F",
+        white: "#FFFFFF",
+        fabric1: "#FFB6C1",
+        fabric2: "#ADD8E6",
+        fabric3: "#FFFACD",
+        fabric4: "#C8E6C9",
+        fabric5: "#E1BEE7",
+        windLine: "rgba(255,255,255,0.3)",
+        accent: "#E8A040",
+        fail: "#C0392B",
+        clear: "#27AE60",
+      };
+
+      const FABRICS = [COL.fabric1, COL.fabric2, COL.fabric3, COL.fabric4, COL.fabric5, COL.white];
+
+      // --- Constants ---
+      const TARGET = 10;
+      const MAX_MISS = 3;
+      const LINE_Y = 200;
+      const LINE_LEFT = 80;
+      const LINE_RIGHT = W - 80;
+      const LAUNDRY_W = 60;
+      const LAUNDRY_H = 80;
+      const CLIP_ZONE = 40;
+
+      // --- State ---
+      let mode = "menu";
+      let elapsed = 0;
+      let pinned = 0;
+      let missed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      let windStrength = 1.0;
+      let windGust = 0;
+      let windDir = 1;
+
+      let laundryItems = [];
+      let pinnedItems = [];
+      let particles = [];
+      let clouds = [];
+      let windLines = [];
+      let spawnTimer = 0;
+      let nextId = 0;
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Spawning ---
+      function spawnLaundry() {
+        const fromLeft = Math.random() < 0.5;
+        const speed = lerp(80, 180, Math.min(elapsed / 35, 1)) * windStrength;
+        const color = FABRICS[Math.floor(Math.random() * FABRICS.length)];
+        const targetX = rand(LINE_LEFT + 60, LINE_RIGHT - 60);
+
+        laundryItems.push({
+          id: nextId++,
+          x: fromLeft ? -LAUNDRY_W : W + LAUNDRY_W,
+          y: LINE_Y + rand(-10, 20),
+          targetX,
+          vx: fromLeft ? speed : -speed,
+          width: LAUNDRY_W + rand(-10, 10),
+          height: LAUNDRY_H + rand(-10, 10),
+          color,
+          wobble: rand(0, Math.PI * 2),
+          wobbleSpeed: rand(2, 4),
+          age: 0,
+          pinnable: false,
+          nearLine: false,
+        });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(30, 100);
+          particles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - rand(20, 60),
+            life: 1, color,
+            size: rand(sizeRange[0], sizeRange[1]),
+          });
+        }
+      }
+
+      function initClouds() {
+        clouds = [];
+        for (let i = 0; i < 5; i++) {
+          clouds.push({
+            x: rand(0, W),
+            y: rand(20, 120),
+            w: rand(60, 140),
+            h: rand(25, 45),
+            speed: rand(8, 25),
+            alpha: rand(0.3, 0.7),
+          });
+        }
+      }
+
+      function spawnWindLine() {
+        windLines.push({
+          x: rand(0, W),
+          y: rand(50, H - 100),
+          len: rand(30, 80),
+          life: 1,
+          speed: rand(100, 200) * windStrength,
+        });
+      }
+
+      // --- Reset ---
+      function reset() {
+        elapsed = 0; pinned = 0; missed = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        windStrength = 1.0; windGust = 0; windDir = 1;
+        laundryItems = []; pinnedItems = []; particles = [];
+        windLines = [];
+        spawnTimer = 0.8; nextId = 0;
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initClouds();
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Wind
+        windStrength = lerp(1.0, 2.2, Math.min(elapsed / 35, 1));
+        windGust = Math.sin(elapsed * 1.5) * 0.3;
+
+        // Spawn laundry
+        const spawnInterval = lerp(2.5, 1.2, Math.min(elapsed / 30, 1));
+        spawnTimer -= dt;
+        if (spawnTimer <= 0 && pinned + missed + laundryItems.length < TARGET) {
+          spawnLaundry();
+          spawnTimer = spawnInterval;
+        }
+
+        // Wind lines
+        if (!reducedMotion && Math.random() < 0.15) spawnWindLine();
+        for (let i = windLines.length - 1; i >= 0; i--) {
+          const wl = windLines[i];
+          wl.x += wl.speed * dt;
+          wl.life -= dt * 1.5;
+          if (wl.life <= 0 || wl.x > W + 50) windLines.splice(i, 1);
+        }
+
+        // Update laundry
+        for (let i = laundryItems.length - 1; i >= 0; i--) {
+          const l = laundryItems[i];
+          l.age += dt;
+          l.wobble += l.wobbleSpeed * dt;
+
+          // Movement with wind
+          const windEffect = (windGust + windStrength * 0.3) * 15;
+          l.x += (l.vx + windEffect) * dt;
+          l.y = LINE_Y + Math.sin(l.wobble) * 12 + rand(-0.5, 0.5);
+
+          // Check if near rope
+          const distToTarget = Math.abs(l.x - l.targetX);
+          l.nearLine = distToTarget < CLIP_ZONE;
+          l.pinnable = l.nearLine && l.y < LINE_Y + 30 && l.y > LINE_Y - 30;
+
+          // Went off screen
+          if (l.x < -LAUNDRY_W * 2 || l.x > W + LAUNDRY_W * 2) {
+            missed++;
+            shake = 6;
+            flashAlpha = 0.3;
+            spawnParticles(l.x > W / 2 ? W : 0, LINE_Y, reducedMotion ? 3 : 8, l.color, [3, 6]);
+            laundryItems.splice(i, 1);
+          }
+        }
+
+        // Clouds
+        for (const c of clouds) {
+          c.x += c.speed * dt * windStrength * 0.5;
+          if (c.x > W + c.w) c.x = -c.w;
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 80 * dt;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Pinned items wobble in wind
+        for (const p of pinnedItems) {
+          p.wobble += p.wobbleSpeed * dt;
+        }
+
+        // Shake/flash decay
+        shake *= 0.88;
+        if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.9;
+
+        // Win/lose
+        if (pinned >= TARGET) {
+          mode = "clear";
+          clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+        } else if (missed >= MAX_MISS) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("빨래 날아감");
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+        skyGrad.addColorStop(0, "#5DADE2");
+        skyGrad.addColorStop(0.6, COL.sky);
+        skyGrad.addColorStop(1, "#B0E0F0");
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Clouds
+        drawClouds();
+
+        // Wind lines
+        drawWindLines();
+
+        // Grass
+        drawGrass();
+
+        // Poles and rope
+        drawPolesAndRope();
+
+        // Pinned laundry
+        drawPinnedItems();
+
+        // Flying laundry
+        drawLaundryItems();
+
+        // Particles
+        drawParticles();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        // Flash
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(192, 57, 43, ${flashAlpha})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawClouds() {
+        for (const c of clouds) {
+          ctx.globalAlpha = c.alpha;
+          ctx.fillStyle = COL.cloud;
+          ctx.beginPath();
+          ctx.ellipse(c.x, c.y, c.w / 2, c.h / 2, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(c.x - c.w * 0.25, c.y + 5, c.w * 0.3, c.h * 0.4, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(c.x + c.w * 0.25, c.y + 3, c.w * 0.35, c.h * 0.35, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawWindLines() {
+        for (const wl of windLines) {
+          ctx.globalAlpha = wl.life * 0.3;
+          ctx.strokeStyle = COL.windLine;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(wl.x, wl.y);
+          ctx.lineTo(wl.x + wl.len, wl.y + Math.sin(wl.x * 0.05) * 5);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawGrass() {
+        // Grass hill
+        ctx.fillStyle = COL.grass;
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, H - 80);
+        ctx.quadraticCurveTo(W * 0.3, H - 120, W * 0.5, H - 90);
+        ctx.quadraticCurveTo(W * 0.7, H - 60, W, H - 100);
+        ctx.lineTo(W, H);
+        ctx.fill();
+
+        ctx.fillStyle = COL.grassDark;
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, H - 40);
+        ctx.quadraticCurveTo(W * 0.25, H - 70, W * 0.5, H - 50);
+        ctx.quadraticCurveTo(W * 0.75, H - 30, W, H - 55);
+        ctx.lineTo(W, H);
+        ctx.fill();
+      }
+
+      function drawPolesAndRope() {
+        // Left pole
+        ctx.fillStyle = COL.poleDark;
+        ctx.fillRect(LINE_LEFT - 6, LINE_Y - 20, 12, H - LINE_Y - 40);
+        ctx.fillStyle = COL.pole;
+        ctx.fillRect(LINE_LEFT - 5, LINE_Y - 20, 10, H - LINE_Y - 40);
+        // Pole top
+        ctx.fillStyle = COL.poleDark;
+        ctx.beginPath();
+        ctx.arc(LINE_LEFT, LINE_Y - 20, 8, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Right pole
+        ctx.fillStyle = COL.poleDark;
+        ctx.fillRect(LINE_RIGHT - 6, LINE_Y - 20, 12, H - LINE_Y - 40);
+        ctx.fillStyle = COL.pole;
+        ctx.fillRect(LINE_RIGHT - 5, LINE_Y - 20, 10, H - LINE_Y - 40);
+        ctx.fillStyle = COL.poleDark;
+        ctx.beginPath();
+        ctx.arc(LINE_RIGHT, LINE_Y - 20, 8, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Rope with slight sag
+        ctx.strokeStyle = COL.rope;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(LINE_LEFT, LINE_Y);
+        ctx.quadraticCurveTo(CX, LINE_Y + 15 + Math.sin(elapsed * 2) * 3, LINE_RIGHT, LINE_Y);
+        ctx.stroke();
+      }
+
+      function drawLaundryItem(x, y, w, h, color, wobbleAngle, highlight) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(Math.sin(wobbleAngle) * 0.15);
+
+        // Shadow
+        ctx.fillStyle = "rgba(0,0,0,0.08)";
+        ctx.fillRect(-w / 2 + 3, 3, w, h);
+
+        // Fabric
+        ctx.fillStyle = color;
+        ctx.fillRect(-w / 2, 0, w, h);
+
+        // Fabric fold lines
+        ctx.strokeStyle = "rgba(0,0,0,0.08)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-w / 2 + w * 0.3, 5);
+        ctx.lineTo(-w / 2 + w * 0.3, h - 5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(-w / 2 + w * 0.7, 8);
+        ctx.lineTo(-w / 2 + w * 0.7, h - 3);
+        ctx.stroke();
+
+        // Highlight border when pinnable
+        if (highlight) {
+          ctx.strokeStyle = COL.accent;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(-w / 2 - 2, -2, w + 4, h + 4);
+        }
+
+        ctx.restore();
+      }
+
+      function drawClip(x, y) {
+        // Clothespin
+        ctx.fillStyle = COL.clip;
+        ctx.fillRect(x - 3, y - 12, 6, 18);
+        ctx.fillStyle = COL.clipShine;
+        ctx.fillRect(x - 2, y - 10, 3, 14);
+        // Spring
+        ctx.fillStyle = "#AAA";
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawLaundryItems() {
+        for (const l of laundryItems) {
+          drawLaundryItem(l.x, l.y, l.width, l.height, l.color, l.wobble, l.pinnable);
+        }
+      }
+
+      function drawPinnedItems() {
+        for (const p of pinnedItems) {
+          const windSway = Math.sin(p.wobble) * 0.1 * windStrength;
+          drawLaundryItem(p.x, LINE_Y + 2, p.width, p.height, p.color, p.wobble * 0.5 + windSway, false);
+          drawClip(p.x, LINE_Y);
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        // Top bar background
+        ctx.fillStyle = "rgba(255,255,255,0.7)";
+        ctx.fillRect(0, 0, W, 42);
+
+        ctx.font = "bold 16px 'Trebuchet MS', sans-serif";
+        ctx.textBaseline = "middle";
+
+        // Pinned count
+        ctx.fillStyle = COL.clear;
+        ctx.textAlign = "left";
+        ctx.fillText(`고정: ${pinned}/${TARGET}`, 20, 21);
+
+        // Missed count
+        ctx.fillStyle = missed > 0 ? COL.fail : "#666";
+        ctx.textAlign = "center";
+        const hearts = "♥".repeat(MAX_MISS - missed) + "♡".repeat(missed);
+        ctx.fillText(hearts, CX, 21);
+
+        // Wind indicator
+        ctx.fillStyle = "#4A90D9";
+        ctx.textAlign = "right";
+        const windBars = Math.min(5, Math.ceil(windStrength));
+        ctx.fillText(`바람 ${"▮".repeat(windBars)}${"▯".repeat(5 - windBars)}`, W - 20, 21);
+      }
+
+      // --- Overlay cards ---
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 52 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2;
+        const cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
+        ctx.beginPath();
+        roundRect(ctx, cardX, cardY, cardW, cardH, 12);
+        ctx.fill();
+
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+
+        ctx.fillStyle = "#333";
+        ctx.font = "bold 24px 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "500 14px 'Trebuchet MS', sans-serif";
+        ctx.fillStyle = "#555";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.font = "400 13px 'Trebuchet MS', sans-serif";
+        ctx.fillText("탭 또는 Enter로 시작", CX, cardY + cardH - 24);
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h);
+        ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r);
+        ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(135, 206, 235, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+
+        drawCard("빨래 달인", [
+          "바람에 날리는 빨래를 집게로 고정하세요",
+          "",
+          "조작: 빨래가 빨랫줄 근처일 때 탭",
+          "클리어: 빨래 10개 고정",
+          "실패: 빨래 3개 날아감",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(255,255,255,${clearAnim * 0.4})`;
+        ctx.fillRect(0, 0, W, H);
+
+        if (clearAnim > 0.3) {
+          drawCard("빨래 완료!", [
+            `${Math.ceil(elapsed)}초 만에 완료`,
+            `고정: ${pinned}개`,
+          ], COL.clear);
+        }
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.fillRect(0, 0, W, H);
+
+        drawCard("빨래 날아감!", [
+          `빨래 ${missed}개가 바람에 날아갔습니다`,
+          `고정: ${pinned}/${TARGET}`,
+        ], COL.fail);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function handleTap(cx, cy) {
+        if (mode !== "running") return;
+
+        // Find the closest pinnable laundry
+        let bestIdx = -1;
+        let bestDist = Infinity;
+        for (let i = 0; i < laundryItems.length; i++) {
+          const l = laundryItems[i];
+          if (!l.pinnable) continue;
+          const d = dist(cx, cy, l.x, l.y + l.height / 2);
+          if (d < bestDist && d < 200) {
+            bestDist = d;
+            bestIdx = i;
+          }
+        }
+
+        // If no pinnable item found, try any close item
+        if (bestIdx === -1) {
+          for (let i = 0; i < laundryItems.length; i++) {
+            const l = laundryItems[i];
+            const d = dist(cx, cy, l.x, l.y + l.height / 2);
+            if (d < 100) {
+              if (d < bestDist) {
+                bestDist = d;
+                bestIdx = i;
+              }
+            }
+          }
+        }
+
+        if (bestIdx >= 0) {
+          const l = laundryItems[bestIdx];
+          if (l.pinnable) {
+            // Pin it!
+            pinned++;
+            spawnParticles(l.x, LINE_Y, reducedMotion ? 4 : 10, COL.accent, [2, 5]);
+            pinnedItems.push({
+              x: l.targetX,
+              width: l.width,
+              height: l.height,
+              color: l.color,
+              wobble: 0,
+              wobbleSpeed: rand(1, 2.5),
+            });
+            laundryItems.splice(bestIdx, 1);
+          }
+        }
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") {
+          reset();
+          mode = "running";
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        handleTap(p.x, p.y);
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") { handleStart(); return; }
+          // Tap the closest pinnable item
+          for (const l of laundryItems) {
+            if (l.pinnable) {
+              handleTap(l.x, l.y + l.height / 2);
+              break;
+            }
+          }
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps++;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          pinned, missed, windStrength: +windStrength.toFixed(1),
+          result: window.relayStageResult.status,
+          laundryCount: laundryItems.length,
+          pinnedCount: pinnedItems.length,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          pinned = TARGET;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          missed = MAX_MISS;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail");
+          draw();
+        },
+      };
+
+      // --- Init ---
+      initClouds();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
