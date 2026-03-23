@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>풍등 올리기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #f0c8a0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(180, 100, 50, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 40, 20, 0.92);
+        color: #fdf0e0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px; overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #f0c8a0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(180, 100, 50, 0.5); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">풍등 올리기. 풍등에 불을 붙이고 바람이 잔잔할 때 하늘로 보내세요. 모바일에서는 화면을 터치하여 풍등을 잡고 있다가 바람이 약할 때 손을 놓으세요. PC에서는 마우스 클릭으로 조작합니다. 풍등 5개를 하늘에 올리면 클리어. 풍등 3개가 추락하면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="풍등 올리기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60, MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "lantern-rise", title: "풍등 올리기",
+        description: "풍등에 불을 붙이고 바람이 잔잔할 때 하늘로 보내세요.",
+        creator: "jungcollin", genre: "Timing release",
+        clearCondition: "풍등 5개를 하늘에 올리면 클리어",
+        failCondition: "풍등 3개가 추락하면 실패",
+        controls: "터치로 풍등을 잡고 바람에 맞춰 놓기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        skyTop: "#e8a878", skyBot: "#f0d0a8", ground: "#8a7060", groundLight: "#a89078",
+        lantern: "#f0c060", lanternGlow: "rgba(240,192,96,0.4)", lanternDark: "#c89840",
+        flame: "#f08030", flameBright: "#f0c848",
+        text: "#5a3820", accent: "#d08838", fail: "#b04040",
+        star: "#f8e8c0",
+      };
+
+      const LANTERNS_TO_WIN = 5, MAX_CRASH = 3;
+      const HOLD_Y = H - 120;
+
+      let mode = "menu", elapsed = 0, launched = 0, crashed = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, flashAlpha = 0, clearAnim = 0;
+
+      // Wind
+      let windStrength = 0, windPhase = 0, windSpeed = 1.2;
+
+      // Current lantern
+      let holding = false, heatLevel = 0, lanternState = "waiting"; // waiting, heating, rising, done
+      let lanternX = CX, lanternY = HOLD_Y, lanternVY = 0, lanternVX = 0;
+
+      // Released lanterns floating up
+      let floatingLanterns = [];
+      let particles = [];
+      let stars = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) }); }
+      function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) }); }
+
+      function initStars() {
+        stars = [];
+        for (let i = 0; i < 25; i++) stars.push({ x: rand(20, W - 20), y: rand(10, 180), size: rand(1, 2.5), flicker: rand(0, Math.PI * 2) });
+      }
+
+      function resetLantern() {
+        lanternState = "waiting"; holding = false; heatLevel = 0;
+        lanternX = CX; lanternY = HOLD_Y; lanternVY = 0; lanternVX = 0;
+      }
+
+      function reset() {
+        elapsed = 0; launched = 0; crashed = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        windPhase = 0; floatingLanterns = []; particles = [];
+        initStars(); resetLantern();
+      }
+
+      function spawnParticle(x, y, color) {
+        if (reducedMotion && particles.length > 15) return;
+        particles.push({ x, y, vx: rand(-20, 20), vy: rand(-40, -15), life: 1, size: rand(2, 5), color });
+      }
+
+      function getWindDisplay() {
+        const abs = Math.abs(windStrength);
+        if (abs < 0.15) return "잔잔";
+        if (abs < 0.4) return "약풍";
+        if (abs < 0.7) return "중풍";
+        return "강풍";
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Wind oscillation
+        windPhase += windSpeed * dt;
+        windStrength = Math.sin(windPhase) * 0.7 + Math.sin(windPhase * 2.3) * 0.3;
+
+        // Heating while holding
+        if (holding && lanternState === "heating") {
+          heatLevel = Math.min(1, heatLevel + dt * 0.4);
+        }
+
+        // Rising lantern
+        if (lanternState === "rising") {
+          const buoyancy = heatLevel * 120;
+          const windForce = windStrength * 200;
+          lanternVY = lerp(lanternVY, -buoyancy, dt * 2);
+          lanternVX = lerp(lanternVX, windForce, dt * 3);
+          lanternY += lanternVY * dt;
+          lanternX += lanternVX * dt;
+
+          // Fire particles
+          if (Math.random() < 0.3) spawnParticle(lanternX, lanternY + 20, COL.flame);
+
+          // Success: reached top
+          if (lanternY < -20) {
+            launched++;
+            floatingLanterns.push({ x: lanternX, y: 0, alpha: 0.7 });
+            for (let i = 0; i < 10; i++) spawnParticle(lanternX, 30, COL.flameBright);
+            lanternState = "done";
+          }
+
+          // Fail: pushed off screen or fell
+          if (lanternX < -60 || lanternX > W + 60 || lanternY > H + 20) {
+            crashed++;
+            shake = 5; flashAlpha = 0.2;
+            for (let i = 0; i < 6; i++) spawnParticle(lanternX, Math.min(lanternY, H - 20), COL.fail);
+            lanternState = "done";
+          }
+        }
+
+        // After lantern done, prepare next
+        if (lanternState === "done") {
+          if (launched >= LANTERNS_TO_WIN) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared"; reportCleared(); return;
+          }
+          if (crashed >= MAX_CRASH) {
+            mode = "failed"; window.relayStageResult.status = "failed";
+            reportFailed("추락 초과"); return;
+          }
+          resetLantern();
+        }
+
+        // Floating lanterns drift up slowly
+        for (const fl of floatingLanterns) {
+          fl.y -= dt * 5;
+          fl.alpha *= 0.998;
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Stars flicker
+        for (const s of stars) s.flicker += dt * rand(2, 4);
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient (warm sunset)
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+        skyGrad.addColorStop(0, COL.skyTop); skyGrad.addColorStop(0.7, COL.skyBot);
+        skyGrad.addColorStop(1, COL.ground);
+        ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, H);
+
+        // Ground
+        ctx.fillStyle = COL.ground; ctx.fillRect(0, H - 60, W, 60);
+        ctx.fillStyle = COL.groundLight; ctx.fillRect(0, H - 60, W, 2);
+
+        if (mode === "running") {
+          drawStars();
+          drawFloatingLanterns();
+          drawWindIndicator();
+          drawCurrentLantern();
+          drawParticles();
+          drawHUD();
+        }
+
+        if (flashAlpha > 0.01) { ctx.fillStyle = `rgba(176,64,64,${flashAlpha})`; ctx.fillRect(0, 0, W, H); }
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawStars() {
+        for (const s of stars) {
+          const a = (Math.sin(s.flicker) * 0.3 + 0.6) * 0.5;
+          ctx.globalAlpha = a;
+          ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+          ctx.fillStyle = COL.star; ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawFloatingLanterns() {
+        for (const fl of floatingLanterns) {
+          ctx.globalAlpha = fl.alpha;
+          drawLanternShape(fl.x, fl.y + 30, 12, 0.5);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawWindIndicator() {
+        const bx = CX, by = 30;
+        // Wind bar
+        const barW = 200, barH = 8;
+        ctx.fillStyle = "rgba(90,56,32,0.15)";
+        ctx.fillRect(bx - barW / 2, by, barW, barH);
+
+        // Safe zone (center)
+        ctx.fillStyle = "rgba(80,160,80,0.2)";
+        ctx.fillRect(bx - 15, by, 30, barH);
+
+        // Wind needle
+        const nx = bx + windStrength * barW / 2;
+        ctx.fillStyle = Math.abs(windStrength) < 0.15 ? "rgba(80,160,80,0.8)" : COL.text;
+        ctx.fillRect(nx - 2, by - 2, 4, barH + 4);
+
+        ctx.fillStyle = COL.text; ctx.font = '400 12px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(`바람: ${getWindDisplay()}`, bx, by + 14);
+      }
+
+      function drawCurrentLantern() {
+        if (lanternState === "waiting" || lanternState === "heating") {
+          drawLanternShape(lanternX, lanternY, 22, heatLevel);
+          // Instruction
+          if (lanternState === "waiting") {
+            ctx.fillStyle = "rgba(90,56,32,0.5)"; ctx.font = '400 13px "Trebuchet MS",sans-serif';
+            ctx.textAlign = "center"; ctx.textBaseline = "top";
+            ctx.fillText("터치하여 불 붙이기", CX, lanternY + 40);
+          } else {
+            ctx.fillStyle = "rgba(90,56,32,0.5)"; ctx.font = '400 13px "Trebuchet MS",sans-serif';
+            ctx.textAlign = "center"; ctx.textBaseline = "top";
+            const heatPct = Math.round(heatLevel * 100);
+            ctx.fillText(`열기: ${heatPct}% — 바람 잔잔할 때 놓기`, CX, lanternY + 40);
+          }
+        } else if (lanternState === "rising") {
+          drawLanternShape(lanternX, lanternY, 22, heatLevel);
+        }
+      }
+
+      function drawLanternShape(x, y, size, heat) {
+        // Glow
+        if (heat > 0.1) {
+          ctx.beginPath(); ctx.arc(x, y, size + 10 + heat * 8, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(240,192,96,${heat * 0.2})`; ctx.fill();
+        }
+        // Body (rounded trapezoid)
+        ctx.beginPath();
+        ctx.moveTo(x - size * 0.7, y - size);
+        ctx.lineTo(x + size * 0.7, y - size);
+        ctx.lineTo(x + size, y + size * 0.6);
+        ctx.lineTo(x - size, y + size * 0.6);
+        ctx.closePath();
+        ctx.fillStyle = COL.lantern; ctx.fill();
+        ctx.strokeStyle = COL.lanternDark; ctx.lineWidth = 1.5; ctx.stroke();
+        // Flame
+        if (heat > 0) {
+          ctx.beginPath(); ctx.arc(x, y + size * 0.8, 4 + heat * 4, 0, Math.PI * 2);
+          ctx.fillStyle = lerp(0, 1, heat) > 0.5 ? COL.flameBright : COL.flame;
+          ctx.fill();
+        }
+        // Ribs
+        ctx.strokeStyle = "rgba(200,152,64,0.3)"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, y - size); ctx.lineTo(x, y + size * 0.6); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x - size * 0.35, y - size * 0.9); ctx.lineTo(x - size * 0.5, y + size * 0.55); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + size * 0.35, y - size * 0.9); ctx.lineTo(x + size * 0.5, y + size * 0.55); ctx.stroke();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = p.life;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = '500 15px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`올림: ${launched} / ${LANTERNS_TO_WIN}`, 24, 20);
+        ctx.textAlign = "right";
+        let ft = ""; for (let i = 0; i < MAX_CRASH; i++) ft += i < crashed ? "✕ " : "○ ";
+        ctx.fillText(ft.trim(), W - 24, 20);
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath(); c.moveTo(x + r, y); c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r); c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r); c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r); c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cW = Math.min(320, W - 40), lH = 26;
+        const cH = 42 + lines.length * lH + 40;
+        const cX = CX - cW / 2, cY = CY - cH / 2;
+        ctx.fillStyle = "rgba(240,208,168,0.95)"; roundRect(ctx, cX, cY, cW, cH, 8); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cX + 12, cY, cW - 24, 3);
+        ctx.fillStyle = COL.text; ctx.font = 'bold 22px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cY + 16);
+        ctx.font = '400 14px "Trebuchet MS",sans-serif'; ctx.fillStyle = "rgba(90,56,32,0.7)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cY + 48 + i * lH);
+        ctx.fillStyle = "rgba(90,56,32,0.35)"; ctx.font = '400 13px "Trebuchet MS",sans-serif';
+        ctx.fillText("TAP or ENTER", CX, cY + cH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(240,200,160,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("풍등 올리기", [
+          "풍등에 불을 붙이고",
+          "바람이 잔잔할 때 하늘로 보내세요",
+          "", "조작: 터치하여 불 붙이고 놓기",
+          "클리어: 풍등 5개 올리기", "실패: 풍등 3개 추락",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(240,200,160,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("소원 성취!", [`${Math.ceil(elapsed)}초 만에 완료`, `풍등: ${launched}개`], COL.accent);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80,40,30,0.3)"; ctx.fillRect(0, 0, W, H);
+        drawCard("바람에 지다", ["풍등이 너무 많이 추락했습니다", `올림: ${launched} / ${LANTERNS_TO_WIN}`], COL.fail);
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        if (lanternState === "waiting") { lanternState = "heating"; holding = true; }
+        else if (lanternState === "heating") { holding = true; }
+      });
+
+      canvas.addEventListener("pointerup", () => {
+        if (lanternState === "heating" && holding) {
+          holding = false;
+          if (heatLevel > 0.2) {
+            lanternState = "rising";
+            lanternVY = -20;
+          }
+        }
+      });
+
+      canvas.addEventListener("pointercancel", () => {
+        if (lanternState === "heating") {
+          holding = false;
+          if (heatLevel > 0.2) { lanternState = "rising"; lanternVY = -20; }
+        }
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); }
+      });
+
+      function gameLoop(ts) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = ts; return; }
+        let dt = Math.min((ts - lastTimestamp) / 1000, MAX_DT); lastTimestamp = ts;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), launched, crashed, heat: +heatLevel.toFixed(2), wind: +windStrength.toFixed(2), result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const s = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < s; i++) update(FIXED_DT); draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; launched = LANTERNS_TO_WIN; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; crashed = MAX_CRASH; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      initStars(); reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

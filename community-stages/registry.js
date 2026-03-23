@@ -709,5 +709,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "마을 5개를 보호하면 클리어",
     thumbnail: "./wildfire-line/thumbnail.png",
     path: "./wildfire-line/index.html",
+  },
+  {
+    id: "lantern-rise",
+    title: "풍등 올리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Timing release",
+    clearCondition: "풍등 5개를 하늘에 올리면 클리어",
+    thumbnail: "./lantern-rise/thumbnail.png",
+    path: "./lantern-rise/index.html",
   }
 ];
