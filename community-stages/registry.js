@@ -1015,5 +1015,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "편지 15통 정확히 배달",
     thumbnail: "./mail-dash/thumbnail.png",
     path: "./mail-dash/index.html",
+  },
+  {
+    id: "frost-bloom",
+    title: "서리꽃",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Drawing puzzle",
+    clearCondition: "서리 패턴 5개 완성 시 클리어",
+    thumbnail: "./frost-bloom/thumbnail.png",
+    path: "./frost-bloom/index.html",
   }
 ];
