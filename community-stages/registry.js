@@ -1006,5 +1006,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "탑 높이 10단 달성",
     thumbnail: "./quake-stack/thumbnail.png",
     path: "./quake-stack/index.html",
+  },
+  {
+    id: "mail-dash",
+    title: "우편 배달부",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Speed sorting",
+    clearCondition: "편지 15통 정확히 배달",
+    thumbnail: "./mail-dash/thumbnail.png",
+    path: "./mail-dash/index.html",
   }
 ];

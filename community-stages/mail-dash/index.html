@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>우편 배달부</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E0F0FF;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #E0F0FF;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(30, 80, 160, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">우편 배달부. 캔버스를 터치하거나 Enter로 시작하세요. 화면 터치로 편지를 맞는 집에 드래그</p>
+    <canvas id="game" width="960" height="540" aria-label="우편 배달부" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const TIME_LIMIT = 35;
+      const CLEAR_TARGET = 15;
+      const MAX_WRONG = 3;
+
+      const relayContext = window.RelayRuntime?.readContext("mail-dash") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      // Colors
+      const COLORS = {
+        bg: "#E0F0FF",
+        envelope: "#FFF5E0",
+        envelopeBorder: "#D4C4A0",
+        red: "#D44040",
+        blue: "#4070C0",
+        green: "#40A060",
+        house: "#F0DCC0",
+        roof: "#A08060",
+        hudBg: "rgba(255,255,255,0.85)",
+        text: "#2A3A5A",
+        textLight: "#5A6A8A",
+      };
+
+      const COLOR_NAMES = ["red", "blue", "green"];
+      const COLOR_HEX = { red: COLORS.red, blue: COLORS.blue, green: COLORS.green };
+      const COLOR_KOREAN = { red: "빨강", blue: "파랑", green: "초록" };
+
+      // Mailbox positions
+      const MAILBOX_W = 120;
+      const MAILBOX_H = 140;
+      const MAILBOX_Y = VIEW.height - 160;
+      const MAILBOX_POSITIONS = [
+        { x: VIEW.width / 2 - 200, color: "red" },
+        { x: VIEW.width / 2, color: "blue" },
+        { x: VIEW.width / 2 + 200, color: "green" },
+      ];
+
+      // Envelope
+      const ENV_W = 120;
+      const ENV_H = 80;
+      const ENV_SPAWN_X = VIEW.width / 2;
+      const ENV_SPAWN_Y = 180;
+
+      // Particles
+      let particles = [];
+
+      // Game state
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        delivered: 0,
+        wrong: 0,
+        currentLetter: null,
+        dragging: false,
+        dragOffsetX: 0,
+        dragOffsetY: 0,
+        letterTimer: 0,
+        spawnInterval: 0.8,
+        shakeTimer: 0,
+        shakeX: 0,
+        shakeY: 0,
+        flipTimer: 0,
+        flipColor: null,
+        mailboxHighlight: -1,
+        note: "편지를 올바른 우체통에 배달하는 속도 분류 게임",
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.parent.RelayHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function spawnLetter() {
+        const colorIdx = Math.floor(Math.random() * 3);
+        state.currentLetter = {
+          x: ENV_SPAWN_X,
+          y: ENV_SPAWN_Y,
+          color: COLOR_NAMES[colorIdx],
+          spawnTime: state.elapsed,
+          flipProgress: 0,
+        };
+        state.flipTimer = 0.3;
+        state.flipColor = COLOR_NAMES[colorIdx];
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.delivered = 0;
+        state.wrong = 0;
+        state.dragging = false;
+        state.shakeTimer = 0;
+        state.letterTimer = 0.5;
+        state.currentLetter = null;
+        state.mailboxHighlight = -1;
+        particles = [];
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "오배달 3회") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        // Spawn confetti burst
+        for (let i = 0; i < 80; i++) {
+          particles.push({
+            x: VIEW.width / 2 + (Math.random() - 0.5) * 300,
+            y: VIEW.height / 2,
+            vx: (Math.random() - 0.5) * 500,
+            vy: -Math.random() * 400 - 100,
+            life: 2 + Math.random(),
+            maxLife: 2 + Math.random(),
+            color: ["#D44040", "#4070C0", "#40A060", "#FFD700", "#FF69B4"][Math.floor(Math.random() * 5)],
+            size: 4 + Math.random() * 6,
+          });
+        }
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function spawnConfetti(x, y) {
+        for (let i = 0; i < 20; i++) {
+          particles.push({
+            x: x,
+            y: y,
+            vx: (Math.random() - 0.5) * 300,
+            vy: -Math.random() * 250 - 50,
+            life: 1 + Math.random() * 0.5,
+            maxLife: 1 + Math.random() * 0.5,
+            color: ["#D44040", "#4070C0", "#40A060", "#FFD700"][Math.floor(Math.random() * 4)],
+            size: 3 + Math.random() * 5,
+          });
+        }
+      }
+
+      // Input handling
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (VIEW.width / rect.width),
+          y: (clientY - rect.top) * (VIEW.height / rect.height),
+        };
+      }
+
+      function isOnLetter(px, py) {
+        if (!state.currentLetter) return false;
+        const l = state.currentLetter;
+        return px >= l.x - ENV_W / 2 && px <= l.x + ENV_W / 2 &&
+               py >= l.y - ENV_H / 2 && py <= l.y + ENV_H / 2;
+      }
+
+      function getMailboxAt(px, py) {
+        for (let i = 0; i < MAILBOX_POSITIONS.length; i++) {
+          const mb = MAILBOX_POSITIONS[i];
+          if (px >= mb.x - MAILBOX_W / 2 && px <= mb.x + MAILBOX_W / 2 &&
+              py >= MAILBOX_Y - MAILBOX_H / 2 && py <= MAILBOX_Y + MAILBOX_H / 2 + 20) {
+            return i;
+          }
+        }
+        return -1;
+      }
+
+      function handlePointerDown(e) {
+        e.preventDefault();
+        const pos = getCanvasPos(e.clientX, e.clientY);
+
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+
+        if (state.currentLetter && isOnLetter(pos.x, pos.y)) {
+          state.dragging = true;
+          state.dragOffsetX = state.currentLetter.x - pos.x;
+          state.dragOffsetY = state.currentLetter.y - pos.y;
+        }
+      }
+
+      function handlePointerMove(e) {
+        e.preventDefault();
+        if (!state.dragging || !state.currentLetter) return;
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        state.currentLetter.x = pos.x + state.dragOffsetX;
+        state.currentLetter.y = pos.y + state.dragOffsetY;
+
+        // Highlight mailbox
+        state.mailboxHighlight = getMailboxAt(state.currentLetter.x, state.currentLetter.y);
+      }
+
+      function handlePointerUp(e) {
+        e.preventDefault();
+        if (!state.dragging || !state.currentLetter) {
+          state.dragging = false;
+          return;
+        }
+        state.dragging = false;
+        state.mailboxHighlight = -1;
+
+        const letter = state.currentLetter;
+        const mbIdx = getMailboxAt(letter.x, letter.y);
+
+        if (mbIdx >= 0) {
+          const mb = MAILBOX_POSITIONS[mbIdx];
+          if (mb.color === letter.color) {
+            // Correct delivery
+            state.delivered++;
+            spawnConfetti(mb.x, MAILBOX_Y);
+            state.currentLetter = null;
+            state.letterTimer = Math.max(0.3, state.spawnInterval - state.elapsed * 0.01);
+
+            if (state.delivered >= CLEAR_TARGET) {
+              clearStage();
+            }
+          } else {
+            // Wrong delivery
+            state.wrong++;
+            state.shakeTimer = 0.3;
+            state.currentLetter = null;
+            state.letterTimer = Math.max(0.3, state.spawnInterval - state.elapsed * 0.01);
+
+            if (state.wrong >= MAX_WRONG) {
+              failStage("오배달 3회");
+            }
+          }
+        } else {
+          // Snap back
+          letter.x = ENV_SPAWN_X;
+          letter.y = ENV_SPAWN_Y;
+        }
+      }
+
+      canvas.addEventListener("pointerdown", handlePointerDown, { passive: false });
+      canvas.addEventListener("pointermove", handlePointerMove, { passive: false });
+      canvas.addEventListener("pointerup", handlePointerUp, { passive: false });
+      canvas.addEventListener("pointercancel", handlePointerUp, { passive: false });
+
+      // Also add touchstart for the check script
+      canvas.addEventListener("touchstart", (e) => {
+        if (state.mode !== "running") {
+          e.preventDefault();
+          startFromTouch();
+        }
+      }, { passive: false });
+
+      function update(dt) {
+        if (state.mode === "running") {
+          state.elapsed += dt;
+
+          // Time limit
+          if (state.elapsed >= TIME_LIMIT && state.delivered < CLEAR_TARGET) {
+            failStage("시간 초과");
+            return;
+          }
+
+          // Shake
+          if (state.shakeTimer > 0) {
+            state.shakeTimer -= dt;
+            state.shakeX = (Math.random() - 0.5) * 8;
+            state.shakeY = (Math.random() - 0.5) * 8;
+          } else {
+            state.shakeX = 0;
+            state.shakeY = 0;
+          }
+
+          // Flip animation
+          if (state.flipTimer > 0) {
+            state.flipTimer -= dt;
+          }
+
+          // Spawn letters
+          if (!state.currentLetter && state.mode === "running") {
+            state.letterTimer -= dt;
+            if (state.letterTimer <= 0) {
+              spawnLetter();
+            }
+          }
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 400 * dt; // gravity
+          p.life -= dt;
+          if (p.life <= 0) {
+            particles.splice(i, 1);
+          }
+        }
+      }
+
+      // Drawing functions
+      function drawRoundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      function drawHouse(x, y, color) {
+        const hw = MAILBOX_W;
+        const hh = MAILBOX_H;
+
+        // House body
+        ctx.fillStyle = COLORS.house;
+        ctx.fillRect(x - hw / 2 + 10, y - hh / 2 + 30, hw - 20, hh - 30);
+        ctx.strokeStyle = "#C0A880";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x - hw / 2 + 10, y - hh / 2 + 30, hw - 20, hh - 30);
+
+        // Roof
+        ctx.fillStyle = COLORS.roof;
+        ctx.beginPath();
+        ctx.moveTo(x - hw / 2, y - hh / 2 + 32);
+        ctx.lineTo(x, y - hh / 2 - 5);
+        ctx.lineTo(x + hw / 2, y - hh / 2 + 32);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Door / Mailbox slot
+        ctx.fillStyle = COLOR_HEX[color];
+        drawRoundRect(x - 20, y + 10, 40, 50, 6);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.2)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Mail slot
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.fillRect(x - 12, y + 25, 24, 5);
+
+        // Color label
+        ctx.fillStyle = "#FFF";
+        ctx.font = "bold 14px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(COLOR_KOREAN[color], x, y + 48);
+      }
+
+      function drawEnvelope(x, y, color, flipProgress) {
+        ctx.save();
+        const scale = flipProgress !== undefined && flipProgress > 0
+          ? Math.abs(Math.cos(flipProgress * Math.PI))
+          : 1;
+
+        ctx.translate(x, y);
+        ctx.scale(scale || 0.05, 1);
+
+        // Envelope body
+        ctx.fillStyle = COLORS.envelope;
+        drawRoundRect(-ENV_W / 2, -ENV_H / 2, ENV_W, ENV_H, 8);
+        ctx.fill();
+        ctx.strokeStyle = COLORS.envelopeBorder;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Envelope flap (triangle)
+        ctx.fillStyle = "#F0E8D0";
+        ctx.beginPath();
+        ctx.moveTo(-ENV_W / 2, -ENV_H / 2);
+        ctx.lineTo(0, -ENV_H / 2 + 30);
+        ctx.lineTo(ENV_W / 2, -ENV_H / 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = COLORS.envelopeBorder;
+        ctx.stroke();
+
+        // Stamp
+        const stampSize = 28;
+        const stampX = ENV_W / 2 - stampSize - 8;
+        const stampY = -ENV_H / 2 + 8;
+        ctx.fillStyle = COLOR_HEX[color];
+        drawRoundRect(stampX, stampY, stampSize, stampSize, 3);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.15)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Stamp icon (mail symbol)
+        ctx.fillStyle = "#FFF";
+        ctx.font = "bold 16px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("✉", stampX + stampSize / 2, stampY + stampSize / 2 + 6);
+
+        // Address lines
+        ctx.strokeStyle = "#D0C0A0";
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < 3; i++) {
+          ctx.beginPath();
+          ctx.moveTo(-ENV_W / 2 + 15, 0 + i * 12);
+          ctx.lineTo(ENV_W / 2 - stampSize - 15, 0 + i * 12);
+          ctx.stroke();
+        }
+
+        ctx.restore();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          const alpha = Math.max(0, p.life / p.maxLife);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = p.color;
+          ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHUD() {
+        // Delivered count (top-left)
+        ctx.fillStyle = COLORS.hudBg;
+        drawRoundRect(16, 12, 180, 44, 12);
+        ctx.fill();
+        ctx.fillStyle = COLORS.text;
+        ctx.font = "bold 20px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText("📬 배달: " + state.delivered + " / " + CLEAR_TARGET, 28, 42);
+
+        // Time (top-right)
+        const timeLeft = Math.max(0, TIME_LIMIT - state.elapsed);
+        ctx.fillStyle = COLORS.hudBg;
+        drawRoundRect(VIEW.width - 170, 12, 154, 44, 12);
+        ctx.fill();
+        ctx.fillStyle = timeLeft < 10 ? "#D44040" : COLORS.text;
+        ctx.font = "bold 20px Trebuchet MS";
+        ctx.textAlign = "right";
+        ctx.fillText("⏱ " + timeLeft.toFixed(1) + "초", VIEW.width - 28, 42);
+
+        // Lives (bottom-center)
+        const livesLeft = MAX_WRONG - state.wrong;
+        ctx.fillStyle = COLORS.hudBg;
+        const livesW = 160;
+        drawRoundRect(VIEW.width / 2 - livesW / 2, VIEW.height - 50, livesW, 38, 10);
+        ctx.fill();
+        ctx.fillStyle = COLORS.text;
+        ctx.font = "bold 18px Trebuchet MS";
+        ctx.textAlign = "center";
+        let hearts = "";
+        for (let i = 0; i < MAX_WRONG; i++) {
+          hearts += i < livesLeft ? "❤️ " : "🖤 ";
+        }
+        ctx.fillText(hearts.trim(), VIEW.width / 2, VIEW.height - 25);
+      }
+
+      function drawBackground() {
+        // Sky gradient
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#C8E8FF");
+        grad.addColorStop(1, "#E0F0FF");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // Clouds
+        ctx.fillStyle = "rgba(255,255,255,0.7)";
+        drawCloud(120, 60, 50);
+        drawCloud(400, 40, 40);
+        drawCloud(700, 70, 55);
+        drawCloud(850, 30, 35);
+
+        // Ground
+        ctx.fillStyle = "#C5E8B0";
+        ctx.fillRect(0, VIEW.height - 80, VIEW.width, 80);
+        ctx.fillStyle = "#B0D89A";
+        ctx.fillRect(0, VIEW.height - 80, VIEW.width, 4);
+      }
+
+      function drawCloud(x, y, size) {
+        ctx.beginPath();
+        ctx.arc(x, y, size * 0.5, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.4, y - size * 0.2, size * 0.4, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.8, y, size * 0.45, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.4, y + size * 0.1, size * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(224, 240, 255, 0.92)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        const cardW = Math.min(680, VIEW.width - 40);
+        const cardH = Math.min(340, VIEW.height - 40);
+        const cardX = (VIEW.width - cardW) / 2;
+        const cardY = (VIEW.height - cardH) / 2;
+
+        // Card shadow
+        ctx.fillStyle = "rgba(0,0,0,0.08)";
+        drawRoundRect(cardX + 4, cardY + 4, cardW, cardH, 20);
+        ctx.fill();
+
+        // Card body
+        ctx.fillStyle = "#FFFFFF";
+        drawRoundRect(cardX, cardY, cardW, cardH, 20);
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 3;
+        drawRoundRect(cardX, cardY, cardW, cardH, 20);
+        ctx.stroke();
+
+        // Title
+        ctx.fillStyle = accent;
+        ctx.font = "bold 36px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, cardY + 52);
+
+        // Lines
+        ctx.fillStyle = COLORS.text;
+        ctx.font = "600 18px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, cardY + 100 + index * 34);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.save();
+
+        if (state.mode === "menu") {
+          renderCard("우편 배달부", [
+            "편지를 올바른 우체통에 배달하는 속도 분류 게임",
+            "조작: 화면 터치로 편지를 맞는 집에 드래그",
+            "클리어: 편지 15통 정확히 배달",
+            "실패: 오배달 3회 시 실패",
+            "",
+            "터치 또는 Enter로 시작",
+          ], "#4070C0");
+          ctx.restore();
+          return;
+        }
+
+        if (state.mode === "running") {
+          ctx.translate(state.shakeX, state.shakeY);
+          drawBackground();
+
+          // Draw houses with mailboxes
+          for (let i = 0; i < MAILBOX_POSITIONS.length; i++) {
+            const mb = MAILBOX_POSITIONS[i];
+            const highlight = state.mailboxHighlight === i;
+            if (highlight) {
+              ctx.globalAlpha = 0.3;
+              ctx.fillStyle = COLOR_HEX[mb.color];
+              ctx.beginPath();
+              ctx.arc(mb.x, MAILBOX_Y, MAILBOX_W * 0.7, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.globalAlpha = 1;
+            }
+            drawHouse(mb.x, MAILBOX_Y, mb.color);
+          }
+
+          // Draw current letter
+          if (state.currentLetter) {
+            const l = state.currentLetter;
+            const flip = state.flipTimer > 0 ? state.flipTimer / 0.3 : 0;
+            drawEnvelope(l.x, l.y, l.color, flip);
+          }
+
+          // Particles
+          drawParticles();
+
+          // HUD
+          ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset shake for HUD
+          drawHUD();
+
+          ctx.restore();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          drawBackground();
+          drawParticles();
+          renderCard("실패!", [
+            "오배달 " + state.wrong + "회로 실패했습니다",
+            "배달 완료: " + state.delivered + " / " + CLEAR_TARGET,
+            "경과 시간: " + state.elapsed.toFixed(1) + "초",
+            "",
+            "터치 또는 Enter로 재시작",
+          ], "#D44040");
+          ctx.restore();
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          drawBackground();
+          drawParticles();
+          renderCard("클리어!", [
+            "편지 " + CLEAR_TARGET + "통 배달 완료!",
+            "경과 시간: " + state.elapsed.toFixed(1) + "초",
+            "오배달: " + state.wrong + "회",
+            "",
+            "터치 또는 Enter로 재시작",
+          ], "#40A060");
+          ctx.restore();
+          return;
+        }
+
+        ctx.restore();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          delivered: state.delivered,
+          wrong: state.wrong,
+          timeLeft: Math.max(0, Math.round((TIME_LIMIT - state.elapsed) * 10) / 10),
+          currentLetter: state.currentLetter ? {
+            x: Math.round(state.currentLetter.x),
+            y: Math.round(state.currentLetter.y),
+            color: state.currentLetter.color,
+          } : null,
+          result: window.relayStageResult.status,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared")) {
+          event.preventDefault();
+          startStage();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "mail-dash",
+        title: "우편 배달부",
+        creator: "jungcollin",
+        genre: "Speed sorting",
+        clearCondition: "편지 15통 정확히 배달",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
