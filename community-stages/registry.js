@@ -709,5 +709,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "마을 5개를 보호하면 클리어",
     thumbnail: "./wildfire-line/thumbnail.png",
     path: "./wildfire-line/index.html",
+  },
+  {
+    id: "coffee-dripper",
+    title: "커피 내리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pour-over simulation",
+    clearCondition: "커피 5잔을 추출하면 클리어",
+    thumbnail: "./coffee-dripper/thumbnail.png",
+    path: "./coffee-dripper/index.html",
   }
 ];
