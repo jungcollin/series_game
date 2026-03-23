@@ -871,5 +871,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "구슬 5개를 목표에 넣으면 클리어",
     thumbnail: "./magnet-maze/thumbnail.png",
     path: "./magnet-maze/index.html",
+  },
+  {
+    id: "spring-thaw",
+    title: "봄바람",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Thawing warmth",
+    clearCondition: "꽃 8송이를 피우면 클리어",
+    thumbnail: "./spring-thaw/thumbnail.png",
+    path: "./spring-thaw/index.html",
   }
 ];
