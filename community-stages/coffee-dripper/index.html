@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>커피 내리기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #f5ebe0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(139, 90, 43, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(78, 44, 16, 0.92);
+        color: #fdf6ee; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #f5ebe0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(139, 90, 43, 0.5); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">커피 내리기. 드리퍼 위에서 물줄기를 원형으로 골고루 부어 완벽한 커피를 추출하세요. 모바일에서는 화면을 터치하고 드래그하여 물줄기를 이동합니다. PC에서는 마우스 드래그로 조작합니다. 커피 5잔을 추출하면 클리어. 추출 실패 3회 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="커피 내리기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "coffee-dripper",
+        title: "커피 내리기",
+        description: "드리퍼 위에서 물줄기를 원형으로 골고루 부어 커피를 추출하세요.",
+        creator: "jungcollin",
+        genre: "Pour-over simulation",
+        clearCondition: "커피 5잔을 추출하면 클리어",
+        failCondition: "추출 실패 3회 시 실패",
+        controls: "드래그로 물줄기를 원형으로 이동",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#f5ebe0", cream: "#ede0d0", brown: "#6b3e1f",
+        brownLight: "#a0714a", caramel: "#c8874e",
+        water: "rgba(120, 180, 220, 0.6)", waterDark: "rgba(80, 140, 190, 0.8)",
+        coffeeMid: "#7a4a28", white: "#fdf8f2",
+        accent: "#d4803a", fail: "#9e3020",
+      };
+
+      const CUPS_TO_WIN = 5, MAX_FAILS = 3, POUR_DURATION = 8;
+      const DRIPPER_R = 80, GRID_SIZE = 8;
+      const CELL_SIZE = DRIPPER_R * 2 / GRID_SIZE;
+      const COVERAGE_THRESHOLD = 0.6;
+
+      let mode = "menu", elapsed = 0, cupsCompleted = 0, fails = 0;
+      let pourTimer = 0, lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, flashAlpha = 0, clearAnim = 0;
+      let pourX = CX, pourY = CY, pourTargetX = CX, pourTargetY = CY;
+      let pouring = false, grid = [], waterDrops = [], steamParticles = [];
+      let cupFill = 0, cupFillTarget = 0, pourResult = "", resultTimer = 0, roundStarted = false;
+      const DX = CX, DY = CY - 40, CUP_Y = DY + 140;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function initGrid() {
+        grid = [];
+        for (let r = 0; r < GRID_SIZE; r++) {
+          grid[r] = [];
+          for (let c = 0; c < GRID_SIZE; c++) {
+            const cx = DX - DRIPPER_R + c * CELL_SIZE + CELL_SIZE / 2;
+            const cy = DY - DRIPPER_R + r * CELL_SIZE + CELL_SIZE / 2;
+            grid[r][c] = { wet: 0, inCircle: dist(cx, cy, DX, DY) < DRIPPER_R - 4 };
+          }
+        }
+      }
+
+      function getCoverage() {
+        let total = 0, wet = 0;
+        for (let r = 0; r < GRID_SIZE; r++)
+          for (let c = 0; c < GRID_SIZE; c++)
+            if (grid[r][c].inCircle) { total++; wet += Math.min(1, grid[r][c].wet); }
+        return total > 0 ? wet / total : 0;
+      }
+
+      function getUniformity() {
+        let vals = [];
+        for (let r = 0; r < GRID_SIZE; r++)
+          for (let c = 0; c < GRID_SIZE; c++)
+            if (grid[r][c].inCircle) vals.push(grid[r][c].wet);
+        if (!vals.length) return 0;
+        const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const v = vals.reduce((a, b) => a + (b - avg) ** 2, 0) / vals.length;
+        return Math.max(0, 1 - Math.sqrt(v) * 2);
+      }
+
+      function spawnWaterDrop(x, y) {
+        waterDrops.push({ x: x + rand(-3, 3), y, vy: rand(80, 140), size: rand(2, 4), life: 1 });
+      }
+      function spawnSteam() {
+        if (reducedMotion) return;
+        steamParticles.push({ x: DX + rand(-30, 30), y: CUP_Y - 20, vx: rand(-8, 8), vy: rand(-25, -45), life: 1, size: rand(4, 10) });
+      }
+
+      function reset() {
+        elapsed = 0; cupsCompleted = 0; fails = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running"; startNewRound();
+      }
+
+      function startNewRound() {
+        pourTimer = POUR_DURATION; pourX = DX; pourY = DY;
+        pourTargetX = DX; pourTargetY = DY;
+        pouring = false; roundStarted = false;
+        cupFill = 0; cupFillTarget = 0;
+        pourResult = ""; resultTimer = 0;
+        waterDrops = []; steamParticles = []; initGrid();
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        if (pourResult) {
+          resultTimer -= dt;
+          if (resultTimer <= 0) {
+            pourResult = "";
+            if (cupsCompleted >= CUPS_TO_WIN) {
+              mode = "clear"; clearAnim = 0;
+              window.relayStageResult.status = "cleared"; reportCleared(); return;
+            }
+            if (fails >= MAX_FAILS) {
+              mode = "failed"; window.relayStageResult.status = "failed";
+              reportFailed("추출 실패 초과"); return;
+            }
+            startNewRound();
+          }
+          cupFill = lerp(cupFill, cupFillTarget, 3 * dt);
+          if (cupFillTarget > 0.5 && Math.random() < 0.3) spawnSteam();
+          updateParticles(dt); return;
+        }
+
+        if (roundStarted) { pourTimer -= dt; if (pourTimer <= 0) { evaluateRound(); return; } }
+
+        pourX = lerp(pourX, pourTargetX, clamp(10 * dt, 0, 1));
+        pourY = lerp(pourY, pourTargetY, clamp(10 * dt, 0, 1));
+
+        if (pouring && roundStarted) {
+          const gx = (pourX - (DX - DRIPPER_R)) / CELL_SIZE;
+          const gy = (pourY - (DY - DRIPPER_R)) / CELL_SIZE;
+          for (let r = 0; r < GRID_SIZE; r++)
+            for (let c = 0; c < GRID_SIZE; c++) {
+              if (!grid[r][c].inCircle) continue;
+              const dd = dist(c + 0.5, r + 0.5, gx, gy);
+              if (dd < 1.8) grid[r][c].wet = Math.min(2, grid[r][c].wet + (1 - dd / 1.8) * dt * 1.2);
+            }
+          if (Math.random() < 0.6) spawnWaterDrop(pourX, pourY + DRIPPER_R * 0.3);
+          cupFill = getCoverage() * 0.3;
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92; updateParticles(dt);
+      }
+
+      function updateParticles(dt) {
+        for (let i = waterDrops.length - 1; i >= 0; i--) {
+          const d = waterDrops[i]; d.y += d.vy * dt; d.life -= dt * 2;
+          if (d.y > CUP_Y || d.life <= 0) waterDrops.splice(i, 1);
+        }
+        for (let i = steamParticles.length - 1; i >= 0; i--) {
+          const s = steamParticles[i]; s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt * 1.5;
+          if (s.life <= 0) steamParticles.splice(i, 1);
+        }
+      }
+
+      function evaluateRound() {
+        const cov = getCoverage(), uni = getUniformity();
+        const score = cov * 0.6 + uni * 0.4;
+        if (score >= COVERAGE_THRESHOLD) {
+          cupsCompleted++; pourResult = "good"; cupFillTarget = 0.85 + score * 0.15;
+        } else {
+          fails++; pourResult = "bad"; cupFillTarget = score * 0.4;
+          shake = 6; flashAlpha = 0.25;
+        }
+        resultTimer = 1.5;
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = COL.cream; ctx.fillRect(0, H * 0.65, W, H * 0.35);
+        ctx.fillStyle = "rgba(139,90,43,0.08)"; ctx.fillRect(0, H * 0.65, W, 2);
+
+        if (mode === "running") {
+          drawDripper(); drawCup(); drawWaterDrops(); drawSteam(); drawHUD();
+          if (pourResult) drawResultLabel();
+        }
+        if (flashAlpha > 0.01) { ctx.fillStyle = `rgba(158,48,32,${flashAlpha})`; ctx.fillRect(0, 0, W, H); }
+        ctx.restore();
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawDripper() {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(DX - DRIPPER_R - 10, DY - DRIPPER_R + 10);
+        ctx.lineTo(DX + DRIPPER_R + 10, DY - DRIPPER_R + 10);
+        ctx.lineTo(DX + 25, DY + DRIPPER_R - 10);
+        ctx.lineTo(DX - 25, DY + DRIPPER_R - 10);
+        ctx.closePath();
+        ctx.fillStyle = COL.white; ctx.fill();
+        ctx.strokeStyle = COL.brownLight; ctx.lineWidth = 2; ctx.stroke();
+
+        ctx.beginPath();
+        ctx.ellipse(DX, DY - DRIPPER_R + 12, DRIPPER_R + 8, 14, 0, 0, Math.PI * 2);
+        ctx.fillStyle = COL.white; ctx.fill();
+        ctx.strokeStyle = COL.brownLight; ctx.lineWidth = 2; ctx.stroke();
+
+        for (let r = 0; r < GRID_SIZE; r++)
+          for (let c = 0; c < GRID_SIZE; c++) {
+            const cell = grid[r][c]; if (!cell.inCircle) continue;
+            const cx = DX - DRIPPER_R + c * CELL_SIZE + CELL_SIZE / 2;
+            const cy = DY - DRIPPER_R + r * CELL_SIZE + CELL_SIZE / 2;
+            ctx.fillStyle = "rgba(62,31,10,0.3)";
+            ctx.fillRect(cx - CELL_SIZE / 2 + 1, cy - CELL_SIZE / 2 + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+            if (cell.wet > 0) {
+              ctx.fillStyle = `rgba(80,140,190,${Math.min(0.6, cell.wet * 0.35)})`;
+              ctx.fillRect(cx - CELL_SIZE / 2 + 1, cy - CELL_SIZE / 2 + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+            }
+          }
+
+        if (pouring || roundStarted) {
+          ctx.beginPath(); ctx.arc(pourX, pourY, 6, 0, Math.PI * 2);
+          ctx.fillStyle = COL.waterDark; ctx.fill();
+          if (pouring) {
+            ctx.beginPath();
+            ctx.moveTo(pourX - 2, pourY + 10); ctx.lineTo(pourX + 2, pourY + 10);
+            ctx.lineTo(pourX + 1, pourY + DRIPPER_R * 0.5); ctx.lineTo(pourX - 1, pourY + DRIPPER_R * 0.5);
+            ctx.fillStyle = COL.water; ctx.fill();
+          }
+        }
+        ctx.restore();
+      }
+
+      function drawCup() {
+        const cW = 70, cH = 55, cX = DX - cW / 2, cY2 = CUP_Y;
+        ctx.beginPath();
+        ctx.moveTo(cX - 5, cY2 - cH); ctx.lineTo(cX + cW + 5, cY2 - cH);
+        ctx.lineTo(cX + cW - 3, cY2); ctx.lineTo(cX + 3, cY2); ctx.closePath();
+        ctx.fillStyle = COL.white; ctx.fill();
+        ctx.strokeStyle = COL.brownLight; ctx.lineWidth = 2; ctx.stroke();
+        ctx.beginPath(); ctx.arc(cX + cW + 8, cY2 - cH / 2, 14, -Math.PI * 0.4, Math.PI * 0.4);
+        ctx.strokeStyle = COL.brownLight; ctx.lineWidth = 3; ctx.stroke();
+
+        if (cupFill > 0.01) {
+          const fH = cH * cupFill * 0.85, fY = cY2 - fH;
+          const s1 = (1 - fH / cH) * 3, s2 = (cH - fH) / cH * 8;
+          ctx.beginPath();
+          ctx.moveTo(cX + 3 + s1, cY2); ctx.lineTo(cX + cW - 3 - s1, cY2);
+          ctx.lineTo(cX + cW - 3 - s2, fY); ctx.lineTo(cX + 3 + s2, fY); ctx.closePath();
+          ctx.fillStyle = pourResult === "bad" ? "rgba(90,60,30,0.5)" : COL.coffeeMid; ctx.fill();
+        }
+        ctx.beginPath(); ctx.ellipse(DX, cY2 + 5, cW * 0.7, 7, 0, 0, Math.PI * 2);
+        ctx.fillStyle = COL.cream; ctx.fill();
+        ctx.strokeStyle = COL.brownLight; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+
+      function drawWaterDrops() {
+        for (const d of waterDrops) {
+          ctx.beginPath(); ctx.arc(d.x, d.y, d.size * d.life, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(120,180,220,${0.7 * d.life})`; ctx.fill();
+        }
+      }
+
+      function drawSteam() {
+        for (const s of steamParticles) {
+          ctx.beginPath(); ctx.arc(s.x, s.y, s.size * s.life, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(200,190,175,${s.life * 0.3})`; ctx.fill();
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.brown;
+        ctx.font = '500 15px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`추출: ${cupsCompleted} / ${CUPS_TO_WIN}`, 24, 20);
+        ctx.textAlign = "right";
+        let ft = ""; for (let i = 0; i < MAX_FAILS; i++) ft += i < fails ? "✕ " : "○ ";
+        ctx.fillText(ft.trim(), W - 24, 20);
+
+        if (roundStarted && !pourResult) {
+          const bW = W - 48, bX = 24, bY = 44;
+          ctx.fillStyle = COL.cream; ctx.fillRect(bX, bY, bW, 4);
+          const ratio = clamp(pourTimer / POUR_DURATION, 0, 1);
+          ctx.fillStyle = ratio > 0.3 ? COL.caramel : COL.fail;
+          ctx.fillRect(bX, bY, bW * ratio, 4);
+          ctx.fillStyle = COL.brownLight;
+          ctx.font = '400 13px "Trebuchet MS",sans-serif'; ctx.textAlign = "center";
+          ctx.fillText(`추출률 ${Math.round(getCoverage() * 100)}%`, CX, 20);
+        }
+      }
+
+      function drawResultLabel() {
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.font = 'bold 28px "Trebuchet MS",sans-serif';
+        if (pourResult === "good") {
+          ctx.fillStyle = "rgba(60,120,60,0.85)"; ctx.fillText("좋은 추출!", CX, DY - DRIPPER_R - 30);
+        } else {
+          ctx.fillStyle = "rgba(158,48,32,0.85)"; ctx.fillText("추출 실패...", CX, DY - DRIPPER_R - 30);
+        }
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath(); c.moveTo(x + r, y); c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r); c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r); c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r); c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cW = Math.min(320, W - 40), lH = 26;
+        const cH = 42 + lines.length * lH + 40;
+        const cX = CX - cW / 2, cY = CY - cH / 2;
+        ctx.fillStyle = "rgba(245,235,224,0.95)"; roundRect(ctx, cX, cY, cW, cH, 8); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cX + 12, cY, cW - 24, 3);
+        ctx.fillStyle = COL.brown; ctx.font = 'bold 22px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cY + 16);
+        ctx.font = '400 14px "Trebuchet MS",sans-serif'; ctx.fillStyle = "rgba(78,44,16,0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cY + 48 + i * lH);
+        ctx.fillStyle = "rgba(78,44,16,0.4)"; ctx.font = '400 13px "Trebuchet MS",sans-serif';
+        ctx.fillText("TAP or ENTER", CX, cY + cH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(245,235,224,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("커피 내리기", [
+          "드리퍼 위에서 물줄기를 원형으로",
+          "골고루 부어 커피를 추출하세요",
+          "", "조작: 터치 드래그로 물줄기 이동",
+          "클리어: 커피 5잔 추출", "실패: 추출 실패 3회",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(245,235,224,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("완벽한 커피!", [`${Math.ceil(elapsed)}초 만에 완료`, `추출: ${cupsCompleted}잔`], COL.accent);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(90,40,20,0.3)"; ctx.fillRect(0, 0, W, H);
+        drawCard("추출 실패", ["커피 맛이 고르지 않습니다", `완성: ${cupsCompleted} / ${CUPS_TO_WIN}`], COL.fail);
+      }
+
+      function getCanvasPos(cx, cy) {
+        const r = canvas.getBoundingClientRect();
+        return { x: (cx - r.left) * (W / r.width), y: (cy - r.top) * (H / r.height) };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        if (pourResult) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        pouring = true; if (!roundStarted) roundStarted = true;
+        pourTargetX = clamp(p.x, DX - DRIPPER_R + 10, DX + DRIPPER_R - 10);
+        pourTargetY = clamp(p.y, DY - DRIPPER_R + 10, DY + DRIPPER_R - 10);
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running" || !pouring) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        pourTargetX = clamp(p.x, DX - DRIPPER_R + 10, DX + DRIPPER_R - 10);
+        pourTargetY = clamp(p.y, DY - DRIPPER_R + 10, DY + DRIPPER_R - 10);
+      });
+      canvas.addEventListener("pointerup", () => { pouring = false; });
+      canvas.addEventListener("pointercancel", () => { pouring = false; });
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); }
+      });
+
+      function gameLoop(ts) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = ts; return; }
+        let dt = Math.min((ts - lastTimestamp) / 1000, MAX_DT); lastTimestamp = ts;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), cupsCompleted, fails, coverage: +(getCoverage()).toFixed(2), result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const s = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < s; i++) update(FIXED_DT); draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; cupsCompleted = CUPS_TO_WIN; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; fails = MAX_FAILS; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      initGrid(); reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
