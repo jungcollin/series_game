@@ -1105,5 +1105,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "상대 팽이 5개를 밀어내면 클리어",
     thumbnail: "./spin-clash/thumbnail.png",
     path: "./spin-clash/index.html",
+  },
+  {
+    id: "trampoline-star",
+    title: "트램폴린 별따기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Bounce collection",
+    clearCondition: "별 15개를 모으면 클리어",
+    thumbnail: "./trampoline-star/thumbnail.png",
+    path: "./trampoline-star/index.html",
   }
 ];
