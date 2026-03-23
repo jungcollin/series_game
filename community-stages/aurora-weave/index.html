@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>오로라 직조</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #1A1A2E; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(160, 200, 180, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(26, 26, 46, 0.92);
+        color: #E0F0E8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #1A1A2E; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(160, 220, 180, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">오로라 직조. 화면을 드래그하여 오로라 빛줄기로 별들을 순서대로 연결하세요. 모바일에서는 화면 터치와 드래그로 플레이합니다. 패턴 6개를 완성하면 클리어. 시간 초과 3회 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="오로라 직조" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "aurora-weave",
+        title: "오로라 직조",
+        description: "오로라 빛줄기를 드래그해 별자리 패턴을 완성하세요",
+        creator: "jungcollin",
+        genre: "Pattern drawing",
+        clearCondition: "패턴 6개를 완성하면 클리어",
+        failCondition: "시간 초과 3회 시 실패",
+        controls: "화면 드래그로 빛줄기 연결",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // Lavender / Mint / Cream palette on dark sky
+      const COL = {
+        bg: "#1A1A2E", bgLight: "#222244",
+        lavender: "#B8A0D8", mint: "#80D8B0", cream: "#F0E8D0",
+        aurora1: "rgba(184,160,216,0.6)", aurora2: "rgba(128,216,176,0.6)",
+        aurora3: "rgba(100,180,220,0.5)",
+        starDim: "rgba(240,232,208,0.3)", starBright: "#F0E8D0",
+        line: "#A0DCC0", lineGlow: "rgba(160,220,192,0.4)",
+        text: "#D0D8E0", textDim: "#8090A0",
+        success: "#80D8A0", danger: "#D88080",
+        snow: "#E8E0D8",
+      };
+
+      const TOTAL_PATTERNS = 6;
+      const MAX_TIMEOUTS = 3;
+      const PATTERN_TIME = 10;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      let patternsComplete = 0;
+      let timeouts = 0;
+      let patternTimer = 0;
+      let shake = 0;
+
+      // Stars (background)
+      let bgStars = [];
+
+      // Pattern stars (nodes to connect)
+      let nodes = [];
+      let edges = []; // pairs [i, j] to connect
+      let connected = []; // booleans for each edge
+      let currentEdge = 0;
+      let dragActive = false;
+      let dragFrom = -1;
+
+      // Aurora waves (ambient)
+      let auroraWaves = [];
+
+      // Particles
+      let particles = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function randInt(lo, hi) { return Math.floor(rand(lo, hi + 1)); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange, speedRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), s = rand(speedRange[0], speedRange[1]);
+          particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+            life: 1, decay: rand(0.5, 1.0), color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+
+      function initBgStars() {
+        bgStars = [];
+        for (let i = 0; i < 80; i++)
+          bgStars.push({ x: rand(0, W), y: rand(0, H * 0.85), size: rand(0.5, 2), twinkle: rand(0, Math.PI * 2) });
+      }
+
+      function initAurora() {
+        auroraWaves = [];
+        for (let i = 0; i < 3; i++)
+          auroraWaves.push({ y: rand(40, 180), amplitude: rand(20, 50), freq: rand(0.003, 0.008), speed: rand(0.3, 0.8), phase: rand(0, Math.PI * 2), color: [COL.aurora1, COL.aurora2, COL.aurora3][i] });
+      }
+
+      // Pattern shapes
+      const PATTERNS = [
+        // Triangle
+        { pts: [[0, -1], [-0.87, 0.5], [0.87, 0.5]], edges: [[0,1],[1,2],[2,0]] },
+        // Square
+        { pts: [[-0.7, -0.7], [0.7, -0.7], [0.7, 0.7], [-0.7, 0.7]], edges: [[0,1],[1,2],[2,3],[3,0]] },
+        // Diamond
+        { pts: [[0, -1], [1, 0], [0, 1], [-1, 0]], edges: [[0,1],[1,2],[2,3],[3,0]] },
+        // W shape
+        { pts: [[-1, -0.5], [-0.5, 0.7], [0, -0.2], [0.5, 0.7], [1, -0.5]], edges: [[0,1],[1,2],[2,3],[3,4]] },
+        // Arrow
+        { pts: [[0, -1], [0.8, 0], [0.3, 0], [0.3, 1], [-0.3, 1], [-0.3, 0], [-0.8, 0]], edges: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,0]] },
+        // Zigzag
+        { pts: [[-1, -0.5], [-0.3, 0.5], [0.3, -0.5], [1, 0.5]], edges: [[0,1],[1,2],[2,3]] },
+        // Pentagon
+        { pts: [[0,-1],[0.95,-0.31],[0.59,0.81],[-0.59,0.81],[-0.95,-0.31]], edges: [[0,1],[1,2],[2,3],[3,4],[4,0]] },
+        // Cross
+        { pts: [[0,-1],[0,0],[1,0],[0,0],[0,1],[-1,0]], edges: [[0,1],[2,3],[4,5]] },
+      ];
+
+      function generatePattern() {
+        const diff = Math.min(patternsComplete / TOTAL_PATTERNS, 1);
+        const patIdx = (patternsComplete) % PATTERNS.length;
+        const pat = PATTERNS[patIdx];
+        const scale = lerp(100, 80, diff);
+        const ox = CX + rand(-80, 80), oy = CY + rand(-40, 40);
+
+        nodes = pat.pts.map(([px, py]) => ({
+          x: ox + px * scale, y: oy + py * scale,
+          pulse: 0, connected: false,
+        }));
+        edges = pat.edges.map(e => [...e]);
+        connected = edges.map(() => false);
+        currentEdge = 0;
+        patternTimer = PATTERN_TIME - diff * 2;
+        dragActive = false;
+        dragFrom = -1;
+
+        // Highlight first node
+        if (edges.length > 0) nodes[edges[0][0]].pulse = 1;
+      }
+
+      function startGame() {
+        mode = "running"; elapsed = 0; patternsComplete = 0; timeouts = 0;
+        shake = 0; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initBgStars(); initAurora(); generatePattern();
+      }
+
+      function failGame(reason) {
+        mode = "failed"; window.relayStageResult.status = "failed"; reportFailed(reason);
+      }
+      function clearGame() {
+        mode = "cleared"; window.relayStageResult.status = "cleared"; reportCleared();
+        for (let i = 0; i < 50; i++)
+          spawnParticles(rand(100, 860), rand(60, 440), 1, [COL.lavender, COL.mint, COL.cream, "#FFF"][randInt(0, 3)], [2, 6], [30, 100]);
+      }
+
+      function nextPattern() {
+        patternsComplete++;
+        if (patternsComplete >= TOTAL_PATTERNS) { clearGame(); return; }
+        for (let i = 0; i < 20; i++)
+          spawnParticles(rand(200, 760), rand(100, 400), 1, COL.mint, [2, 5], [40, 100]);
+        generatePattern();
+      }
+
+      function nodeAt(x, y) {
+        for (let i = 0; i < nodes.length; i++) {
+          if (dist(x, y, nodes[i].x, nodes[i].y) < 28) return i;
+        }
+        return -1;
+      }
+
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = W / rect.width, sy = H / rect.height;
+        const touch = e.touches ? e.touches[0] : e;
+        return { x: (touch.clientX - rect.left) * sx, y: (touch.clientY - rect.top) * sy };
+      }
+
+      let dragPos = { x: 0, y: 0 };
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { startGame(); return; }
+        const pos = getCanvasPos(e);
+        dragPos = pos;
+        if (currentEdge < edges.length) {
+          const targetNode = edges[currentEdge][0];
+          const hit = nodeAt(pos.x, pos.y);
+          if (hit === targetNode) {
+            dragActive = true;
+            dragFrom = hit;
+            canvas.setPointerCapture?.(e.pointerId);
+          }
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!dragActive) return;
+        dragPos = getCanvasPos(e);
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (!dragActive) return;
+        dragActive = false;
+        const pos = getCanvasPos(e);
+        const hit = nodeAt(pos.x, pos.y);
+        if (currentEdge < edges.length && hit === edges[currentEdge][1]) {
+          connected[currentEdge] = true;
+          nodes[edges[currentEdge][0]].connected = true;
+          nodes[edges[currentEdge][1]].connected = true;
+          spawnParticles((nodes[hit].x + nodes[dragFrom].x) / 2, (nodes[hit].y + nodes[dragFrom].y) / 2, 8, COL.mint, [2, 4], [30, 80]);
+          currentEdge++;
+          if (currentEdge >= edges.length) {
+            setTimeout(() => { if (mode === "running") nextPattern(); }, 500);
+          } else {
+            nodes[edges[currentEdge][0]].pulse = 1;
+          }
+        }
+        dragFrom = -1;
+      });
+
+      canvas.addEventListener("pointercancel", () => { dragActive = false; dragFrom = -1; });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && mode !== "running") { e.preventDefault(); startGame(); }
+      });
+
+      function update(dt) {
+        elapsed += dt;
+        if (mode === "running") {
+          patternTimer -= dt;
+          if (patternTimer <= 0 && currentEdge < edges.length) {
+            timeouts++;
+            shake = 0.3;
+            if (timeouts >= MAX_TIMEOUTS) { failGame("시간 초과 3회"); return; }
+            generatePattern();
+          }
+        }
+        if (shake > 0) shake = Math.max(0, shake - dt * 3);
+        nodes.forEach(n => { if (n.pulse > 0) n.pulse = Math.max(0, n.pulse - dt * 0.5); });
+        particles = particles.filter(p => {
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 20 * dt;
+          p.life -= p.decay * dt; return p.life > 0;
+        });
+      }
+
+      function drawBgStars() {
+        bgStars.forEach(s => {
+          const twinkle = Math.sin(elapsed * 2 + s.twinkle) * 0.3 + 0.7;
+          ctx.globalAlpha = twinkle;
+          ctx.fillStyle = COL.starDim;
+          ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2); ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function drawAurora() {
+        if (reducedMotion) return;
+        auroraWaves.forEach(w => {
+          ctx.beginPath();
+          ctx.moveTo(0, w.y);
+          for (let x = 0; x <= W; x += 4) {
+            const y = w.y + Math.sin(x * w.freq + elapsed * w.speed + w.phase) * w.amplitude;
+            ctx.lineTo(x, y);
+          }
+          ctx.lineTo(W, w.y + 80);
+          ctx.lineTo(0, w.y + 80);
+          ctx.closePath();
+          ctx.fillStyle = w.color;
+          ctx.fill();
+        });
+      }
+
+      function drawSnowMountains() {
+        ctx.fillStyle = "#2A2A3E";
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, H - 80);
+        ctx.lineTo(120, H - 140);
+        ctx.lineTo(250, H - 90);
+        ctx.lineTo(380, H - 160);
+        ctx.lineTo(500, H - 100);
+        ctx.lineTo(620, H - 130);
+        ctx.lineTo(760, H - 90);
+        ctx.lineTo(880, H - 150);
+        ctx.lineTo(W, H - 100);
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // Snow caps
+        ctx.fillStyle = COL.snow + "40";
+        ctx.beginPath();
+        ctx.moveTo(110, H - 135);
+        ctx.lineTo(120, H - 140);
+        ctx.lineTo(130, H - 135);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(370, H - 155);
+        ctx.lineTo(380, H - 160);
+        ctx.lineTo(390, H - 155);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(870, H - 145);
+        ctx.lineTo(880, H - 150);
+        ctx.lineTo(890, H - 145);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawNodes() {
+        // Draw edges (connected)
+        for (let i = 0; i < edges.length; i++) {
+          if (connected[i]) {
+            const a = nodes[edges[i][0]], b = nodes[edges[i][1]];
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+            ctx.strokeStyle = COL.line; ctx.lineWidth = 3; ctx.stroke();
+            // Glow
+            ctx.strokeStyle = COL.lineGlow; ctx.lineWidth = 8; ctx.stroke();
+          }
+        }
+
+        // Draw guide edges (dimmed)
+        for (let i = currentEdge; i < edges.length; i++) {
+          const a = nodes[edges[i][0]], b = nodes[edges[i][1]];
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+          ctx.strokeStyle = "rgba(160,220,192,0.15)"; ctx.lineWidth = 1;
+          ctx.setLineDash([4, 6]); ctx.stroke(); ctx.setLineDash([]);
+        }
+
+        // Draw drag line
+        if (dragActive && dragFrom >= 0) {
+          const from = nodes[dragFrom];
+          ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(dragPos.x, dragPos.y);
+          ctx.strokeStyle = COL.mint; ctx.lineWidth = 3;
+          ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+        }
+
+        // Draw nodes
+        nodes.forEach((n, i) => {
+          const isNext = currentEdge < edges.length && (i === edges[currentEdge][0] || i === edges[currentEdge][1]);
+          const r = n.connected ? 8 : (isNext ? 10 + Math.sin(elapsed * 4) * 2 : 7);
+
+          // Glow for next node
+          if (isNext && i === edges[currentEdge][0] && !n.connected) {
+            ctx.beginPath(); ctx.arc(n.x, n.y, r + 8, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(128,216,176,0.25)"; ctx.fill();
+          }
+
+          ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = n.connected ? COL.mint : (isNext ? COL.starBright : COL.starDim);
+          ctx.fill();
+
+          if (n.pulse > 0) {
+            ctx.beginPath(); ctx.arc(n.x, n.y, r + 12 * n.pulse, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(128,216,176,${n.pulse * 0.5})`;
+            ctx.lineWidth = 2; ctx.stroke();
+          }
+        });
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.textAlign = "left"; ctx.fillText("패턴 " + patternsComplete + "/" + TOTAL_PATTERNS, 20, 32);
+        ctx.textAlign = "right";
+        ctx.fillStyle = timeouts >= 2 ? COL.danger : COL.text;
+        ctx.fillText("초과 " + timeouts + "/" + MAX_TIMEOUTS, W - 20, 32);
+
+        // Timer bar
+        if (mode === "running" && currentEdge < edges.length) {
+          const pct = clamp(patternTimer / PATTERN_TIME, 0, 1);
+          const barW = 200, barH = 6;
+          const bx = CX - barW / 2, by = 16;
+          ctx.fillStyle = "rgba(255,255,255,0.1)";
+          ctx.fillRect(bx, by, barW, barH);
+          ctx.fillStyle = pct < 0.3 ? COL.danger : COL.mint;
+          ctx.fillRect(bx, by, barW * pct, barH);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function drawParticles() {
+        particles.forEach(p => {
+          ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2); ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function drawBg() {
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+        drawAurora();
+        drawBgStars();
+        drawSnowMountains();
+      }
+
+      function renderMenu() {
+        drawBg();
+        const cw = 340, ch = 300, cx = CX - cw / 2, cy = CY - ch / 2 - 10;
+        ctx.fillStyle = "rgba(26,26,46,0.88)";
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = COL.mint; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = COL.mint; ctx.font = "bold 34px 'Trebuchet MS'";
+        ctx.fillText("오로라 직조", CX, cy + 48);
+        ctx.fillStyle = COL.text; ctx.font = "17px 'Trebuchet MS'";
+        ctx.fillText("빛줄기로 별들을 연결하세요", CX, cy + 82);
+        ctx.fillStyle = COL.textDim; ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("조작: 화면 드래그로 연결", CX, cy + 116);
+        ctx.fillStyle = COL.success; ctx.fillText("클리어: 패턴 6개 완성", CX, cy + 148);
+        ctx.fillStyle = COL.danger; ctx.fillText("실패: 시간 초과 3회", CX, cy + 175);
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = `rgba(128,216,176,${pulse})`; ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.fillText("탭하여 시작", CX, cy + 240);
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        drawBg();
+        if (shake > 0) { ctx.save(); ctx.translate(rand(-shake * 8, shake * 8), rand(-shake * 8, shake * 8)); }
+        drawNodes(); drawHUD(); drawParticles();
+        if (shake > 0) ctx.restore();
+      }
+
+      function renderResult(title, subtitle, color) {
+        drawBg(); drawParticles();
+        const cw = 340, ch = 210, cx = CX - cw / 2, cy = CY - ch / 2;
+        ctx.fillStyle = "rgba(26,26,46,0.88)";
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = color; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.fillStyle = color; ctx.font = "bold 34px 'Trebuchet MS'"; ctx.fillText(title, CX, cy + 50);
+        ctx.fillStyle = COL.text; ctx.font = "17px 'Trebuchet MS'"; ctx.fillText(subtitle, CX, cy + 85);
+        ctx.fillStyle = COL.textDim; ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("패턴 " + patternsComplete + "개 | " + elapsed.toFixed(1) + "초", CX, cy + 115);
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = `rgba(128,216,176,${pulse})`; ctx.font = "bold 18px 'Trebuchet MS'";
+        ctx.fillText("탭하여 재시작", CX, cy + 175);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (mode === "menu") { renderMenu(); return; }
+        if (mode === "running") { renderRunning(); return; }
+        if (mode === "cleared") { renderResult("클리어!", "오로라가 완성되었습니다!", COL.success); return; }
+        if (mode === "failed") { renderResult("실패", "빛이 사라졌습니다...", COL.danger); return; }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), patternsComplete, timeouts, currentEdge, totalEdges: edges.length, patternTimer: +patternTimer.toFixed(1) });
+      }
+
+      function frame(ts) {
+        const dt = lastTimestamp ? Math.min((ts - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = ts; update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { startGame(); clearGame(); render(); },
+        forceFail() { startGame(); failGame("debug_force_fail"); render(); },
+      };
+
+      initBgStars(); initAurora();
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+      reportReady(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

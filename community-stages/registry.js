@@ -817,5 +817,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "링 8개를 통과하면 클리어",
     thumbnail: "./paper-plane/thumbnail.png",
     path: "./paper-plane/index.html",
+  },
+  {
+    id: "aurora-weave",
+    title: "오로라 직조",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pattern drawing",
+    clearCondition: "패턴 6개를 완성하면 클리어",
+    thumbnail: "./aurora-weave/thumbnail.png",
+    path: "./aurora-weave/index.html",
   }
 ];
