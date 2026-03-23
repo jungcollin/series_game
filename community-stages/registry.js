@@ -997,5 +997,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "꽃 8송이에 이슬 전달",
     thumbnail: "./dew-garden/thumbnail.png",
     path: "./dew-garden/index.html",
+  },
+  {
+    id: "quake-stack",
+    title: "지진 탑 쌓기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Earthquake stacking",
+    clearCondition: "탑 높이 10단 달성",
+    thumbnail: "./quake-stack/thumbnail.png",
+    path: "./quake-stack/index.html",
   }
 ];
