@@ -745,5 +745,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "풍등 5개를 하늘에 올리면 클리어",
     thumbnail: "./lantern-rise/thumbnail.png",
     path: "./lantern-rise/index.html",
+  },
+  {
+    id: "iron-master",
+    title: "다림질 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Drag smoothing",
+    clearCondition: "옷 5벌을 다리면 클리어",
+    thumbnail: "./iron-master/thumbnail.png",
+    path: "./iron-master/index.html",
   }
 ];
