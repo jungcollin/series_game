@@ -763,5 +763,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "나뭇잎 5장을 연꽃에 안착",
     thumbnail: "./ripple-guide/thumbnail.png",
     path: "./ripple-guide/index.html",
+  },
+  {
+    id: "salt-bloom",
+    title: "소금꽃",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Evaporation puzzle",
+    clearCondition: "소금 결정 5개를 피우면 클리어",
+    thumbnail: "./salt-bloom/thumbnail.png",
+    path: "./salt-bloom/index.html",
   }
 ];
