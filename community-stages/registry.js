@@ -799,5 +799,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 지형 5개를 완성하면 클리어",
     thumbnail: "./canyon-carver/thumbnail.png",
     path: "./canyon-carver/index.html",
+  },
+  {
+    id: "lock-picker",
+    title: "자물쇠 장인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Dial precision",
+    clearCondition: "자물쇠 5개를 열면 클리어",
+    thumbnail: "./lock-picker/thumbnail.png",
+    path: "./lock-picker/index.html",
   }
 ];
