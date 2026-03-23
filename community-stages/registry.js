@@ -970,5 +970,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "누적 추적 20초 달성 시 클리어",
     thumbnail: "./eye-contact/thumbnail.png",
     path: "./eye-contact/index.html",
+  },
+  {
+    id: "bento-box",
+    title: "도시락 싸기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Drag sorting",
+    clearCondition: "도시락 5개 완성 시 클리어",
+    thumbnail: "./bento-box/thumbnail.png",
+    path: "./bento-box/index.html",
   }
 ];
