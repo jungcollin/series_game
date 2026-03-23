@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>서리꽃</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E8EEF4; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 200, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(40, 60, 80, 0.92);
+        color: #E8EEF4; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8EEF4; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(100, 160, 200, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">서리꽃. 창문 위에 터치 드래그로 서리 결정을 그려 목표 영역을 채우세요. 서리 패턴 5개를 완성하면 클리어. 40초 내에 완성하지 못하면 해가 떠서 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="서리꽃" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = 960, H = 540, CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60, MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "frost-bloom", title: "서리꽃",
+        description: "창문 위에 서리 결정을 그려 꽃을 피우세요",
+        creator: "jungcollin", genre: "Drawing puzzle",
+        clearCondition: "서리 패턴 5개 완성 시 클리어",
+        failCondition: "해뜨기 전 미완성 시 실패",
+        controls: "터치 드래그로 서리 결정을 그리세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      const COL = { window: "#D0DEE8", windowFrame: "#8B7355", frost: "#B8D8E8", frostBright: "#E0F0FA", frostCore: "#94C8E0", dawn: "#F0C8A0", dawnPink: "#E8A0A0", text: "#2C3E50", accent: "#5B9EC4", miss: "#C0392B", success: "#2E86AB", sparkle: "#FFFFFF" };
+
+      const DURATION = 40, TARGET = 5;
+      let mode = "menu", elapsed = 0, completed = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, shakeX = 0, shakeY = 0, clearAnim = 0;
+
+      // Drawing
+      let drawing = false, lastDrawX = 0, lastDrawY = 0;
+      let frostTrails = []; // [{x, y, size, alpha}]
+
+      // Target zones
+      let zones = [];
+      let particles = [];
+      let feedbackText = "", feedbackTimer = 0, feedbackColor = "";
+
+      // Snowflakes (ambient)
+      let snowflakes = [];
+      for (let i = 0; i < 20; i++) snowflakes.push({ x: Math.random() * W, y: Math.random() * H, size: 1 + Math.random() * 2, speed: 10 + Math.random() * 20, drift: Math.random() * Math.PI * 2 });
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) }); }
+      function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) }); }
+
+      function generateZones() {
+        zones = [];
+        const positions = [
+          { x: 200, y: 180 }, { x: 480, y: 150 }, { x: 750, y: 200 },
+          { x: 300, y: 380 }, { x: 620, y: 370 },
+        ];
+        for (let i = 0; i < TARGET; i++) {
+          const p = positions[i];
+          zones.push({ x: p.x, y: p.y, r: 50 + rand(-5, 10), filled: 0, done: false, sparkles: [] });
+        }
+      }
+
+      function spawnSparkles(x, y, count) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), spd = rand(20, 80);
+          particles.push({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - rand(10, 40), life: 1, size: rand(2, 4), color: COL.sparkle });
+        }
+      }
+
+      function startGame() {
+        mode = "running"; elapsed = 0; completed = 0;
+        shake = 0; clearAnim = 0; frostTrails = []; particles = [];
+        drawing = false;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateZones();
+      }
+
+      function addFrost(x, y) {
+        frostTrails.push({ x, y, size: rand(4, 10), alpha: rand(0.3, 0.7), age: 0 });
+        // Check zone filling
+        for (const z of zones) {
+          if (z.done) continue;
+          const d = dist(x, y, z.x, z.y);
+          if (d < z.r) {
+            z.filled += 0.012;
+            if (z.filled >= 1 && !z.done) {
+              z.done = true; completed++;
+              shake = 0.2;
+              spawnSparkles(z.x, z.y, 25);
+              feedbackText = "서리꽃 완성!"; feedbackTimer = 0.8; feedbackColor = COL.success;
+              if (completed >= TARGET) {
+                mode = "cleared"; clearAnim = 0;
+                window.relayStageResult.status = "cleared"; reportCleared();
+              }
+            }
+          }
+        }
+        // Branch crystals (decorative spread)
+        if (Math.random() < 0.3) {
+          const ba = rand(0, Math.PI * 2);
+          const bl = rand(8, 20);
+          frostTrails.push({ x: x + Math.cos(ba) * bl, y: y + Math.sin(ba) * bl, size: rand(2, 5), alpha: rand(0.15, 0.35), age: 0 });
+        }
+      }
+
+      function update(dt) {
+        if (mode === "running") {
+          elapsed += dt;
+          if (elapsed >= DURATION) { mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("시간 초과"); return; }
+          for (const z of zones) { if (!z.done) z.filled = Math.max(0, z.filled - dt * 0.02); }
+        }
+        if (mode === "cleared") clearAnim = Math.min(1, clearAnim + dt * 1.5);
+        if (shake > 0) { shake = Math.max(0, shake - dt * 4); shakeX = (Math.random() - 0.5) * shake * 12; shakeY = (Math.random() - 0.5) * shake * 12; } else { shakeX = 0; shakeY = 0; }
+        for (let i = particles.length - 1; i >= 0; i--) { const p = particles[i]; p.life -= dt * 2; if (p.life <= 0) { particles.splice(i, 1); continue; } p.x += p.vx * dt; p.y += p.vy * dt; }
+        if (feedbackTimer > 0) feedbackTimer -= dt;
+        for (const f of frostTrails) f.age += dt;
+        // Snowflakes
+        for (const s of snowflakes) { s.y += s.speed * dt; s.x += Math.sin(s.drift) * 8 * dt; s.drift += dt; if (s.y > H + 10) { s.y = -5; s.x = Math.random() * W; } }
+      }
+
+      function drawBg() {
+        // Dawn gradient (changes with time)
+        const dawnProgress = clamp(elapsed / DURATION, 0, 1);
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        const topR = Math.round(lerp(30, 120, dawnProgress));
+        const topG = Math.round(lerp(40, 80, dawnProgress));
+        const topB = Math.round(lerp(70, 100, dawnProgress));
+        grad.addColorStop(0, `rgb(${topR},${topG},${topB})`);
+        const botR = Math.round(lerp(60, 240, dawnProgress));
+        const botG = Math.round(lerp(70, 180, dawnProgress));
+        const botB = Math.round(lerp(100, 150, dawnProgress));
+        grad.addColorStop(1, `rgb(${botR},${botG},${botB})`);
+        ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+
+        // Stars (fade with dawn)
+        if (dawnProgress < 0.7) {
+          ctx.fillStyle = `rgba(255,255,255,${0.6 * (1 - dawnProgress / 0.7)})`;
+          const stars = [[100, 50], [250, 30], [400, 70], [600, 40], [800, 60], [150, 120], [700, 100]];
+          for (const [sx, sy] of stars) { ctx.beginPath(); ctx.arc(sx, sy, 1.5, 0, Math.PI * 2); ctx.fill(); }
+        }
+
+        // Dawn glow at horizon
+        if (dawnProgress > 0.3) {
+          const ga = (dawnProgress - 0.3) / 0.7;
+          ctx.fillStyle = `rgba(240,200,160,${ga * 0.4})`;
+          ctx.beginPath(); ctx.ellipse(CX, H + 50, 500, 200, 0, Math.PI, 0); ctx.fill();
+        }
+
+        // Window frame
+        ctx.fillStyle = COL.windowFrame;
+        ctx.fillRect(0, 0, W, 15); ctx.fillRect(0, H - 15, W, 15);
+        ctx.fillRect(0, 0, 15, H); ctx.fillRect(W - 15, 0, 15, H);
+        ctx.fillRect(CX - 6, 0, 12, H);
+        ctx.fillRect(0, CY - 6, W, 12);
+
+        // Window glass tint
+        ctx.fillStyle = "rgba(200,220,235,0.15)"; ctx.fillRect(15, 15, W - 30, H - 30);
+
+        // Snowflakes
+        ctx.fillStyle = "rgba(255,255,255,0.6)";
+        for (const s of snowflakes) { ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2); ctx.fill(); }
+      }
+
+      function drawZones() {
+        for (const z of zones) {
+          if (z.done) {
+            // Completed zone - frost flower
+            ctx.save(); ctx.globalAlpha = 0.8;
+            ctx.strokeStyle = COL.frostBright; ctx.lineWidth = 2;
+            for (let a = 0; a < 6; a++) {
+              const angle = a * Math.PI / 3;
+              ctx.beginPath(); ctx.moveTo(z.x, z.y);
+              const ex = z.x + Math.cos(angle) * z.r * 0.8;
+              const ey = z.y + Math.sin(angle) * z.r * 0.8;
+              ctx.lineTo(ex, ey); ctx.stroke();
+              // Sub-branches
+              for (let b = 0.3; b < 0.8; b += 0.25) {
+                const bx = z.x + Math.cos(angle) * z.r * b;
+                const by = z.y + Math.sin(angle) * z.r * b;
+                ctx.beginPath(); ctx.moveTo(bx, by);
+                ctx.lineTo(bx + Math.cos(angle + 0.5) * 12, by + Math.sin(angle + 0.5) * 12); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(bx, by);
+                ctx.lineTo(bx + Math.cos(angle - 0.5) * 12, by + Math.sin(angle - 0.5) * 12); ctx.stroke();
+              }
+            }
+            ctx.restore();
+          } else {
+            // Target zone outline
+            ctx.save();
+            ctx.strokeStyle = "rgba(180,216,232,0.5)"; ctx.lineWidth = 2; ctx.setLineDash([6, 6]);
+            ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+            // Fill indicator
+            if (z.filled > 0) {
+              ctx.globalAlpha = 0.3;
+              ctx.fillStyle = COL.frostCore;
+              ctx.beginPath(); ctx.arc(z.x, z.y, z.r * z.filled, 0, Math.PI * 2); ctx.fill();
+            }
+            // Center dot
+            ctx.globalAlpha = 0.6;
+            ctx.fillStyle = COL.frostBright;
+            ctx.beginPath(); ctx.arc(z.x, z.y, 4, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+          }
+        }
+      }
+
+      function drawFrost() {
+        for (const f of frostTrails) {
+          ctx.save();
+          ctx.globalAlpha = f.alpha * Math.min(1, 2 - f.age);
+          ctx.fillStyle = COL.frost;
+          ctx.beginPath(); ctx.arc(f.x, f.y, f.size, 0, Math.PI * 2); ctx.fill();
+          // Crystal edge
+          if (f.size > 5) {
+            ctx.strokeStyle = COL.frostBright; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.arc(f.x, f.y, f.size + 1, 0, Math.PI * 2); ctx.stroke();
+          }
+          ctx.restore();
+        }
+      }
+
+      function drawHUD() {
+        const tl = Math.max(0, DURATION - elapsed), tr = tl / DURATION;
+        ctx.fillStyle = "rgba(44,62,80,0.2)"; ctx.fillRect(30, 20, W - 60, 10);
+        const barColor = tr > 0.3 ? COL.accent : (tr > 0.15 ? "#E67E22" : COL.miss);
+        ctx.fillStyle = barColor; ctx.fillRect(30, 20, (W - 60) * tr, 10);
+        ctx.fillStyle = "#E0F0FA"; ctx.font = "bold 24px Trebuchet MS"; ctx.textAlign = "left";
+        ctx.fillText("\u2744\uFE0F " + completed + " / " + TARGET, 30, 54);
+        ctx.textAlign = "center"; ctx.font = "bold 20px Trebuchet MS";
+        ctx.fillStyle = tr > 0.3 ? "#E0F0FA" : COL.miss; ctx.fillText(Math.ceil(tl) + "초", CX, 50);
+
+        // Dawn warning
+        if (tr < 0.3) {
+          ctx.fillStyle = `rgba(240,200,160,${0.5 + Math.sin(elapsed * 6) * 0.3})`;
+          ctx.font = "bold 18px Trebuchet MS"; ctx.fillText("해가 떠오르고 있어요!", CX, H - 30);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.save(); ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function drawFeedback() {
+        if (feedbackTimer <= 0) return;
+        ctx.save(); ctx.globalAlpha = clamp(feedbackTimer / 0.3, 0, 1);
+        ctx.fillStyle = feedbackColor; ctx.font = "bold 32px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText(feedbackText, CX, 100 - (1 - feedbackTimer / 0.8) * 20);
+        ctx.restore(); ctx.textAlign = "left";
+      }
+
+      function drawCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(30,50,70,0.8)"; ctx.fillRect(0, 0, W, H);
+        const cw = Math.min(680, W - 40), cx2 = (W - cw) / 2, cy2 = 70, ch = 400;
+        ctx.fillStyle = "#F0F5FA"; ctx.beginPath(); ctx.roundRect(cx2, cy2, cw, ch, 16); ctx.fill();
+        ctx.fillStyle = accent; ctx.beginPath(); ctx.roundRect(cx2, cy2, cw, 8, [16, 16, 0, 0]); ctx.fill();
+        ctx.fillStyle = accent; ctx.font = "bold 38px Trebuchet MS"; ctx.textAlign = "center"; ctx.fillText(title, CX, cy2 + 60);
+        ctx.fillStyle = COL.text; ctx.font = "600 20px Trebuchet MS";
+        lines.forEach((l, i) => ctx.fillText(l, CX, cy2 + 110 + i * 36));
+        ctx.fillStyle = "rgba(44,62,80,0.5)"; ctx.font = "500 18px Trebuchet MS";
+        ctx.fillText("터치 또는 Enter로 시작", CX, cy2 + ch - 30); ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.save(); ctx.translate(shakeX, shakeY);
+        if (mode === "menu") {
+          drawBg();
+          drawCard("서리꽃", ["조작: 터치 드래그로 서리 결정 그리기", "\u2744\uFE0F 점선 원 안을 서리로 채우세요", "\u2705 서리 패턴 5개 완성 시 클리어", "\u274C 40초 내 미완성 시 해가 떠서 실패"], COL.accent);
+          ctx.restore(); return;
+        }
+        if (mode === "running") {
+          drawBg(); drawZones(); drawFrost(); drawParticles(); drawHUD(); drawFeedback();
+          ctx.restore(); return;
+        }
+        if (mode === "cleared") {
+          drawBg(); drawZones(); drawFrost(); drawParticles();
+          const a = clamp(clearAnim, 0, 1); ctx.save(); ctx.globalAlpha = a;
+          ctx.fillStyle = "rgba(46,134,171,0.2)"; ctx.fillRect(0, 0, W, H);
+          const cw2 = Math.min(500, W - 40);
+          ctx.fillStyle = "#F0F5FA"; ctx.beginPath(); ctx.roundRect((W - cw2) / 2, 140, cw2, 260, 16); ctx.fill();
+          ctx.fillStyle = COL.success; ctx.font = "bold 44px Trebuchet MS"; ctx.textAlign = "center"; ctx.fillText("클리어!", CX, 210);
+          ctx.fillStyle = COL.text; ctx.font = "600 24px Trebuchet MS";
+          ctx.fillText("서리꽃 " + completed + "개 완성", CX, 260); ctx.fillText(elapsed.toFixed(1) + "초 소요", CX, 300);
+          ctx.fillStyle = "rgba(44,62,80,0.5)"; ctx.font = "500 18px Trebuchet MS"; ctx.fillText("터치하여 다시 시작", CX, 370);
+          ctx.textAlign = "left"; ctx.restore(); ctx.restore(); return;
+        }
+        if (mode === "failed") {
+          drawBg(); drawZones(); drawFrost();
+          drawCard("실패", ["해가 떠올라 서리가 녹았습니다!", "서리꽃 " + completed + "개 / 목표 " + TARGET + "개", elapsed.toFixed(1) + "초 소요"], COL.miss);
+          ctx.restore(); return;
+        }
+        ctx.restore();
+      }
+
+      // --- Input ---
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (e.clientX - rect.left) * W / rect.width, y: (e.clientY - rect.top) * H / rect.height };
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { startGame(); return; }
+        const pos = getCanvasPos(e);
+        drawing = true; lastDrawX = pos.x; lastDrawY = pos.y;
+        addFrost(pos.x, pos.y);
+        canvas.setPointerCapture(e.pointerId);
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (!drawing || mode !== "running") return;
+        const pos = getCanvasPos(e);
+        const d = dist(lastDrawX, lastDrawY, pos.x, pos.y);
+        if (d > 4) {
+          const steps = Math.ceil(d / 4);
+          for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            addFrost(lerp(lastDrawX, pos.x, t), lerp(lastDrawY, pos.y, t));
+          }
+          lastDrawX = pos.x; lastDrawY = pos.y;
+        }
+      });
+      canvas.addEventListener("pointerup", () => { drawing = false; });
+      canvas.addEventListener("pointercancel", () => { drawing = false; });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && mode !== "running") { e.preventDefault(); startGame(); } });
+
+      function frame(ts) {
+        const dt = lastTimestamp ? Math.min((ts - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = ts; update(dt); render(); animFrame = requestAnimationFrame(frame);
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), completed, target: TARGET, timeLimit: DURATION, result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => { const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < steps; i++) update(FIXED_DT); render(); return renderGameToText(); };
+      window.relayStageDebug = {
+        forceClear() { startGame(); completed = TARGET; mode = "cleared"; clearAnim = 1; window.relayStageResult.status = "cleared"; reportCleared(); render(); },
+        forceFail() { startGame(); elapsed = DURATION; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); render(); },
+      };
+
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+      reportReady(); render(); canvas.focus(); animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
