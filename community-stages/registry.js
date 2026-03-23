@@ -961,5 +961,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "호수 반대편에 도달하면 클리어",
     thumbnail: "./frozen-lake/thumbnail.png",
     path: "./frozen-lake/index.html",
+  },
+  {
+    id: "eye-contact",
+    title: "눈 맞춤",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Focus tracking",
+    clearCondition: "누적 추적 20초 달성 시 클리어",
+    thumbnail: "./eye-contact/thumbnail.png",
+    path: "./eye-contact/index.html",
   }
 ];
