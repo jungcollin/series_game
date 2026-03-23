@@ -1015,5 +1015,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "편지 15통 정확히 배달",
     thumbnail: "./mail-dash/thumbnail.png",
     path: "./mail-dash/index.html",
+  },
+  {
+    id: "wind-darts",
+    title: "바람 다트",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Physics aiming",
+    clearCondition: "과녁 5회 명중 시 클리어",
+    thumbnail: "./wind-darts/thumbnail.png",
+    path: "./wind-darts/index.html",
   }
 ];
