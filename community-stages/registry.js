@@ -979,5 +979,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "도시락 5개 완성 시 클리어",
     thumbnail: "./bento-box/thumbnail.png",
     path: "./bento-box/index.html",
+  },
+  {
+    id: "noodle-pull",
+    title: "국수 뽑기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Stretch & fold",
+    clearCondition: "64가닥 완성 시 클리어",
+    thumbnail: "./noodle-pull/thumbnail.png",
+    path: "./noodle-pull/index.html",
   }
 ];
