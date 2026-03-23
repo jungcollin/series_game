@@ -682,5 +682,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "떡 8개를 완성하면 클리어",
     thumbnail: "./mochi-pound/thumbnail.png",
     path: "./mochi-pound/index.html",
+  },
+  {
+    id: "pruning-master",
+    title: "가지치기 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Growth timing",
+    clearCondition: "나무 5그루를 다듬으면 클리어",
+    thumbnail: "./pruning-master/thumbnail.png",
+    path: "./pruning-master/index.html",
   }
 ];

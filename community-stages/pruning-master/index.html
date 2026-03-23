@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>가지치기 달인</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #e8f4e8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 100, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(40, 80, 40, 0.92);
+        color: #e8f4e8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #e8f4e8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(80, 140, 80, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">가지치기 달인. 자라는 가지를 터치하여 목표 높이에서 잘라 나무를 다듬으세요. 모바일에서는 화면 터치로 가지를 자릅니다. 나무 5그루를 다듬으면 클리어.</p>
+    <canvas id="game" width="960" height="540" aria-label="가지치기 달인" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "pruning-master",
+        title: "가지치기 달인",
+        description: "자라는 가지를 타이밍 맞춰 잘라 목표 모양을 만드세요",
+        creator: "jungcollin",
+        genre: "Growth timing",
+        clearCondition: "나무 5그루를 다듬으면 클리어",
+        failCondition: "3번 잘못 자르면 실패",
+        controls: "자랄 가지를 터치하여 자르기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      // Colors: green / brown / sky blue
+      const COL = {
+        bg: "#e8f4e8", sky: "#c8e8f4", grass: "#6db86d",
+        trunk: "#6b4226", trunkDark: "#4a2e18",
+        branch: "#5a8a3a", branchLight: "#7cb85c",
+        leaf: "#4a9a4a", leafLight: "#8cd48c",
+        target: "#d4920a", targetLine: "rgba(212, 146, 10, 0.5)",
+        text: "#2a4a2a", accent: "#4a8a2a",
+        fail: "#c03030", success: "#2e8b57",
+      };
+
+      const TARGET_TREES = 5, MAX_MISSES = 3;
+      let mode = "menu", elapsed = 0, treesDone = 0, misses = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, clearAnim = 0, successFlash = 0;
+      let particles = [];
+
+      // Branch state
+      const NUM_BRANCHES = 5;
+      let branches = [];
+      let targetHeights = [];
+      let branchSpeed = 40;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), spd = rand(30, 100);
+          particles.push({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 40, life: 1, color, size: rand(3, 8) });
+        }
+      }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) }); }
+      function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) }); }
+
+      function generateTree(difficulty) {
+        branches = [];
+        targetHeights = [];
+        branchSpeed = 35 + difficulty * 8;
+        const baseY = H - 100;
+        const spacing = W / (NUM_BRANCHES + 1);
+
+        for (let i = 0; i < NUM_BRANCHES; i++) {
+          const x = spacing * (i + 1);
+          const maxH = 120 + rand(0, 60);
+          const targetH = 40 + rand(20, maxH - 40);
+          branches.push({
+            x, baseY, height: 0, maxHeight: maxH,
+            targetHeight: targetH, cut: false, cutHeight: 0,
+            growSpeed: branchSpeed + rand(-5, 5),
+            swayPhase: rand(0, Math.PI * 2),
+            thickness: 8 + rand(0, 4),
+          });
+          targetHeights.push(targetH);
+        }
+      }
+
+      function reset() {
+        elapsed = 0; treesDone = 0; misses = 0;
+        shake = 0; clearAnim = 0; successFlash = 0;
+        particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateTree(0);
+      }
+
+      function checkTreeComplete() {
+        if (branches.every(b => b.cut)) {
+          // Score: check how close cuts are to targets
+          let goodCuts = 0;
+          for (const b of branches) {
+            const diff = Math.abs(b.cutHeight - b.targetHeight);
+            if (diff < 15) goodCuts++;
+            else {
+              misses++;
+              shake = 8;
+              spawnParticles(b.x, b.baseY - b.cutHeight, reducedMotion ? 3 : 6, COL.fail);
+            }
+          }
+
+          if (misses >= MAX_MISSES) {
+            mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("실수 3회"); return;
+          }
+
+          if (goodCuts > 0) {
+            treesDone++;
+            successFlash = 1;
+          }
+
+          if (treesDone >= TARGET_TREES) {
+            mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared();
+          } else {
+            setTimeout(() => { if (mode === "running") generateTree(treesDone); }, 500);
+          }
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        for (const b of branches) {
+          if (!b.cut) {
+            b.height = Math.min(b.height + b.growSpeed * dt, b.maxHeight);
+          }
+          b.swayPhase += dt * 2;
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 150 * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        successFlash *= 0.92;
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+        skyGrad.addColorStop(0, COL.sky);
+        skyGrad.addColorStop(0.7, COL.bg);
+        skyGrad.addColorStop(1, COL.grass);
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Ground
+        ctx.fillStyle = "#7cb85c";
+        ctx.fillRect(0, H - 80, W, 80);
+        ctx.fillStyle = "#5a9a4a";
+        ctx.fillRect(0, H - 80, W, 4);
+
+        if (mode === "running" || mode === "clear" || mode === "failed") {
+          drawBranches();
+          drawTargetLines();
+          drawParticles();
+          if (mode === "running") drawHUD();
+        }
+
+        if (successFlash > 0.01) { ctx.fillStyle = `rgba(46, 139, 87, ${successFlash * 0.12})`; ctx.fillRect(0, 0, W, H); }
+
+        ctx.restore();
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawBranches() {
+        for (const b of branches) {
+          const displayH = b.cut ? b.cutHeight : b.height;
+          const sway = Math.sin(b.swayPhase) * 3;
+
+          // Trunk/branch
+          ctx.fillStyle = COL.trunk;
+          ctx.fillRect(b.x - b.thickness / 2, b.baseY - displayH, b.thickness, displayH);
+
+          // Branch tip (rounded)
+          ctx.beginPath();
+          ctx.arc(b.x, b.baseY - displayH, b.thickness / 2 + 1, 0, Math.PI * 2);
+          ctx.fillStyle = b.cut ? COL.trunkDark : COL.branch;
+          ctx.fill();
+
+          // Leaves along the branch
+          if (!b.cut || b.cutHeight > 10) {
+            const leafCount = Math.floor(displayH / 20);
+            for (let i = 0; i < leafCount; i++) {
+              const ly = b.baseY - 15 - i * 20;
+              const lx = b.x + (i % 2 === 0 ? 1 : -1) * (12 + sway);
+              const leafSize = 8 + Math.sin(elapsed * 2 + i) * 2;
+
+              ctx.beginPath();
+              ctx.ellipse(lx, ly, leafSize, leafSize * 0.6, (i % 2 === 0 ? 0.3 : -0.3), 0, Math.PI * 2);
+              ctx.fillStyle = i % 3 === 0 ? COL.leafLight : COL.leaf;
+              ctx.fill();
+            }
+          }
+
+          // Cut mark
+          if (b.cut) {
+            ctx.beginPath();
+            ctx.moveTo(b.x - b.thickness, b.baseY - b.cutHeight);
+            ctx.lineTo(b.x + b.thickness, b.baseY - b.cutHeight);
+            ctx.strokeStyle = "#fff";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawTargetLines() {
+        for (const b of branches) {
+          if (b.cut) continue;
+          const ty = b.baseY - b.targetHeight;
+
+          // Target line
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          ctx.moveTo(b.x - 25, ty);
+          ctx.lineTo(b.x + 25, ty);
+          ctx.strokeStyle = COL.targetLine;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Scissors icon
+          ctx.fillStyle = COL.target;
+          ctx.font = "14px 'Segoe UI', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("✂", b.x + 30, ty);
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath(); ctx.ellipse(p.x, p.y, p.size * p.life, p.size * p.life * 0.6, rand(0, 1), 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fill(); ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "600 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`나무 ${treesDone} / ${TARGET_TREES}`, 24, 16);
+        ctx.textAlign = "right";
+        const heartsLeft = MAX_MISSES - misses;
+        let h = "";
+        for (let i = 0; i < MAX_MISSES; i++) h += i < heartsLeft ? "●" : "○";
+        ctx.fillStyle = misses > 0 ? COL.fail : COL.text;
+        ctx.fillText(h, W - 24, 16);
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r); ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h); ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40), cardH = 42 + lines.length * 28 + 44;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(232, 244, 232, 0.95)"; ctx.beginPath(); roundRect(cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 14, cardY, cardW - 28, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 22px 'Segoe UI', sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 16);
+        ctx.font = "400 14px 'Segoe UI', sans-serif"; ctx.fillStyle = "rgba(42, 74, 42, 0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 48 + i * 28);
+        ctx.fillStyle = "rgba(42, 74, 42, 0.4)"; ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("TAP 또는 ENTER", CX, cardY + cardH - 24);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(232, 244, 232, 0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("가지치기 달인", ["자라는 가지를 목표선에서 잘라주세요", "", "조작: 가지를 터치하여 자르기", "클리어: 나무 5그루 완성", "실패: 3번 잘못 자르기"], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(232, 244, 232, ${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, `나무 ${treesDone}그루 다듬기 성공`], COL.success);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(60, 30, 20, 0.3)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["잘못된 자르기가 누적되었습니다", `나무 ${treesDone} / ${TARGET_TREES} 완성`], COL.fail);
+      }
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() { if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; } }
+
+      function handleTap(cx, cy) {
+        if (mode !== "running") return;
+        for (const b of branches) {
+          if (b.cut) continue;
+          const dx = Math.abs(cx - b.x);
+          if (dx < 30 && cy < b.baseY && cy > b.baseY - b.maxHeight - 30) {
+            b.cut = true;
+            b.cutHeight = b.height;
+            spawnParticles(b.x, b.baseY - b.height, reducedMotion ? 4 : 10, COL.leafLight);
+            checkTreeComplete();
+            return;
+          }
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY); handleTap(p.x, p.y);
+      });
+      canvas.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); } });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT); lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), treesDone, misses, result: window.relayStageResult.status, branches: branches.filter(b => b.cut).length });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT); draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; treesDone = TARGET_TREES; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; misses = MAX_MISSES; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      generateTree(0); reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
