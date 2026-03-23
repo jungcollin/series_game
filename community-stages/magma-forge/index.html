@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>용암 대장간</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Noto Sans KR", "Segoe UI", sans-serif;
+        background: #E8E0D4; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(232, 88, 32, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(74, 74, 74, 0.92);
+        color: #FFF; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8E0D4; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(232, 88, 32, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">용암 대장간. 화면 터치 드래그로 용암 방향을 조절하여 틀에 용암을 부어 무기를 주조하세요. 5개 완성 시 클리어, 넘침 3회 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="용암 대장간" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "magma-forge",
+        title: "용암 대장간",
+        description: "용암을 틀에 부어 무기를 주조하는 게임",
+        creator: "jungcollin",
+        genre: "Pour physics",
+        clearCondition: "무기 5개 주조 완료",
+        failCondition: "용암 넘침 3회 시 실패",
+        controls: "화면 터치 드래그로 용암 방향 조절",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#E8E0D4", bgDark: "#C8B8A4",
+        lava: "#E85820", lavaHot: "#FFB830", lavaDark: "#A03010",
+        mold: "#4A4A4A", moldEdge: "#6B6B6B", moldInner: "#3A3A3A",
+        gold: "#C4A035", text: "#3A2810", textLight: "rgba(58,40,16,0.5)",
+        stone: "#9A8A7A",
+      };
+
+      const DURATION = 40;
+      const TARGET = 5;
+      const MAX_SPILLS = 3;
+      const MOLD_Y = H - 160;
+      const MOLD_W = 200;
+      const MOLD_H = 100;
+      const LADLE_Y = 80;
+      const FILL_THRESHOLD = 0.80;
+
+      // Mold shapes: each is a set of rects relative to mold center
+      const MOLD_SHAPES = [
+        { name: "검", rects: [{x:-8,y:-45,w:16,h:90},{x:-30,y:30,w:60,h:14}] },
+        { name: "도끼", rects: [{x:-6,y:-40,w:12,h:80},{x:-35,y:-40,w:40,h:35}] },
+        { name: "방패", rects: [{x:-35,y:-40,w:70,h:80}] },
+        { name: "화살", rects: [{x:-4,y:-45,w:8,h:90},{x:-20,y:-45,w:40,h:12}] },
+        { name: "망치", rects: [{x:-6,y:-35,w:12,h:70},{x:-25,y:-35,w:50,h:25}] },
+      ];
+
+      let mode = "menu", elapsed = 0, forged = 0, spills = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      let ladleX = CX, pourX = CX, isDragging = false;
+      let pouring = false, pourStream = [];
+      let fillLevel = 0, currentMold = 0;
+      let shake = 0, flashAlpha = 0, forgeFlash = 0, clearAnim = 0;
+      let particles = [], sparks = [];
+      let spillAnim = 0, successAnim = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnSpark(x, y, n, color) {
+        if (reducedMotion) n = Math.min(n, 3);
+        for (let i = 0; i < n; i++) {
+          const a = rand(0, Math.PI * 2), s = rand(30, 100);
+          sparks.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: 1, color, size: rand(1.5, 4) });
+        }
+      }
+
+      function moldRect() {
+        return { x: CX - MOLD_W / 2, y: MOLD_Y, w: MOLD_W, h: MOLD_H };
+      }
+
+      function reset() {
+        elapsed = 0; forged = 0; spills = 0; fillLevel = 0; currentMold = 0;
+        ladleX = CX; pourX = CX; isDragging = false; pouring = false;
+        pourStream = []; shake = 0; flashAlpha = 0; forgeFlash = 0; clearAnim = 0;
+        spillAnim = 0; successAnim = 0;
+        particles = []; sparks = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+      }
+
+      function nextMold() {
+        forged++; fillLevel = 0; successAnim = 1;
+        currentMold = (currentMold + 1) % MOLD_SHAPES.length;
+        forgeFlash = 1;
+        spawnSpark(CX, MOLD_Y, 20, COL.gold);
+        if (forged >= TARGET) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared"; reportCleared();
+        }
+      }
+
+      function doSpill() {
+        spills++; spillAnim = 1; shake = 8; flashAlpha = 0.25;
+        fillLevel = 0;
+        spawnSpark(pourX, MOLD_Y + MOLD_H, 12, COL.lavaDark);
+        if (spills >= MAX_SPILLS) {
+          mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("용암 넘침");
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        // Ladle follows drag
+        ladleX = lerp(ladleX, pourX, clamp(10 * dt, 0, 1));
+
+        // Pour logic
+        if (isDragging) {
+          const mr = moldRect();
+          const inMold = pourX > mr.x && pourX < mr.x + mr.w;
+
+          if (inMold) {
+            fillLevel += dt * 0.6; // Fill speed
+            // Spawn lava drops
+            if (!reducedMotion && Math.random() < 0.3) {
+              spawnSpark(ladleX + rand(-5, 5), MOLD_Y - 5, 1, COL.lavaHot);
+            }
+          } else {
+            // Pouring outside mold
+            fillLevel -= dt * 0.1;
+            if (fillLevel < 0) fillLevel = 0;
+          }
+
+          // Pour stream visual
+          pourStream.push({ x: ladleX, y: LADLE_Y + 30, vy: 0, life: 1 });
+
+          // Check overflow
+          if (fillLevel > 1.15) doSpill();
+          // Check success
+          if (fillLevel >= FILL_THRESHOLD && fillLevel <= 1.05) {
+            // Player needs to stop pouring - auto-complete on release handled in pointerup
+          }
+        }
+
+        // Pour stream update
+        for (let i = pourStream.length - 1; i >= 0; i--) {
+          const p = pourStream[i];
+          p.vy += 600 * dt;
+          p.y += p.vy * dt;
+          p.life -= dt * 3;
+          if (p.life <= 0 || p.y > MOLD_Y + 20) pourStream.splice(i, 1);
+        }
+
+        // Sparks
+        for (let i = sparks.length - 1; i >= 0; i--) {
+          const s = sparks[i];
+          s.x += s.vx * dt; s.y += s.vy * dt;
+          s.vy += 120 * dt; s.life -= dt * 2;
+          if (s.life <= 0) sparks.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+        forgeFlash *= 0.93;
+        spillAnim *= 0.94;
+        successAnim *= 0.92;
+
+        if (elapsed >= DURATION && forged < TARGET) {
+          mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("시간 초과");
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        if (shake > 0.3) ctx.translate(rand(-shake, shake), rand(-shake, shake));
+
+        // Background - stone wall
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+        drawForgeBackground();
+
+        // Mold
+        drawMold();
+
+        // Pour stream
+        drawPourStream();
+
+        // Ladle
+        drawLadle();
+
+        // Sparks
+        drawSparks();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        if (flashAlpha > 0.01) {
+          ctx.fillStyle = `rgba(232,88,32,${flashAlpha})`; ctx.fillRect(0, 0, W, H);
+        }
+        if (forgeFlash > 0.05) {
+          ctx.fillStyle = `rgba(196,160,53,${forgeFlash * 0.15})`; ctx.fillRect(0, 0, W, H);
+        }
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawForgeBackground() {
+        // Stone floor
+        const floorY = H - 80;
+        ctx.fillStyle = "#8A7A6A"; ctx.fillRect(0, floorY, W, 80);
+        ctx.fillStyle = "rgba(0,0,0,0.05)"; ctx.fillRect(0, floorY, W, 2);
+
+        // Brick pattern on wall
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.04;
+          ctx.strokeStyle = "#6A5A4A";
+          for (let row = 0; row < 8; row++) {
+            const y = 20 + row * 50;
+            const off = row % 2 === 0 ? 0 : 60;
+            for (let col = -1; col < 9; col++) {
+              ctx.strokeRect(off + col * 120, y, 120, 50);
+            }
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        // Anvil hint
+        ctx.fillStyle = "#5A5A5A";
+        ctx.fillRect(CX - 50, floorY - 20, 100, 20);
+        ctx.fillStyle = "#4A4A4A";
+        ctx.fillRect(CX - 35, floorY - 30, 70, 12);
+
+        // Forge glow
+        const glow = ctx.createRadialGradient(CX, MOLD_Y + 40, 10, CX, MOLD_Y + 40, 150);
+        glow.addColorStop(0, "rgba(232,88,32,0.08)");
+        glow.addColorStop(1, "rgba(232,88,32,0)");
+        ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+      }
+
+      function drawMold() {
+        const mr = moldRect();
+        const shape = MOLD_SHAPES[currentMold];
+
+        // Mold container
+        ctx.fillStyle = COL.moldInner;
+        ctx.fillRect(mr.x, mr.y, mr.w, mr.h);
+        ctx.strokeStyle = COL.moldEdge; ctx.lineWidth = 3;
+        ctx.strokeRect(mr.x, mr.y, mr.w, mr.h);
+
+        // Shape outline inside mold
+        ctx.save();
+        ctx.translate(CX, mr.y + mr.h / 2);
+        ctx.strokeStyle = "rgba(150,150,150,0.3)"; ctx.lineWidth = 1;
+        for (const r of shape.rects) {
+          ctx.strokeRect(r.x, r.y, r.w, r.h);
+        }
+        ctx.restore();
+
+        // Fill level (lava in mold)
+        if (fillLevel > 0) {
+          const fillH = Math.min(fillLevel, 1.15) * mr.h;
+          const fillY = mr.y + mr.h - fillH;
+
+          // Lava fill
+          const lg = ctx.createLinearGradient(0, fillY, 0, mr.y + mr.h);
+          lg.addColorStop(0, COL.lavaHot);
+          lg.addColorStop(0.4, COL.lava);
+          lg.addColorStop(1, COL.lavaDark);
+          ctx.fillStyle = lg;
+          ctx.fillRect(mr.x + 3, fillY, mr.w - 6, fillH - 2);
+
+          // Lava surface glow
+          ctx.fillStyle = `rgba(255,184,48,${0.3 + Math.sin(elapsed * 4) * 0.1})`;
+          ctx.fillRect(mr.x + 3, fillY, mr.w - 6, 3);
+        }
+
+        // Fill threshold line
+        const threshY = mr.y + mr.h * (1 - FILL_THRESHOLD);
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = `rgba(196,160,53,0.5)`; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(mr.x + 5, threshY); ctx.lineTo(mr.x + mr.w - 5, threshY); ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Weapon name
+        ctx.fillStyle = COL.textLight;
+        ctx.font = '400 13px "Noto Sans KR",sans-serif';
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(shape.name, CX, mr.y + mr.h + 8);
+
+        // Spill warning
+        if (fillLevel > 0.9) {
+          const warn = (fillLevel - 0.9) / 0.25;
+          ctx.strokeStyle = `rgba(232,88,32,${warn * 0.6})`; ctx.lineWidth = 2;
+          ctx.strokeRect(mr.x - 2, mr.y - 2, mr.w + 4, mr.h + 4);
+        }
+      }
+
+      function drawPourStream() {
+        if (!isDragging || mode !== "running") return;
+        // Main stream line
+        ctx.strokeStyle = COL.lava; ctx.lineWidth = 6; ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(ladleX, LADLE_Y + 35);
+
+        // Curve toward mold
+        const targetY = MOLD_Y;
+        ctx.quadraticCurveTo(ladleX + rand(-3, 3), (LADLE_Y + targetY) / 2, ladleX + rand(-8, 8), targetY);
+        ctx.stroke();
+
+        // Hot core
+        ctx.strokeStyle = COL.lavaHot; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(ladleX, LADLE_Y + 35);
+        ctx.lineTo(ladleX, targetY); ctx.stroke();
+
+        // Drips
+        for (const p of pourStream) {
+          ctx.beginPath(); ctx.arc(p.x + rand(-3, 3), p.y, 3 * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(232,88,32,${p.life})`; ctx.fill();
+        }
+      }
+
+      function drawLadle() {
+        // Ladle body
+        ctx.fillStyle = "#5A4A3A";
+        ctx.beginPath();
+        ctx.arc(ladleX, LADLE_Y, 28, 0, Math.PI);
+        ctx.fill();
+
+        // Lava in ladle
+        ctx.fillStyle = COL.lava;
+        ctx.beginPath();
+        ctx.arc(ladleX, LADLE_Y + 2, 22, 0, Math.PI);
+        ctx.fill();
+
+        // Hot surface
+        ctx.fillStyle = COL.lavaHot;
+        ctx.beginPath();
+        ctx.arc(ladleX, LADLE_Y + 4, 18, 0.1, Math.PI - 0.1);
+        ctx.fill();
+
+        // Handle
+        ctx.fillStyle = "#4A3A2A";
+        ctx.fillRect(ladleX + 25, LADLE_Y - 8, 50, 8);
+      }
+
+      function drawSparks() {
+        for (const s of sparks) {
+          ctx.globalAlpha = s.life;
+          ctx.beginPath(); ctx.arc(s.x, s.y, s.size * s.life, 0, Math.PI * 2);
+          ctx.fillStyle = s.color; ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = 'bold 17px "Noto Sans KR",sans-serif';
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`${forged} / ${TARGET} 주조`, 24, 18);
+        ctx.textAlign = "right";
+        ctx.fillText(`${Math.ceil(Math.max(0, DURATION - elapsed))}초`, W - 24, 18);
+
+        const bw = W - 48; ctx.fillStyle = COL.bgDark; ctx.fillRect(24, 44, bw, 3);
+        const r = Math.max(0, 1 - elapsed / DURATION);
+        ctx.fillStyle = r > 0.25 ? COL.lava : "#C02020"; ctx.fillRect(24, 44, bw * r, 3);
+
+        // Spill lives
+        for (let i = 0; i < MAX_SPILLS; i++) {
+          const dx = CX - (MAX_SPILLS - 1) * 12 + i * 24;
+          ctx.beginPath(); ctx.arc(dx, H - 26, 6, 0, Math.PI * 2);
+          ctx.fillStyle = i < (MAX_SPILLS - spills) ? COL.lava : COL.bgDark;
+          ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = COL.lavaDark; ctx.stroke();
+        }
+
+        // Fill meter (right side)
+        const meterX = W - 40, meterY = 70, meterH = 120;
+        ctx.fillStyle = COL.moldInner; ctx.fillRect(meterX, meterY, 16, meterH);
+        const fh = Math.min(fillLevel, 1.15) * meterH;
+        if (fh > 0) {
+          ctx.fillStyle = fillLevel > 1 ? "#FF3030" : COL.lava;
+          ctx.fillRect(meterX, meterY + meterH - fh, 16, fh);
+        }
+        // Threshold mark
+        const thY = meterY + meterH * (1 - FILL_THRESHOLD);
+        ctx.fillStyle = COL.gold; ctx.fillRect(meterX - 3, thY - 1, 22, 2);
+      }
+
+      function rr(c, x, y, w, h, r) { c.moveTo(x + r, y); c.lineTo(x + w - r, y); c.arcTo(x + w, y, x + w, y + r, r); c.lineTo(x + w, y + h - r); c.arcTo(x + w, y + h, x + w - r, y + h, r); c.lineTo(x + r, y + h); c.arcTo(x, y + h, x, y + h - r, r); c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r); }
+      function drawCard(title, lines, accent) {
+        const cw = Math.min(340, W - 40), ch = 44 + lines.length * 28 + 42, cx = CX - cw / 2, cy = CY - ch / 2;
+        ctx.fillStyle = "rgba(232,224,212,0.96)"; ctx.beginPath(); rr(ctx, cx, cy, cw, ch, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cx + 16, cy, cw - 32, 3);
+        ctx.fillStyle = COL.text; ctx.font = 'bold 24px "Noto Sans KR",sans-serif'; ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cy + 18);
+        ctx.font = '400 14px "Noto Sans KR",sans-serif'; ctx.fillStyle = "rgba(58,40,16,0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cy + 52 + i * 28);
+        ctx.fillStyle = COL.textLight; ctx.font = '400 12px "Noto Sans KR",sans-serif'; ctx.fillText("화면 터치 또는 ENTER", CX, cy + ch - 22);
+      }
+
+      function drawMenu() { ctx.fillStyle = "rgba(232,224,212,0.5)"; ctx.fillRect(0, 0, W, H); drawCard("용암 대장간", ["용암을 틀에 부어 무기를 주조하세요", "", "조작: 화면 터치 드래그로 용암 방향 조절", "클리어: 무기 5개 주조 완료", "실패: 용암 넘침 3회 또는 시간 초과"], COL.lava); }
+      function drawClear() { clearAnim = clamp(clearAnim + 0.02, 0, 1); ctx.fillStyle = `rgba(232,224,212,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H); if (clearAnim > 0.3) drawCard("주조 완료!", [`${Math.ceil(elapsed)}초 만에 ${forged}개 완성`, "훌륭한 대장장이입니다!"], COL.gold); }
+      function drawFailed() { ctx.fillStyle = "rgba(58,40,16,0.25)"; ctx.fillRect(0, 0, W, H); drawCard("실패", [elapsed >= DURATION ? "시간이 다했습니다" : "용암이 넘쳤습니다", `주조: ${forged} / ${TARGET}`], "#C02020"); }
+
+      function gcp(cx, cy) { const r = canvas.getBoundingClientRect(); return { x: (cx - r.left) * (W / r.width), y: (cy - r.top) * (H / r.height) }; }
+      function handleStart() { if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; } }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        isDragging = true; pourX = gcp(e.clientX, e.clientY).x;
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running" || !isDragging) return;
+        pourX = clamp(gcp(e.clientX, e.clientY).x, 60, W - 60);
+      });
+      canvas.addEventListener("pointerup", () => {
+        if (mode !== "running") return;
+        // Check if fill is in the success range
+        if (fillLevel >= FILL_THRESHOLD && fillLevel <= 1.1) nextMold();
+        isDragging = false;
+      });
+      canvas.addEventListener("pointercancel", () => { isDragging = false; });
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); }
+      });
+
+      function gameLoop(ts) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = ts; return; }
+        let dt = Math.min((ts - lastTimestamp) / 1000, MAX_DT); lastTimestamp = ts;
+        let steps = 0; while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt); draw();
+      }
+
+      function renderGameToText() { return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), forged, spills, fillLevel: +fillLevel.toFixed(2), result: window.relayStageResult.status }); }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => { const s = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < s; i++) update(FIXED_DT); draw(); return renderGameToText(); };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; forged = TARGET; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; spills = MAX_SPILLS; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

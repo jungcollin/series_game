@@ -981,6 +981,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./bento-box/index.html",
   },
   {
+    id: "magma-forge",
+    title: "용암 대장간",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pour physics",
+    clearCondition: "무기 5개 주조 완료",
+    thumbnail: "./magma-forge/thumbnail.png",
+    path: "./magma-forge/index.html",
+  },
+  {
     id: "noodle-pull",
     title: "국수 뽑기",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
