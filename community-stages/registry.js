@@ -1071,6 +1071,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./balloon-twist/index.html",
   },
   {
+    id: "gem-cut",
+    title: "보석 세공",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Angle cutting",
+    clearCondition: "보석 5개를 세공하면 클리어",
+    thumbnail: "./gem-cut/thumbnail.png",
+    path: "./gem-cut/index.html",
+  },
+  {
     id: "domino-chain",
     title: "도미노 연쇄",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
