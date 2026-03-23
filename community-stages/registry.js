@@ -754,5 +754,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "옷 5벌을 다리면 클리어",
     thumbnail: "./iron-master/thumbnail.png",
     path: "./iron-master/index.html",
+  },
+  {
+    id: "canyon-carver",
+    title: "협곡 조각가",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Erosion puzzle",
+    clearCondition: "목표 지형 5개를 완성하면 클리어",
+    thumbnail: "./canyon-carver/thumbnail.png",
+    path: "./canyon-carver/index.html",
   }
 ];
