@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>만화경</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #faf5ef; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(180, 140, 200, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 50, 100, 0.92);
+        color: #f8f0ff; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #faf5ef; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(140, 80, 180, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">만화경. 화면 터치로 거울 조각을 회전시켜 아름다운 만화경 패턴을 완성하세요.</p>
+    <canvas id="game" width="960" height="540" aria-label="만화경" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "kaleidoscope",
+        title: "만화경",
+        description: "탭으로 거울 조각을 회전시켜 아름다운 만화경 패턴을 완성하세요",
+        creator: "jungcollin",
+        genre: "Rotational pattern puzzle",
+        clearCondition: "패턴 5개를 완성하면 클리어",
+        failCondition: "시간 초과 시 실패",
+        controls: "화면 터치로 거울 조각을 회전시키세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const PALETTES = [
+        { main: "#c06080", light: "#e8b0c0", bg: "#f8e8ee" },
+        { main: "#5090c0", light: "#a0cce8", bg: "#e8f0f8" },
+        { main: "#60a870", light: "#a8d8b8", bg: "#e8f8ee" },
+        { main: "#c0a040", light: "#e8d898", bg: "#f8f0e0" },
+        { main: "#9068b0", light: "#c8a8d8", bg: "#f0e8f8" },
+      ];
+
+      const COL = {
+        bg: "#faf5ef",
+        hud: "#5a3a6a",
+        card: "rgba(250, 245, 240, 0.96)",
+        accent: "#9060b0",
+        danger: "#c03030",
+      };
+
+      // --- State ---
+      const DURATION = 40;
+      const TARGET_PATTERNS = 5;
+      const PIECES_PER_RING = 6;
+      const RINGS = 2;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let clearAnim = 0;
+      let completedPatterns = 0;
+      let matchFlash = 0;
+      let particles = [];
+      let pieces = [];
+      let targetPiece = [];
+      let palette = PALETTES[0];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function generatePuzzle() {
+        palette = PALETTES[completedPatterns % PALETTES.length];
+        pieces = [];
+        targetPiece = [];
+        for (let ring = 0; ring < RINGS; ring++) {
+          for (let seg = 0; seg < PIECES_PER_RING; seg++) {
+            const targetRot = Math.floor(Math.random() * 4);
+            let currentRot = targetRot;
+            while (currentRot === targetRot) currentRot = Math.floor(Math.random() * 4);
+            pieces.push({ ring, segment: seg, currentRot, targetRot, animRot: currentRot });
+            targetPiece.push(targetRot);
+          }
+        }
+      }
+
+      function checkMatch() {
+        return pieces.every(p => p.currentRot === p.targetRot);
+      }
+
+      function reset() {
+        elapsed = 0; shake = 0; clearAnim = 0;
+        completedPatterns = 0; matchFlash = 0;
+        particles = [];
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generatePuzzle();
+      }
+
+      function spawnMatchParticles() {
+        if (reducedMotion) return;
+        for (let i = 0; i < 20; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(60, 160);
+          particles.push({
+            x: CX - 80, y: CY,
+            vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+            life: 1, size: rand(3, 7), color: Math.random() > 0.5 ? palette.main : palette.light,
+          });
+        }
+      }
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        for (const p of pieces) {
+          p.animRot = lerp(p.animRot, p.currentRot, clamp(dt * 12, 0, 1));
+        }
+
+        matchFlash *= 0.93;
+        shake *= 0.88;
+        if (shake < 0.3) shake = 0;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 0.96; p.vy *= 0.96;
+          p.life -= dt * 1.8;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        if (elapsed >= DURATION) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("시간 초과");
+        }
+      }
+
+      // --- Draw ---
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        ctx.fillStyle = COL.bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Subtle radial lines
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.03;
+          ctx.strokeStyle = palette.main;
+          ctx.lineWidth = 1;
+          for (let i = 0; i < 12; i++) {
+            const angle = (i / 12) * Math.PI * 2 + elapsed * 0.02;
+            ctx.beginPath();
+            ctx.moveTo(CX - 80, CY);
+            ctx.lineTo(CX - 80 + Math.cos(angle) * 400, CY + Math.sin(angle) * 400);
+            ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        if (mode === "running") {
+          drawKaleidoscope(CX - 80, CY, 160, pieces, false);
+          drawKaleidoscope(CX + 180, CY, 80, null, true);
+          drawLabels();
+          drawHUD();
+        }
+
+        // Particles
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = p.life;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+
+        if (matchFlash > 0.01) {
+          ctx.fillStyle = `rgba(144, 96, 176, ${matchFlash * 0.12})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawKaleidoscope(ox, oy, baseR, pieceList, isTarget) {
+        // Background circle
+        ctx.beginPath();
+        ctx.arc(ox, oy, baseR + 8, 0, Math.PI * 2);
+        ctx.fillStyle = palette.bg;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(90, 58, 106, 0.15)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        for (let ring = 0; ring < RINGS; ring++) {
+          for (let seg = 0; seg < PIECES_PER_RING; seg++) {
+            const idx = ring * PIECES_PER_RING + seg;
+            const innerR = ring === 0 ? (baseR * 0.12) : (baseR * 0.5);
+            const outerR = ring === 0 ? (baseR * 0.5) : baseR;
+            const segAngle = (Math.PI * 2) / PIECES_PER_RING;
+            const startAngle = seg * segAngle;
+            const endAngle = startAngle + segAngle;
+
+            let rot;
+            let isMatched = false;
+            if (isTarget) {
+              rot = targetPiece[idx];
+              isMatched = true;
+            } else {
+              const pc = pieceList[idx];
+              rot = pc.animRot;
+              isMatched = pc.currentRot === pc.targetRot;
+            }
+
+            ctx.save();
+            ctx.translate(ox, oy);
+
+            // Segment shape
+            ctx.beginPath();
+            ctx.arc(0, 0, outerR, startAngle, endAngle);
+            ctx.arc(0, 0, innerR, endAngle, startAngle, true);
+            ctx.closePath();
+
+            // Color gradient based on rotation
+            const midAngle = (startAngle + endAngle) / 2;
+            const rotPhase = rot * (Math.PI / 2);
+            const gx = Math.cos(midAngle + rotPhase) * outerR * 0.4;
+            const gy = Math.sin(midAngle + rotPhase) * outerR * 0.4;
+            const grad = ctx.createRadialGradient(gx * 0.2, gy * 0.2, innerR * 0.3, gx, gy, outerR * 0.8);
+            grad.addColorStop(0, palette.light);
+            grad.addColorStop(1, palette.main);
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            ctx.strokeStyle = isMatched && !isTarget ? "rgba(64, 160, 96, 0.6)" : "rgba(90, 58, 106, 0.2)";
+            ctx.lineWidth = isMatched && !isTarget ? 2 : 0.8;
+            ctx.stroke();
+
+            // Inner diamond decoration
+            const cx = Math.cos(midAngle) * (innerR + outerR) / 2;
+            const cy = Math.sin(midAngle) * (innerR + outerR) / 2;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(rot * Math.PI / 2);
+            const s = (outerR - innerR) * 0.15;
+            ctx.fillStyle = "rgba(255,255,255,0.45)";
+            ctx.beginPath();
+            ctx.moveTo(0, -s); ctx.lineTo(s * 0.7, 0);
+            ctx.lineTo(0, s); ctx.lineTo(-s * 0.7, 0);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+
+            ctx.restore();
+          }
+        }
+
+        // Center jewel
+        const jewR = baseR * 0.1;
+        ctx.beginPath();
+        ctx.arc(ox, oy, jewR, 0, Math.PI * 2);
+        const cGrad = ctx.createRadialGradient(ox - 2, oy - 2, 1, ox, oy, jewR);
+        cGrad.addColorStop(0, "#fff");
+        cGrad.addColorStop(0.5, palette.light);
+        cGrad.addColorStop(1, palette.main);
+        ctx.fillStyle = cGrad;
+        ctx.fill();
+      }
+
+      function drawLabels() {
+        ctx.fillStyle = COL.hud;
+        ctx.font = "600 14px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("목표 패턴", CX + 180, CY - 100);
+      }
+
+      function drawHUD() {
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.fillStyle = COL.hud;
+        ctx.font = "600 16px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`완료: ${completedPatterns}/${TARGET_PATTERNS}`, 20, 16);
+        ctx.textAlign = "right";
+        ctx.fillStyle = timeLeft < 10 ? COL.danger : COL.hud;
+        ctx.fillText(`${Math.ceil(timeLeft)}초`, W - 20, 16);
+        const barW = W - 40;
+        const progress = 1 - elapsed / DURATION;
+        ctx.fillStyle = "rgba(0,0,0,0.08)";
+        ctx.fillRect(20, 38, barW, 3);
+        ctx.fillStyle = timeLeft < 10 ? COL.danger : COL.accent;
+        ctx.fillRect(20, 38, barW * progress, 3);
+      }
+
+      // --- Cards ---
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath();
+        c.moveTo(x + r, y); c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r);
+        c.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = 320, cardH = 38 + lines.length * 26 + 40;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = COL.card;
+        ctx.beginPath(); roundRect(ctx, cardX, cardY, cardW, cardH, 8); ctx.fill();
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 12, cardY, cardW - 24, 3);
+        ctx.fillStyle = COL.hud;
+        ctx.font = "bold 22px Trebuchet MS";
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+        ctx.font = "400 14px Trebuchet MS";
+        ctx.fillStyle = "rgba(90, 58, 106, 0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 50 + i * 26);
+        ctx.fillStyle = "rgba(90, 58, 106, 0.4)";
+        ctx.font = "400 13px Trebuchet MS";
+        ctx.fillText("탭 또는 ENTER", CX, cardY + cardH - 20);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(250, 245, 240, 0.5)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("만화경", [
+          "화면 터치로 거울 조각을 회전시켜",
+          "목표 패턴을 완성하세요",
+          "",
+          "조작: 화면 터치로 조각 회전",
+          "클리어: 패턴 5개 완성",
+          "실패: 시간 초과",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(250, 245, 240, ${clearAnim * 0.5})`;
+        ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, "아름다운 만화경이 완성되었습니다!"], COL.accent);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(100, 60, 70, 0.3)";
+        ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["시간이 다했습니다", `완료: ${completedPatterns}/${TARGET_PATTERNS}`], COL.danger);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      function handleTap(cx, cy) {
+        if (mode !== "running") return;
+        const ox = CX - 80;
+        const dx = cx - ox, dy = cy - CY;
+        const dist = Math.hypot(dx, dy);
+        const baseR = 160;
+        if (dist > baseR || dist < baseR * 0.12) return;
+        const ring = dist < baseR * 0.5 ? 0 : 1;
+        let angle = Math.atan2(dy, dx);
+        if (angle < 0) angle += Math.PI * 2;
+        const segment = Math.floor(angle / (Math.PI * 2 / PIECES_PER_RING));
+        const piece = pieces.find(p => p.ring === ring && p.segment === segment);
+        if (!piece) return;
+        piece.currentRot = (piece.currentRot + 1) % 4;
+        if (checkMatch()) {
+          completedPatterns++;
+          matchFlash = 1;
+          spawnMatchParticles();
+          if (completedPatterns >= TARGET_PATTERNS) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared";
+            reportCleared();
+          } else {
+            setTimeout(() => { if (mode === "running") generatePuzzle(); }, 400);
+          }
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        handleTap(p.x, p.y);
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      // --- Debug ---
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), completedPatterns, result: window.relayStageResult.status });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          completedPatterns = TARGET_PATTERNS;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          elapsed = DURATION; mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      generatePuzzle();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

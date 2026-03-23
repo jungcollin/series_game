@@ -898,5 +898,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "바람개비 5개를 목표 속도로 회전",
     thumbnail: "./pinwheel-village/thumbnail.png",
     path: "./pinwheel-village/index.html",
+  },
+  {
+    id: "kaleidoscope",
+    title: "만화경",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rotational pattern puzzle",
+    clearCondition: "패턴 5개를 완성하면 클리어",
+    thumbnail: "./kaleidoscope/thumbnail.png",
+    path: "./kaleidoscope/index.html",
   }
 ];
