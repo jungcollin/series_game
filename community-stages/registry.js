@@ -1015,5 +1015,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "편지 15통 정확히 배달",
     thumbnail: "./mail-dash/thumbnail.png",
     path: "./mail-dash/index.html",
+  },
+  {
+    id: "sound-garden",
+    title: "소리 정원",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Meditative placement",
+    clearCondition: "조화로운 소리 풍경 완성",
+    thumbnail: "./sound-garden/thumbnail.png",
+    path: "./sound-garden/index.html",
   }
 ];
