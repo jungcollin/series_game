@@ -907,5 +907,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "패턴 5개를 완성하면 클리어",
     thumbnail: "./kaleidoscope/thumbnail.png",
     path: "./kaleidoscope/index.html",
+  },
+  {
+    id: "tea-steep",
+    title: "차 우리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Hold-timing simulation",
+    clearCondition: "차 5잔을 완벽하게 우리면 클리어",
+    thumbnail: "./tea-steep/thumbnail.png",
+    path: "./tea-steep/index.html",
   }
 ];
