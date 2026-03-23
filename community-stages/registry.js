@@ -934,5 +934,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "먹이 10마리를 포획하면 클리어",
     thumbnail: "./web-builder/thumbnail.png",
     path: "./web-builder/index.html",
+  },
+  {
+    id: "bento-box",
+    title: "도시락 싸기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Drag sorting",
+    clearCondition: "도시락 5개 완성 시 클리어",
+    thumbnail: "./bento-box/thumbnail.png",
+    path: "./bento-box/index.html",
   }
 ];

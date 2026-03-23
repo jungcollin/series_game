@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>도시락 싸기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #faf4e8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(140, 110, 60, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 60, 30, 0.92);
+        color: #faf4e8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #faf4e8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(140, 110, 60, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">도시락 싸기. 화면을 터치하고 드래그하여 재료를 올바른 칸에 배치하세요. 모바일에서는 터치 드래그로 재료를 옮깁니다. 도시락 5개 완성 시 클리어. 재료 3개 잘못 넣으면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="도시락 싸기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "bento-box",
+        title: "도시락 싸기",
+        description: "재료를 올바른 칸에 드래그하여 도시락을 완성하세요",
+        creator: "jungcollin",
+        genre: "Drag sorting",
+        clearCondition: "도시락 5개 완성 시 클리어",
+        failCondition: "재료 3개 잘못 넣으면 실패",
+        controls: "터치 드래그로 재료 배치",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#faf4e8", bgWarm: "#f0e8d4",
+        box: "#c4956a", boxDark: "#a47a50", boxInner: "#f8f0e0",
+        rice: "#f8f4e8", riceDot: "#e8e0d0",
+        green: "#78b060", greenDark: "#58903a",
+        coral: "#e8887a", coralDark: "#c86a5a",
+        gold: "#e8c040", goldDark: "#c8a020",
+        purple: "#a878b8", purpleDark: "#885898",
+        text: "#5a4030", textLight: "rgba(90,64,48,0.6)",
+        fail: "#c05040", success: "#60a848",
+      };
+
+      const INGREDIENTS = [
+        { name: "밥", color: COL.rice, darkColor: COL.riceDot, shape: "rice", slot: 0 },
+        { name: "채소", color: COL.green, darkColor: COL.greenDark, shape: "leaf", slot: 1 },
+        { name: "고기", color: COL.coral, darkColor: COL.coralDark, shape: "meat", slot: 2 },
+        { name: "달걀", color: COL.gold, darkColor: COL.goldDark, shape: "egg", slot: 3 },
+      ];
+
+      const TOTAL_BOXES = 5;
+      const MAX_MISSES = 3;
+
+      // Bento box layout
+      const BOX_X = 320, BOX_Y = 120;
+      const BOX_W = 320, BOX_H = 280;
+      const SLOT_COLS = 2, SLOT_ROWS = 2;
+      const SLOT_W = BOX_W / SLOT_COLS - 12;
+      const SLOT_H = BOX_H / SLOT_ROWS - 12;
+
+      // Ingredient spawn area (left side)
+      const SPAWN_X = 40, SPAWN_Y = 120;
+      const SPAWN_GAP = 100;
+
+      let mode = "menu";
+      let elapsed = 0, boxesDone = 0, misses = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let shake = 0, clearAnim = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      let currentIngredients = [];
+      let slotsFilled = [false, false, false, false];
+      let dragItem = null;
+      let dragOffX = 0, dragOffY = 0;
+      let resultFlash = 0, resultGood = false;
+      let particles = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), speed = rand(30, 100);
+          particles.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed - 20, life: 1, color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+
+      function getSlotRect(slotIdx) {
+        const col = slotIdx % SLOT_COLS, row = Math.floor(slotIdx / SLOT_COLS);
+        return {
+          x: BOX_X + 8 + col * (SLOT_W + 12),
+          y: BOX_Y + 8 + row * (SLOT_H + 12),
+          w: SLOT_W, h: SLOT_H,
+        };
+      }
+
+      function newBox() {
+        slotsFilled = [false, false, false, false];
+        // Shuffle ingredient order for spawn
+        const shuffled = [...INGREDIENTS].sort(() => Math.random() - 0.5);
+        currentIngredients = shuffled.map((ing, i) => ({
+          ...ing,
+          x: SPAWN_X + 20, y: SPAWN_Y + i * SPAWN_GAP,
+          w: 70, h: 70,
+          placed: false,
+        }));
+        resultFlash = 0;
+      }
+
+      function reset() {
+        elapsed = 0; boxesDone = 0; misses = 0;
+        shake = 0; clearAnim = 0;
+        dragItem = null; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        newBox();
+      }
+
+      function checkBoxComplete() {
+        if (slotsFilled.every(f => f)) {
+          boxesDone++;
+          resultGood = true; resultFlash = 1;
+          const cx = BOX_X + BOX_W / 2, cy = BOX_Y + BOX_H / 2;
+          spawnParticles(cx, cy, reducedMotion ? 5 : 12, COL.gold, [3, 7]);
+          spawnParticles(cx, cy, reducedMotion ? 3 : 8, COL.success, [2, 5]);
+          if (boxesDone >= TOTAL_BOXES) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared"; reportCleared();
+          } else {
+            setTimeout(() => { if (mode === "running") newBox(); }, 700);
+          }
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        resultFlash *= 0.92;
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Background
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+
+        // Tablecloth pattern
+        ctx.fillStyle = "rgba(230,220,200,0.3)";
+        for (let i = 0; i < W; i += 40) {
+          ctx.fillRect(i, 0, 1, H);
+        }
+        for (let i = 0; i < H; i += 40) {
+          ctx.fillRect(0, i, W, 1);
+        }
+
+        // Bento box
+        drawBentoBox();
+
+        // Slot labels
+        for (let i = 0; i < 4; i++) {
+          const sr = getSlotRect(i);
+          if (!slotsFilled[i]) {
+            ctx.fillStyle = "rgba(90,64,48,0.2)"; ctx.font = "12px Trebuchet MS";
+            ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            ctx.fillText(INGREDIENTS[i].name, sr.x + sr.w / 2, sr.y + sr.h / 2);
+          }
+        }
+
+        // Ingredients (not placed, not being dragged)
+        for (const ing of currentIngredients) {
+          if (ing.placed || ing === dragItem) continue;
+          drawIngredient(ing.x, ing.y, ing.w, ing.h, ing);
+        }
+
+        // Dragged item (on top)
+        if (dragItem) {
+          ctx.globalAlpha = 0.85;
+          drawIngredient(dragItem.x, dragItem.y, dragItem.w, dragItem.h, dragItem);
+          ctx.globalAlpha = 1;
+        }
+
+        // Particles
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * clamp(p.life, 0, 1), 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fill(); ctx.globalAlpha = 1;
+        }
+
+        // Result flash
+        if (resultFlash > 0.05) {
+          const color = resultGood ? "rgba(96,168,72," : "rgba(192,80,64,";
+          ctx.fillStyle = color + (resultFlash * 0.12) + ")";
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        if (mode === "running") drawHUD();
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawBentoBox() {
+        // Shadow
+        ctx.fillStyle = "rgba(120,90,50,0.15)";
+        roundRectFill(BOX_X + 4, BOX_Y + 4, BOX_W, BOX_H, 10);
+
+        // Box outer
+        ctx.fillStyle = COL.box;
+        roundRectFill(BOX_X, BOX_Y, BOX_W, BOX_H, 10);
+
+        // Box rim
+        ctx.strokeStyle = COL.boxDark; ctx.lineWidth = 3;
+        ctx.beginPath(); roundRect(ctx, BOX_X, BOX_Y, BOX_W, BOX_H, 10); ctx.stroke();
+
+        // Slots
+        for (let i = 0; i < 4; i++) {
+          const sr = getSlotRect(i);
+          ctx.fillStyle = slotsFilled[i] ? "rgba(248,240,224,0.9)" : COL.boxInner;
+          roundRectFill(sr.x, sr.y, sr.w, sr.h, 6);
+          ctx.strokeStyle = "rgba(164,122,80,0.3)"; ctx.lineWidth = 1;
+          ctx.beginPath(); roundRect(ctx, sr.x, sr.y, sr.w, sr.h, 6); ctx.stroke();
+
+          // Filled ingredient in slot
+          if (slotsFilled[i]) {
+            const ing = INGREDIENTS[i];
+            drawIngredient(sr.x + 8, sr.y + 8, sr.w - 16, sr.h - 16, ing);
+          }
+        }
+
+        // Decorative chopsticks
+        ctx.save();
+        ctx.translate(BOX_X + BOX_W + 30, BOX_Y + 40);
+        ctx.rotate(0.15);
+        ctx.fillStyle = COL.boxDark;
+        ctx.fillRect(-3, 0, 6, 200);
+        ctx.fillRect(12, 10, 6, 190);
+        ctx.fillStyle = COL.box;
+        ctx.fillRect(-2, 0, 4, 50);
+        ctx.fillRect(13, 10, 4, 50);
+        ctx.restore();
+      }
+
+      function drawIngredient(x, y, w, h, ing) {
+        const cx = x + w / 2, cy = y + h / 2;
+        if (ing.shape === "rice") {
+          ctx.fillStyle = ing.color;
+          roundRectFill(x, y, w, h, 8);
+          // Rice dots
+          ctx.fillStyle = ing.darkColor;
+          for (let i = 0; i < 5; i++) {
+            const dx = x + 10 + (i % 3) * (w / 4);
+            const dy = y + 10 + Math.floor(i / 3) * (h / 3);
+            ctx.fillRect(dx, dy, 3, 3);
+          }
+          // Nori strip
+          ctx.fillStyle = "#3a5030";
+          ctx.fillRect(x + w * 0.3, y + h * 0.4, w * 0.4, h * 0.2);
+        } else if (ing.shape === "leaf") {
+          ctx.fillStyle = ing.color;
+          ctx.beginPath(); ctx.ellipse(cx, cy, w * 0.4, h * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = ing.darkColor; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(cx - w * 0.3, cy); ctx.lineTo(cx + w * 0.3, cy); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx, cy - h * 0.2); ctx.lineTo(cx - w * 0.15, cy + h * 0.15); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(cx, cy - h * 0.2); ctx.lineTo(cx + w * 0.15, cy + h * 0.15); ctx.stroke();
+        } else if (ing.shape === "meat") {
+          ctx.fillStyle = ing.color;
+          roundRectFill(x + 4, y + 6, w - 8, h - 12, 6);
+          ctx.fillStyle = ing.darkColor;
+          ctx.fillRect(x + w * 0.2, y + h * 0.3, w * 0.15, h * 0.15);
+          ctx.fillRect(x + w * 0.5, y + h * 0.5, w * 0.2, h * 0.12);
+        } else if (ing.shape === "egg") {
+          // Fried egg
+          ctx.fillStyle = "#f8f0d8";
+          ctx.beginPath(); ctx.ellipse(cx, cy, w * 0.42, h * 0.38, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = ing.color;
+          ctx.beginPath(); ctx.arc(cx, cy, Math.min(w, h) * 0.2, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // Label
+        ctx.fillStyle = COL.text; ctx.font = "bold 11px Trebuchet MS";
+        ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+        ctx.fillText(ing.name, cx, y + h + 14);
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "bold 16px Trebuchet MS, sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`도시락: ${boxesDone}/${TOTAL_BOXES}`, 20, 16);
+
+        ctx.textAlign = "right";
+        ctx.fillStyle = misses > 0 ? COL.fail : COL.textLight;
+        ctx.font = "bold 14px Trebuchet MS, sans-serif";
+        ctx.fillText(`실수: ${misses}/${MAX_MISSES}`, W - 20, 16);
+
+        // Instruction
+        ctx.textAlign = "center"; ctx.fillStyle = COL.textLight;
+        ctx.font = "13px Trebuchet MS, sans-serif";
+        ctx.fillText("재료를 맞는 칸으로 드래그하세요", CX, H - 28);
+      }
+
+      function roundRectFill(x, y, w, h, r) {
+        ctx.beginPath(); roundRect(ctx, x, y, w, h, r); ctx.fill();
+      }
+      function roundRect(c, x, y, w, h, r) {
+        c.moveTo(x + r, y); c.lineTo(x + w - r, y); c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r); c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h); c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40), lineH = 26;
+        const cardH = 48 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(250,244,232,0.96)"; ctx.beginPath(); roundRect(ctx, cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 14, cardY, cardW - 28, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 24px Trebuchet MS, sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cardY + 18);
+        ctx.font = "400 14px Trebuchet MS, sans-serif"; ctx.fillStyle = COL.textLight;
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        ctx.fillStyle = "rgba(90,64,48,0.35)"; ctx.font = "400 13px Trebuchet MS, sans-serif";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(250,244,232,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("도시락 싸기", [
+          "재료를 올바른 칸에 드래그하세요",
+          "",
+          "조작: 터치 드래그로 재료 배치",
+          "클리어: 도시락 5개 완성",
+          "실패: 재료 3개 잘못 넣으면 실패",
+        ], COL.box);
+      }
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(250,244,232,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, `도시락 ${boxesDone}개 완성`], COL.success);
+      }
+      function drawFailed() {
+        ctx.fillStyle = "rgba(120,60,40,0.2)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["재료를 너무 많이 틀렸습니다", `완성: ${boxesDone} / ${TOTAL_BOXES}`], COL.fail);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      function hitIngredient(px, py) {
+        for (const ing of currentIngredients) {
+          if (ing.placed) continue;
+          if (px >= ing.x && px <= ing.x + ing.w && py >= ing.y && py <= ing.y + ing.h) return ing;
+        }
+        return null;
+      }
+
+      function hitSlot(px, py) {
+        for (let i = 0; i < 4; i++) {
+          if (slotsFilled[i]) continue;
+          const sr = getSlotRect(i);
+          if (px >= sr.x && px <= sr.x + sr.w && py >= sr.y && py <= sr.y + sr.h) return i;
+        }
+        return -1;
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        const ing = hitIngredient(p.x, p.y);
+        if (ing) {
+          dragItem = ing;
+          dragOffX = p.x - ing.x;
+          dragOffY = p.y - ing.y;
+          canvas.setPointerCapture(e.pointerId);
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!dragItem || mode !== "running") return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        dragItem.x = p.x - dragOffX;
+        dragItem.y = p.y - dragOffY;
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (!dragItem || mode !== "running") { dragItem = null; return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        const slotIdx = hitSlot(p.x, p.y);
+
+        if (slotIdx >= 0) {
+          if (dragItem.slot === slotIdx) {
+            // Correct!
+            slotsFilled[slotIdx] = true;
+            dragItem.placed = true;
+            const sr = getSlotRect(slotIdx);
+            spawnParticles(sr.x + sr.w / 2, sr.y + sr.h / 2, reducedMotion ? 3 : 6, COL.success, [2, 4]);
+            checkBoxComplete();
+          } else {
+            // Wrong slot
+            misses++;
+            shake = 5; resultGood = false; resultFlash = 0.8;
+            spawnParticles(p.x, p.y, reducedMotion ? 2 : 5, COL.fail, [2, 4]);
+            // Return to spawn position
+            const idx = currentIngredients.indexOf(dragItem);
+            dragItem.x = SPAWN_X + 20;
+            dragItem.y = SPAWN_Y + idx * SPAWN_GAP;
+            if (misses >= MAX_MISSES) {
+              mode = "failed";
+              window.relayStageResult.status = "failed";
+              reportFailed("실수 3회");
+            }
+          }
+        } else {
+          // Dropped outside, return to spawn
+          const idx = currentIngredients.indexOf(dragItem);
+          dragItem.x = SPAWN_X + 20;
+          dragItem.y = SPAWN_Y + idx * SPAWN_GAP;
+        }
+        dragItem = null;
+      });
+      canvas.addEventListener("pointercancel", () => { dragItem = null; });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); }
+      });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), boxesDone, misses, slotsFilled, result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; boxesDone = TOTAL_BOXES; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; misses = MAX_MISSES; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
