@@ -916,5 +916,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "차 5잔을 완벽하게 우리면 클리어",
     thumbnail: "./tea-steep/thumbnail.png",
     path: "./tea-steep/index.html",
+  },
+  {
+    id: "music-key",
+    title: "음표 열쇠",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Sequence memory puzzle",
+    clearCondition: "잠금 5개를 해제하면 클리어",
+    thumbnail: "./music-key/thumbnail.png",
+    path: "./music-key/index.html",
   }
 ];
