@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>이슬 정원</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #F0F5E8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(107, 175, 92, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(77, 139, 62, 0.92);
+        color: #F0F5E8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #F0F5E8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(107, 175, 92, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">이슬 정원. 화면 터치 드래그로 잎 기울이기. 잎을 기울여 이슬방울을 모아 꽃에 전달하는 게임. 꽃 8송이에 이슬을 전달하면 클리어. 이슬 5방울이 낙하하면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="이슬 정원" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const TIME_LIMIT = 35;
+      const CLEAR_GOAL = 8;
+      const FAIL_LIMIT = 5;
+      const GRAVITY = 400;
+
+      const relayContext = window.RelayRuntime?.readContext("dew-garden") || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      let animFrame = 0, lastTs = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      // Colors
+      const COL = {
+        bg: "#F0F5E8", leaf: "#6BAF5C", leafDark: "#4D8B3E",
+        dew: "#A8D4E6", dewHighlight: "#FFFFFF",
+        flowerPink: "#E8A0B0", flowerLavender: "#B8A0D8",
+        text: "#3A5A2E", textLight: "#5A7A4E",
+        card: "rgba(240, 245, 232, 0.96)", cardBorder: "#6BAF5C",
+      };
+
+      // Game state
+      const state = {
+        mode: "menu", elapsed: 0, lastRunTime: 0,
+        note: "잎을 기울여 이슬방울을 모아 꽃에 전달하는 게임",
+      };
+
+      // Leaf
+      const leaf = {
+        cx: W / 2, cy: 320, width: 280, height: 20,
+        angle: 0, targetAngle: 0, maxAngle: Math.PI / 6,
+      };
+
+      // Dewdrops on leaf
+      let dewdrops = [];
+      let dewSpawnTimer = 0;
+      const DEW_SPAWN_INTERVAL = 0.8;
+      const DEW_RADIUS = 10;
+
+      // Flowers
+      let flowers = [];
+      let flowersWatered = 0;
+      let dropsLost = 0;
+
+      // Particles
+      let particles = [];
+      // Ripples
+      let ripples = [];
+
+      // Pointer state
+      let pointerDown = false;
+      let pointerX = W / 2;
+
+      function resetGame() {
+        leaf.angle = 0; leaf.targetAngle = 0;
+        dewdrops = [];
+        flowers = [];
+        particles = [];
+        ripples = [];
+        flowersWatered = 0;
+        dropsLost = 0;
+        dewSpawnTimer = 0;
+        spawnFlowerPair();
+      }
+
+      function spawnFlowerPair() {
+        // Spawn flowers on left and right sides
+        const positions = [];
+        // Left side flowers
+        positions.push({ x: 80, y: 360 + Math.random() * 80 });
+        positions.push({ x: 120, y: 320 + Math.random() * 60 });
+        // Right side flowers
+        positions.push({ x: W - 80, y: 360 + Math.random() * 80 });
+        positions.push({ x: W - 120, y: 320 + Math.random() * 60 });
+
+        for (const pos of positions) {
+          flowers.push({
+            x: pos.x, y: pos.y, radius: 28,
+            color: Math.random() > 0.5 ? COL.flowerPink : COL.flowerLavender,
+            watered: false, petalPhase: Math.random() * Math.PI * 2,
+            stemHeight: 60 + Math.random() * 40,
+          });
+        }
+      }
+
+      function spawnDew() {
+        // Spawn a dewdrop at a random position along the top of the leaf
+        const offsetX = (Math.random() - 0.5) * leaf.width * 0.6;
+        dewdrops.push({
+          x: leaf.cx + offsetX,
+          y: leaf.cy - 40, // starts above the leaf
+          vx: 0, vy: 0,
+          onLeaf: false, landed: false,
+          radius: DEW_RADIUS,
+          alpha: 1,
+        });
+      }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id, stageTitle: window.relayStageMeta.title,
+          reason, durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id, stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running"; state.elapsed = 0; state.lastRunTime = 0;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false; hostClearedReported = false;
+        resetGame();
+      }
+      function failStage(reason = "failed") {
+        state.mode = "failed"; state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+      function clearStage() {
+        state.mode = "cleared"; state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") startStage();
+      }
+
+      // Physics update
+      function update(dt) {
+        if (state.mode !== "running") return;
+        state.elapsed += dt;
+
+        // Check time limit
+        if (state.elapsed >= TIME_LIMIT) {
+          failStage("시간 초과");
+          return;
+        }
+
+        // Smooth leaf tilt
+        const tiltSpeed = 8;
+        leaf.angle += (leaf.targetAngle - leaf.angle) * Math.min(1, tiltSpeed * dt);
+
+        // Spawn dewdrops
+        dewSpawnTimer += dt;
+        if (dewSpawnTimer >= DEW_SPAWN_INTERVAL) {
+          dewSpawnTimer -= DEW_SPAWN_INTERVAL;
+          spawnDew();
+        }
+
+        // Update dewdrops
+        const sinA = Math.sin(leaf.angle);
+        const cosA = Math.cos(leaf.angle);
+        const halfW = leaf.width / 2;
+
+        for (let i = dewdrops.length - 1; i >= 0; i--) {
+          const d = dewdrops[i];
+
+          if (!d.onLeaf) {
+            // Falling dew - apply gravity
+            d.vy += GRAVITY * dt;
+            d.y += d.vy * dt;
+            d.x += d.vx * dt;
+
+            // Check if it lands on the leaf
+            const dx = d.x - leaf.cx;
+            const dy = d.y - leaf.cy;
+            const localX = dx * cosA + dy * sinA;
+            const localY = -dx * sinA + dy * cosA;
+
+            if (!d.landed && Math.abs(localX) < halfW && localY >= -leaf.height / 2 - d.radius && localY <= leaf.height / 2 + d.radius && d.vy > 0) {
+              d.onLeaf = true;
+              d.landed = true;
+              d.leafX = localX; // position along the leaf
+              d.vLeaf = 0; // velocity along the leaf
+              // Add ripple
+              ripples.push({ x: d.x, y: d.y, radius: 0, maxRadius: 25, alpha: 0.6 });
+            }
+
+            // Check if off screen
+            if (d.y > H + 20) {
+              dewdrops.splice(i, 1);
+              if (d.landed) {
+                // was on leaf but fell off - counts as lost
+              } else {
+                // never landed - doesn't count
+              }
+              continue;
+            }
+          }
+
+          if (d.onLeaf) {
+            // Roll along the tilted leaf due to gravity component
+            const gravAlongLeaf = GRAVITY * sinA * 1.8;
+            d.vLeaf += gravAlongLeaf * dt;
+            d.vLeaf *= 0.98; // friction
+            d.leafX += d.vLeaf * dt;
+
+            // Convert back to world coords
+            d.x = leaf.cx + d.leafX * cosA;
+            d.y = leaf.cy + d.leafX * (-sinA) + (-leaf.height / 2) * cosA - d.radius;
+
+            // Check if rolled off the leaf
+            if (Math.abs(d.leafX) > halfW + d.radius) {
+              d.onLeaf = false;
+              // Give it velocity in world space
+              d.vx = d.vLeaf * cosA;
+              d.vy = -d.vLeaf * sinA + 50;
+
+              // Check if it's near a flower
+              let delivered = false;
+              for (const f of flowers) {
+                if (f.watered) continue;
+                const fdx = d.x - f.x;
+                const fdy = d.y - f.y;
+                const dist = Math.sqrt(fdx * fdx + fdy * fdy);
+                if (dist < f.radius + d.radius + 40) {
+                  // Delivered!
+                  f.watered = true;
+                  flowersWatered++;
+                  delivered = true;
+                  // Sparkle particles
+                  for (let p = 0; p < 12; p++) {
+                    const angle = (Math.PI * 2 * p) / 12;
+                    const speed = 60 + Math.random() * 80;
+                    particles.push({
+                      x: f.x, y: f.y - 10,
+                      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+                      life: 1.0, color: Math.random() > 0.5 ? COL.dew : COL.dewHighlight,
+                      size: 3 + Math.random() * 4,
+                    });
+                  }
+                  // Check clear
+                  if (flowersWatered >= CLEAR_GOAL) {
+                    clearStage();
+                    return;
+                  }
+                  // Spawn new flowers if needed
+                  if (flowers.filter(ff => !ff.watered).length < 2) {
+                    spawnMoreFlowers();
+                  }
+                  break;
+                }
+              }
+
+              if (!delivered) {
+                // Will fall - mark as lost when it goes off screen
+                d.lostPending = true;
+              }
+            }
+          }
+
+          // Handle lost drops that fell off screen
+          if (d.lostPending && d.y > H + 10) {
+            dropsLost++;
+            dewdrops.splice(i, 1);
+            if (dropsLost >= FAIL_LIMIT) {
+              failStage("이슬 " + dropsLost + "방울 낙하");
+              return;
+            }
+            continue;
+          }
+
+          // Non-leaf dew going off bottom
+          if (!d.onLeaf && !d.lostPending && d.landed && d.y > H + 10) {
+            dropsLost++;
+            dewdrops.splice(i, 1);
+            if (dropsLost >= FAIL_LIMIT) {
+              failStage("이슬 " + dropsLost + "방울 낙하");
+              return;
+            }
+          }
+        }
+
+        // Update particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 80 * dt;
+          p.life -= dt * 1.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Update ripples
+        for (let i = ripples.length - 1; i >= 0; i--) {
+          const r = ripples[i];
+          r.radius += 60 * dt;
+          r.alpha -= dt * 1.5;
+          if (r.alpha <= 0) ripples.splice(i, 1);
+        }
+      }
+
+      function spawnMoreFlowers() {
+        const side = Math.random() > 0.5 ? "left" : "right";
+        const baseX = side === "left" ? 60 + Math.random() * 80 : W - 60 - Math.random() * 80;
+        flowers.push({
+          x: baseX, y: 300 + Math.random() * 120, radius: 28,
+          color: Math.random() > 0.5 ? COL.flowerPink : COL.flowerLavender,
+          watered: false, petalPhase: Math.random() * Math.PI * 2,
+          stemHeight: 60 + Math.random() * 40,
+        });
+      }
+
+      // Rendering
+      function drawBackground() {
+        ctx.fillStyle = COL.bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Soft ground
+        const grd = ctx.createLinearGradient(0, H * 0.75, 0, H);
+        grd.addColorStop(0, "#D8E8C8");
+        grd.addColorStop(1, "#C0D8A8");
+        ctx.fillStyle = grd;
+        ctx.fillRect(0, H * 0.75, W, H * 0.25);
+
+        // Soft light rays
+        ctx.globalAlpha = 0.08;
+        for (let i = 0; i < 5; i++) {
+          const x = 100 + i * 200;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x - 60, H);
+          ctx.lineTo(x + 60, H);
+          ctx.closePath();
+          ctx.fillStyle = "#FFF8E0";
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawLeaf() {
+        ctx.save();
+        ctx.translate(leaf.cx, leaf.cy);
+        ctx.rotate(-leaf.angle);
+
+        const hw = leaf.width / 2;
+        const hh = leaf.height / 2;
+
+        // Leaf shadow
+        ctx.fillStyle = "rgba(77, 139, 62, 0.15)";
+        ctx.beginPath();
+        ctx.ellipse(4, 6, hw + 4, hh + 6, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Main leaf body - elongated ellipse
+        ctx.fillStyle = COL.leaf;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, hw, hh + 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Leaf vein (center line)
+        ctx.strokeStyle = COL.leafDark;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-hw + 10, 0);
+        ctx.lineTo(hw - 10, 0);
+        ctx.stroke();
+
+        // Side veins
+        for (let i = -3; i <= 3; i++) {
+          if (i === 0) continue;
+          const vx = i * (hw / 4);
+          ctx.beginPath();
+          ctx.moveTo(vx, 0);
+          ctx.lineTo(vx + (i > 0 ? 15 : -15), i > 0 ? -8 : 8);
+          ctx.stroke();
+        }
+
+        // Leaf stem
+        ctx.strokeStyle = COL.leafDark;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(0, hh + 8);
+        ctx.lineTo(0, hh + 40);
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      function drawDewdrop(d) {
+        ctx.save();
+        // Dew body
+        const gradient = ctx.createRadialGradient(d.x - 2, d.y - 2, 1, d.x, d.y, d.radius);
+        gradient.addColorStop(0, "rgba(255,255,255,0.9)");
+        gradient.addColorStop(0.4, COL.dew);
+        gradient.addColorStop(1, "rgba(120, 190, 220, 0.6)");
+
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Highlight
+        ctx.fillStyle = "rgba(255,255,255,0.8)";
+        ctx.beginPath();
+        ctx.arc(d.x - d.radius * 0.3, d.y - d.radius * 0.3, d.radius * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawFlower(f) {
+        ctx.save();
+        // Stem
+        ctx.strokeStyle = "#5A9A4A";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(f.x, f.y);
+        ctx.lineTo(f.x, f.y + f.stemHeight);
+        ctx.stroke();
+
+        // Small leaves on stem
+        ctx.fillStyle = "#6BAF5C";
+        ctx.beginPath();
+        ctx.ellipse(f.x - 8, f.y + f.stemHeight * 0.5, 10, 5, -0.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Petals
+        const petalCount = 6;
+        const pr = f.watered ? f.radius : f.radius * 0.8;
+        for (let i = 0; i < petalCount; i++) {
+          const angle = (Math.PI * 2 * i) / petalCount + f.petalPhase;
+          const px = f.x + Math.cos(angle) * pr * 0.7;
+          const py = f.y + Math.sin(angle) * pr * 0.7;
+          ctx.fillStyle = f.watered ? f.color : shadeColor(f.color, -20);
+          ctx.globalAlpha = f.watered ? 1 : 0.6;
+          ctx.beginPath();
+          ctx.ellipse(px, py, pr * 0.45, pr * 0.3, angle, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // Center
+        ctx.fillStyle = f.watered ? "#FFD700" : "#C8B070";
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, pr * 0.25, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Watered indicator
+        if (f.watered) {
+          ctx.fillStyle = "rgba(168, 212, 230, 0.5)";
+          ctx.beginPath();
+          ctx.arc(f.x, f.y - pr - 5, 6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.restore();
+      }
+
+      function shadeColor(hex, amount) {
+        let r = parseInt(hex.slice(1, 3), 16) + amount;
+        let g = parseInt(hex.slice(3, 5), 16) + amount;
+        let b = parseInt(hex.slice(5, 7), 16) + amount;
+        r = Math.max(0, Math.min(255, r));
+        g = Math.max(0, Math.min(255, g));
+        b = Math.max(0, Math.min(255, b));
+        return "#" + [r, g, b].map(c => c.toString(16).padStart(2, "0")).join("");
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = Math.max(0, p.life);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawRipples() {
+        for (const r of ripples) {
+          ctx.strokeStyle = `rgba(168, 212, 230, ${r.alpha})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      function drawHUD() {
+        // Flowers watered (top-left)
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 22px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("🌸 " + flowersWatered + " / " + CLEAR_GOAL, 20, 34);
+
+        // Time (top-right)
+        const timeLeft = Math.max(0, TIME_LIMIT - state.elapsed);
+        ctx.textAlign = "right";
+        ctx.fillStyle = timeLeft < 10 ? "#C44" : COL.text;
+        ctx.fillText(Math.ceil(timeLeft) + "초", W - 20, 34);
+
+        // Drops lost (bottom-center)
+        ctx.textAlign = "center";
+        ctx.fillStyle = dropsLost >= FAIL_LIMIT - 1 ? "#C44" : COL.textLight;
+        ctx.font = "bold 18px 'Segoe UI', sans-serif";
+        ctx.fillText("💧 낙하: " + dropsLost + " / " + FAIL_LIMIT, W / 2, H - 16);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(240, 245, 232, 0.92)";
+        ctx.fillRect(0, 0, W, H);
+
+        // Card
+        const cardW = Math.min(600, W - 40);
+        const cardH = Math.min(380, H - 40);
+        const cardX = (W - cardW) / 2;
+        const cardY = (H - cardH) / 2;
+
+        ctx.fillStyle = COL.card;
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 3;
+        roundRect(ctx, cardX, cardY, cardW, cardH, 16);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "bold 36px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(title, W / 2, cardY + 56);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "500 18px 'Segoe UI', sans-serif";
+        lines.forEach((line, i) => {
+          ctx.fillText(line, W / 2, cardY + 100 + i * 32);
+        });
+
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "400 15px 'Segoe UI', sans-serif";
+        ctx.fillText("터치 또는 Enter로 시작", W / 2, cardY + cardH - 24);
+        ctx.textAlign = "left";
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath();
+        c.moveTo(x + r, y);
+        c.lineTo(x + w - r, y);
+        c.quadraticCurveTo(x + w, y, x + w, y + r);
+        c.lineTo(x + w, y + h - r);
+        c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        c.lineTo(x + r, y + h);
+        c.quadraticCurveTo(x, y + h, x, y + h - r);
+        c.lineTo(x, y + r);
+        c.quadraticCurveTo(x, y, x + r, y);
+        c.closePath();
+      }
+
+      function render() {
+        ctx.clearRect(0, 0, W, H);
+
+        if (state.mode === "menu") {
+          renderCard("이슬 정원", [
+            "잎을 기울여 이슬방울을 모아 꽃에 전달하는 게임",
+            "",
+            "조작: 화면 터치 드래그로 잎 기울이기",
+            "클리어: 꽃 8송이에 이슬 전달",
+            "실패: 이슬 5방울 낙하 시 실패",
+          ], COL.cardBorder);
+          return;
+        }
+
+        if (state.mode === "running") {
+          drawBackground();
+          // Draw flowers
+          for (const f of flowers) drawFlower(f);
+          // Draw ripples
+          drawRipples();
+          // Draw leaf
+          drawLeaf();
+          // Draw dewdrops
+          for (const d of dewdrops) drawDewdrop(d);
+          // Draw particles
+          drawParticles();
+          // Draw HUD
+          drawHUD();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "이슬 " + dropsLost + "방울이 떨어졌습니다",
+            "",
+            "꽃 " + flowersWatered + "송이에 이슬을 전달했습니다",
+            "소요 시간: " + state.lastRunTime.toFixed(1) + "초",
+          ], "#C44");
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          renderCard("클리어!", [
+            "꽃 " + CLEAR_GOAL + "송이에 이슬을 전달했습니다!",
+            "",
+            "소요 시간: " + state.lastRunTime.toFixed(1) + "초",
+          ], "#15803d");
+          return;
+        }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540",
+          mode: state.mode, elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          flowersWatered, dropsLost,
+          leafAngle: Math.round(leaf.angle * 100) / 100,
+          dewCount: dewdrops.length,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      // Input handlers
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = W / rect.width;
+        return { x: (e.clientX - rect.left) * scaleX };
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        pointerDown = true;
+        const pos = getCanvasPos(e);
+        pointerX = pos.x;
+        updateLeafTilt();
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!pointerDown || state.mode !== "running") return;
+        e.preventDefault();
+        const pos = getCanvasPos(e);
+        pointerX = pos.x;
+        updateLeafTilt();
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        pointerDown = false;
+        leaf.targetAngle = 0;
+      });
+
+      canvas.addEventListener("pointercancel", (e) => {
+        pointerDown = false;
+        leaf.targetAngle = 0;
+      });
+
+      // Also handle touchstart for the check script requirement
+      canvas.addEventListener("touchstart", (e) => {
+        if (state.mode !== "running") {
+          e.preventDefault();
+          startFromTouch();
+        }
+      }, { passive: false });
+
+      function updateLeafTilt() {
+        // Map pointer x position to leaf tilt
+        const relX = (pointerX - leaf.cx) / (W / 2);
+        leaf.targetAngle = -relX * leaf.maxAngle;
+      }
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && state.mode !== "running") {
+          e.preventDefault();
+          startFromTouch();
+        }
+        if (state.mode === "running") {
+          if (e.key === "ArrowLeft") {
+            leaf.targetAngle = leaf.maxAngle;
+          } else if (e.key === "ArrowRight") {
+            leaf.targetAngle = -leaf.maxAngle;
+          }
+        }
+      });
+
+      window.addEventListener("keyup", (e) => {
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          leaf.targetAngle = 0;
+        }
+      });
+
+      // Game loop
+      function frame(timestamp) {
+        const rawDt = lastTs ? (timestamp - lastTs) / 1000 : FIXED_DT;
+        lastTs = timestamp;
+        const dt = Math.min(rawDt, MAX_DT);
+
+        // Fixed timestep
+        let acc = dt;
+        while (acc >= FIXED_DT) {
+          update(FIXED_DT);
+          acc -= FIXED_DT;
+          if (state.mode !== "running") break;
+        }
+
+        render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      // Relay contract
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "dew-garden", title: "이슬 정원",
+        creator: "jungcollin", genre: "Dew collection",
+        clearCondition: "꽃 8송이에 이슬 전달",
+      };
+      window.relayStageResult = { status: "idle" };
+      window.relayStageDebug = {
+        forceClear() { startStage(); clearStage(); render(); },
+        forceFail() { startStage(); failStage("debug_force_fail"); render(); },
+      };
+
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
