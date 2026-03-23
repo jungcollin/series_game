@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>장작 패기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #F5ECD7; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(139, 105, 20, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(92, 64, 51, 0.92);
+        color: #F5ECD7; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #F5ECD7; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(139, 105, 20, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">장작 패기. 화면을 탭하여 도끼를 내려 장작을 쪼개세요. 나무결 표시선과 도끼가 일치할 때 탭하면 성공. 장작 10개를 쪼개면 클리어. 미스 3회 또는 35초 초과 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="장작 패기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = 960, H = 540, CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60, MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "wood-split", title: "장작 패기",
+        description: "나무결에 맞춰 도끼를 내려 장작을 쪼개세요",
+        creator: "jungcollin", genre: "Tap timing",
+        clearCondition: "장작 10개 쪼개면 클리어",
+        failCondition: "시간 초과 또는 미스 3회 시 실패",
+        controls: "화면 탭으로 도끼를 내려 장작을 쪼개세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      const COL = { bg: "#F5ECD7", wood: "#8B6914", woodLight: "#A0824A", woodDark: "#6B4E10", bark: "#5C4033", axeHead: "#6B7B8D", axeHandle: "#5C4033", grain: "#C4A35A", sage: "#7B9971", sageDark: "#5A7850", stump: "#7A5C30", text: "#3E2C1A", accent: "#C87832", miss: "#B83230", success: "#4A8C3F" };
+
+      const DURATION = 35, TARGET = 10, MAX_MISS = 3, LOG_W = 80, LOG_H = 120, STUMP_Y = CY + 80;
+      let mode = "menu", elapsed = 0, split = 0, misses = 0, lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, shakeX = 0, shakeY = 0;
+      let axeAngle = 0, axeSpeed = 2.5, axeSwinging = false, axeSwingT = 0;
+      const AXE_SWING_DUR = 0.15;
+      let grainAngle = 0, grainWidth = 0.4, logPresent = true, splitAnim = 0, splitDir = 0, newLogTimer = 0;
+      let feedbackText = "", feedbackTimer = 0, feedbackColor = "", clearAnim = 0;
+      let particles = [], stackLeft = [], stackRight = [];
+      const trees = [];
+      for (let i = 0; i < 8; i++) trees.push({ x: 60 + i * 120 + Math.random() * 40, h: 120 + Math.random() * 80, w: 30 + Math.random() * 20, sway: Math.random() * Math.PI * 2 });
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) }); }
+      function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) }); }
+
+      function resetLog() {
+        logPresent = true; splitAnim = 0;
+        const p = split / TARGET;
+        grainAngle = rand(-0.5, 0.5); grainWidth = lerp(0.45, 0.2, p); axeSpeed = lerp(2.5, 5.0, p);
+      }
+
+      function startGame() {
+        mode = "running"; elapsed = 0; split = 0; misses = 0; shake = 0; axeAngle = 0;
+        axeSwinging = false; clearAnim = 0; particles = []; stackLeft = []; stackRight = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running"; resetLog();
+      }
+
+      function spawnChips(x, y, count) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(-Math.PI, Math.PI), spd = rand(100, 300);
+          particles.push({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - rand(50, 150), life: 1, size: rand(3, 8), color: Math.random() > 0.5 ? COL.grain : COL.woodLight, gravity: 400, rot: rand(0, Math.PI * 2), rotSpd: rand(-8, 8) });
+        }
+      }
+
+      function doSwing() { if (axeSwinging || !logPresent || mode !== "running") return; axeSwinging = true; axeSwingT = 0; }
+
+      function checkHit() {
+        const diff = Math.abs(axeAngle - grainAngle);
+        if (diff < grainWidth) {
+          split++; spawnChips(CX, STUMP_Y - LOG_H / 2, 15); shake = 0.25;
+          splitDir = axeAngle > grainAngle ? 1 : -1; splitAnim = 1; logPresent = false;
+          feedbackText = "좋아요!"; feedbackTimer = 0.8; feedbackColor = COL.success;
+          const side = Math.random() > 0.5 ? stackLeft : stackRight;
+          if (side.length < 5) side.push({ y: -side.length * 22, wobble: rand(-0.1, 0.1) });
+          if (split >= TARGET) { mode = "cleared"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); }
+          else newLogTimer = 0.6;
+        } else {
+          misses++; shake = 0.15; feedbackText = "빗나감!"; feedbackTimer = 0.8; feedbackColor = COL.miss;
+          spawnChips(CX, STUMP_Y - LOG_H / 2, 5);
+          if (misses >= MAX_MISS) { mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("미스 3회"); }
+        }
+      }
+
+      function update(dt) {
+        if (mode === "running") {
+          elapsed += dt;
+          if (elapsed >= DURATION) { mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("시간 초과"); return; }
+          if (!axeSwinging) axeAngle = Math.sin(elapsed * axeSpeed * Math.PI) * 0.8;
+          else { axeSwingT += dt; if (axeSwingT >= AXE_SWING_DUR) { axeSwinging = false; checkHit(); } }
+          if (!logPresent && newLogTimer > 0) { newLogTimer -= dt; if (newLogTimer <= 0) resetLog(); }
+          if (splitAnim > 0) splitAnim = Math.max(0, splitAnim - dt * 3);
+        }
+        if (mode === "cleared") clearAnim = Math.min(1, clearAnim + dt * 1.5);
+        if (shake > 0) { shake = Math.max(0, shake - dt * 4); shakeX = (Math.random() - 0.5) * shake * 20; shakeY = (Math.random() - 0.5) * shake * 20; } else { shakeX = 0; shakeY = 0; }
+        for (let i = particles.length - 1; i >= 0; i--) { const p = particles[i]; p.life -= dt * 1.5; if (p.life <= 0) { particles.splice(i, 1); continue; } p.vy += p.gravity * dt; p.x += p.vx * dt; p.y += p.vy * dt; if (p.rot !== undefined) p.rot += p.rotSpd * dt; }
+        for (const t of trees) t.sway += dt * 0.5;
+        if (feedbackTimer > 0) feedbackTimer -= dt;
+      }
+
+      function drawBg() {
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, "#C8DEF0"); grad.addColorStop(0.5, "#E8DFC8"); grad.addColorStop(1, "#D4C9A8");
+        ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = "#C4B896"; ctx.fillRect(0, H * 0.65, W, H * 0.35);
+        ctx.fillStyle = "#B8AD88"; ctx.fillRect(0, H * 0.65, W, 4);
+        for (const t of trees) {
+          const sw = Math.sin(t.sway) * 3;
+          ctx.fillStyle = COL.bark; ctx.fillRect(t.x - 6, H * 0.65 - t.h * 0.4, 12, t.h * 0.4);
+          ctx.fillStyle = COL.sage; ctx.beginPath(); ctx.ellipse(t.x + sw, H * 0.65 - t.h * 0.5, t.w, t.h * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = COL.sageDark; ctx.beginPath(); ctx.ellipse(t.x + sw, H * 0.65 - t.h * 0.45, t.w * 0.7, t.h * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.fillStyle = "#8BA87A";
+        for (let i = 0; i < W; i += 30) { const gh = 6 + Math.sin(i * 0.1) * 3; ctx.fillRect(i, H * 0.65 - gh, 3, gh); }
+      }
+
+      function drawStump() {
+        ctx.fillStyle = COL.stump; ctx.beginPath(); ctx.ellipse(CX, STUMP_Y + 20, 50, 12, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = COL.bark; ctx.fillRect(CX - 50, STUMP_Y - 10, 100, 30);
+        ctx.fillStyle = COL.woodLight; ctx.beginPath(); ctx.ellipse(CX, STUMP_Y - 10, 50, 12, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = COL.wood; ctx.lineWidth = 1;
+        for (let r = 10; r < 45; r += 10) { ctx.beginPath(); ctx.ellipse(CX, STUMP_Y - 10, r, r * 0.24, 0, 0, Math.PI * 2); ctx.stroke(); }
+      }
+
+      function drawLog() {
+        if (!logPresent) {
+          if (splitAnim > 0) {
+            const off = (1 - splitAnim) * 120, rot = (1 - splitAnim) * 0.3 * splitDir;
+            for (let s = -1; s <= 1; s += 2) {
+              ctx.save(); ctx.translate(CX + s * off, STUMP_Y - LOG_H / 2); ctx.rotate(rot * s);
+              ctx.fillStyle = COL.wood; ctx.fillRect(-LOG_W / 4, -LOG_H / 2, LOG_W / 2, LOG_H);
+              ctx.fillStyle = COL.woodLight; ctx.fillRect(s === -1 ? 0 : -LOG_W / 4, -LOG_H / 2, LOG_W / 4, LOG_H);
+              ctx.fillStyle = COL.bark; ctx.fillRect(s === -1 ? -LOG_W / 4 : LOG_W / 4 - 4, -LOG_H / 2, 4, LOG_H);
+              ctx.restore();
+            }
+          }
+          return;
+        }
+        const lx = CX - LOG_W / 2, ly = STUMP_Y - LOG_H - 10;
+        ctx.fillStyle = COL.wood; ctx.fillRect(lx, ly, LOG_W, LOG_H);
+        ctx.fillStyle = COL.bark; ctx.fillRect(lx, ly, 5, LOG_H); ctx.fillRect(lx + LOG_W - 5, ly, 5, LOG_H);
+        ctx.fillStyle = COL.woodLight; ctx.beginPath(); ctx.ellipse(CX, ly, LOG_W / 2, 12, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = COL.bark; ctx.lineWidth = 2; ctx.stroke();
+        ctx.strokeStyle = COL.woodDark; ctx.lineWidth = 1;
+        for (let r = 8; r < LOG_W / 2 - 5; r += 8) { ctx.beginPath(); ctx.ellipse(CX, ly, r, r * 0.3, 0, 0, Math.PI * 2); ctx.stroke(); }
+        ctx.save(); ctx.translate(CX, ly); ctx.rotate(grainAngle);
+        ctx.strokeStyle = COL.accent; ctx.lineWidth = 3; ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(0, 14); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = "rgba(200,120,50,0.15)"; ctx.fillRect(-LOG_W * grainWidth, -14, LOG_W * grainWidth * 2, 28);
+        ctx.restore();
+      }
+
+      function drawAxe() {
+        if (mode !== "running") return;
+        const ay = STUMP_Y - LOG_H - 80;
+        ctx.save(); ctx.translate(CX, ay);
+        if (axeSwinging) { const t = clamp(axeSwingT / AXE_SWING_DUR, 0, 1); ctx.rotate(lerp(axeAngle, grainAngle, t * 0.5)); ctx.translate(0, t * 60); }
+        else ctx.rotate(axeAngle);
+        ctx.fillStyle = COL.axeHandle; ctx.fillRect(-4, -60, 8, 70);
+        ctx.fillStyle = "#8B7355"; ctx.fillRect(-5, 0, 10, 12);
+        ctx.fillStyle = COL.axeHead; ctx.beginPath(); ctx.moveTo(-4, -60); ctx.lineTo(-28, -72); ctx.lineTo(-30, -52); ctx.lineTo(-4, -45); ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = "#8899AA"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(-28, -72); ctx.lineTo(-30, -52); ctx.stroke();
+        ctx.restore();
+        if (!axeSwinging && logPresent) {
+          const ix = CX + Math.sin(axeAngle) * 50;
+          ctx.fillStyle = COL.accent; ctx.beginPath(); ctx.moveTo(ix, ay + 75); ctx.lineTo(ix - 6, ay + 65); ctx.lineTo(ix + 6, ay + 65); ctx.closePath(); ctx.fill();
+        }
+      }
+
+      function drawStacks() {
+        const baseY = STUMP_Y + 20;
+        for (const [arr, sx] of [[stackLeft, 100], [stackRight, W - 100]]) {
+          for (let i = 0; i < arr.length; i++) {
+            ctx.save(); ctx.translate(sx, baseY + arr[i].y); ctx.rotate(arr[i].wobble);
+            ctx.fillStyle = COL.wood; ctx.fillRect(-25, -10, 50, 20);
+            ctx.fillStyle = COL.bark; ctx.fillRect(-25, -10, 3, 20); ctx.fillRect(22, -10, 3, 20);
+            ctx.restore();
+          }
+        }
+      }
+
+      function drawHUD() {
+        const tl = Math.max(0, DURATION - elapsed), tr = tl / DURATION;
+        ctx.fillStyle = "rgba(62,44,26,0.15)"; ctx.fillRect(30, 20, W - 60, 12);
+        ctx.fillStyle = tr > 0.25 ? COL.accent : COL.miss; ctx.fillRect(30, 20, (W - 60) * tr, 12);
+        ctx.fillStyle = COL.text; ctx.font = "bold 28px Trebuchet MS"; ctx.textAlign = "left";
+        ctx.fillText("\u{1FA93} " + split + " / " + TARGET, 30, 62);
+        ctx.textAlign = "right"; ctx.fillStyle = misses > 0 ? COL.miss : COL.text;
+        ctx.fillText("\u2715 " + misses + " / " + MAX_MISS, W - 30, 62);
+        ctx.textAlign = "center"; ctx.font = "bold 22px Trebuchet MS";
+        ctx.fillStyle = tr > 0.25 ? COL.text : COL.miss; ctx.fillText(Math.ceil(tl) + "초", CX, 58);
+        ctx.textAlign = "left";
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.save(); ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.color;
+          if (p.rot !== undefined) { ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size); }
+          else ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+          ctx.restore();
+        }
+      }
+
+      function drawFeedback() {
+        if (feedbackTimer <= 0) return;
+        ctx.save(); ctx.globalAlpha = clamp(feedbackTimer / 0.3, 0, 1);
+        ctx.fillStyle = feedbackColor; ctx.font = "bold 36px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText(feedbackText, CX, STUMP_Y - LOG_H - 120 - (1 - feedbackTimer / 0.8) * 30);
+        ctx.restore(); ctx.textAlign = "left";
+      }
+
+      function drawCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(62,44,26,0.75)"; ctx.fillRect(0, 0, W, H);
+        const cw = Math.min(680, W - 40), cx2 = (W - cw) / 2, cy2 = 70, ch = 400;
+        ctx.fillStyle = "#FDF8EF"; ctx.beginPath(); ctx.roundRect(cx2, cy2, cw, ch, 16); ctx.fill();
+        ctx.fillStyle = accent; ctx.beginPath(); ctx.roundRect(cx2, cy2, cw, 8, [16, 16, 0, 0]); ctx.fill();
+        ctx.fillStyle = accent; ctx.font = "bold 38px Trebuchet MS"; ctx.textAlign = "center"; ctx.fillText(title, CX, cy2 + 60);
+        ctx.fillStyle = COL.text; ctx.font = "600 20px Trebuchet MS";
+        lines.forEach((l, i) => ctx.fillText(l, CX, cy2 + 110 + i * 36));
+        ctx.fillStyle = "rgba(62,44,26,0.5)"; ctx.font = "500 18px Trebuchet MS";
+        ctx.fillText("터치 또는 Enter로 시작", CX, cy2 + ch - 30); ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.save(); ctx.translate(shakeX, shakeY);
+        if (mode === "menu") {
+          drawBg(); drawStump();
+          const sv = logPresent; logPresent = true; const sg = grainAngle; grainAngle = 0; drawLog(); logPresent = sv; grainAngle = sg;
+          drawCard("장작 패기", ["조작: 화면 탭으로 도끼 내리기", "\uD83C\uDFAF 나무결 표시에 맞춰 탭하세요", "\u2705 장작 10개 쪼개면 클리어", "\u274C 미스 3회 또는 35초 초과 시 실패"], COL.accent);
+          ctx.restore(); return;
+        }
+        if (mode === "running") { drawBg(); drawStacks(); drawStump(); drawLog(); drawAxe(); drawParticles(); drawHUD(); drawFeedback(); ctx.restore(); return; }
+        if (mode === "cleared") {
+          drawBg(); drawStump(); drawStacks(); drawParticles();
+          const a = clamp(clearAnim, 0, 1); ctx.save(); ctx.globalAlpha = a;
+          ctx.fillStyle = "rgba(74,140,63,0.2)"; ctx.fillRect(0, 0, W, H);
+          const cw2 = Math.min(500, W - 40);
+          ctx.fillStyle = "#FDF8EF"; ctx.beginPath(); ctx.roundRect((W - cw2) / 2, 140, cw2, 260, 16); ctx.fill();
+          ctx.fillStyle = COL.success; ctx.font = "bold 44px Trebuchet MS"; ctx.textAlign = "center"; ctx.fillText("클리어!", CX, 210);
+          ctx.fillStyle = COL.text; ctx.font = "600 24px Trebuchet MS";
+          ctx.fillText("장작 " + split + "개 완료", CX, 260); ctx.fillText(elapsed.toFixed(1) + "초 소요", CX, 300);
+          ctx.fillStyle = "rgba(62,44,26,0.5)"; ctx.font = "500 18px Trebuchet MS"; ctx.fillText("터치하여 다시 시작", CX, 370);
+          ctx.textAlign = "left"; ctx.restore(); ctx.restore(); return;
+        }
+        if (mode === "failed") {
+          drawBg(); drawStump(); drawStacks(); drawParticles();
+          drawCard("실패", [misses >= MAX_MISS ? "미스 3회로 실패!" : "시간 초과!", "장작 " + split + "개 / 목표 " + TARGET + "개", Math.min(elapsed, DURATION).toFixed(1) + "초 소요"], COL.miss);
+          ctx.restore(); return;
+        }
+        ctx.restore();
+      }
+
+      function handleTap() {
+        if (mode !== "running") { startGame(); return; }
+        doSwing();
+      }
+
+      canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); handleTap(); });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleTap(); } });
+
+      function frame(ts) {
+        const dt = lastTimestamp ? Math.min((ts - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = ts; update(dt); render(); animFrame = requestAnimationFrame(frame);
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), split, misses, target: TARGET, maxMiss: MAX_MISS, timeLimit: DURATION, result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => { const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < steps; i++) update(FIXED_DT); render(); return renderGameToText(); };
+      window.relayStageDebug = {
+        forceClear() { startGame(); split = TARGET; mode = "cleared"; clearAnim = 1; window.relayStageResult.status = "cleared"; reportCleared(); render(); },
+        forceFail() { startGame(); misses = MAX_MISS; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); render(); },
+      };
+
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+      reportReady(); render(); canvas.focus(); animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

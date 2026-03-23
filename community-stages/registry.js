@@ -1015,5 +1015,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "편지 15통 정확히 배달",
     thumbnail: "./mail-dash/thumbnail.png",
     path: "./mail-dash/index.html",
+  },
+  {
+    id: "wood-split",
+    title: "장작 패기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tap timing",
+    clearCondition: "장작 10개 쪼개면 클리어",
+    thumbnail: "./wood-split/thumbnail.png",
+    path: "./wood-split/index.html",
   }
 ];
