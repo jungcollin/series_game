@@ -736,5 +736,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "배 5척을 입항시키면 클리어",
     thumbnail: "./moon-tide/thumbnail.png",
     path: "./moon-tide/index.html",
+  },
+  {
+    id: "lantern-rise",
+    title: "풍등 올리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Timing release",
+    clearCondition: "풍등 5개를 하늘에 올리면 클리어",
+    thumbnail: "./lantern-rise/thumbnail.png",
+    path: "./lantern-rise/index.html",
   }
 ];
