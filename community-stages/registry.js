@@ -754,5 +754,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "옷 5벌을 다리면 클리어",
     thumbnail: "./iron-master/thumbnail.png",
     path: "./iron-master/index.html",
+  },
+  {
+    id: "path-racer",
+    title: "길 만들기 레이서",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Puzzle racing",
+    clearCondition: "결승선까지 길을 완성하면 클리어",
+    thumbnail: "./path-racer/thumbnail.png",
+    path: "./path-racer/index.html",
   }
 ];
