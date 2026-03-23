@@ -691,5 +691,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "나무 5그루를 다듬으면 클리어",
     thumbnail: "./pruning-master/thumbnail.png",
     path: "./pruning-master/index.html",
+  },
+  {
+    id: "fossil-dig",
+    title: "화석 발굴",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Excavation tap",
+    clearCondition: "화석 5개를 발굴하면 클리어",
+    thumbnail: "./fossil-dig/thumbnail.png",
+    path: "./fossil-dig/index.html",
   }
 ];
