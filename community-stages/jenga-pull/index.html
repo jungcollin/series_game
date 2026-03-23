@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>젠가 뽑기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #F5EDE0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(180, 140, 100, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(90, 65, 40, 0.92);
+        color: #F5EDE0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #F5EDE0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(200, 160, 100, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">젠가 뽑기. 떨리는 손으로 블록을 조심스럽게 빼내는 아슬아슬한 젠가 게임. 드래그로 블록 뽑기. 모바일에서는 화면 터치 드래그로 플레이합니다. 블록 8개를 뽑아 올리면 클리어. 탑이 쓰러지면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="젠가 뽑기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "jenga-pull",
+        title: "젠가 뽑기",
+        description: "떨리는 손으로 블록을 조심스럽게 빼내는 아슬아슬한 젠가 게임.",
+        creator: "jungcollin",
+        genre: "Tension pulling",
+        clearCondition: "블록 8개를 뽑아 올리면 클리어",
+        failCondition: "탑이 쓰러지면 실패",
+        controls: "드래그로 블록 뽑기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#F5EDE0",
+        wood1: "#C8A46E",
+        wood2: "#D4B07A",
+        wood3: "#BA9860",
+        woodDark: "#8B7340",
+        woodLight: "#E0C890",
+        highlight: "#E8A040",
+        danger: "#D4443C",
+        safe: "#7CB870",
+        text: "#5A4128",
+        textLight: "rgba(90, 65, 40, 0.5)",
+        shadow: "rgba(90, 65, 40, 0.15)",
+      };
+
+      const DURATION = 40;
+      const TARGET_PULLS = 8;
+      const BLOCK_W = 90;
+      const BLOCK_H = 22;
+      const BLOCKS_PER_ROW = 3;
+      const NUM_ROWS = 8;
+      const TOWER_X = CX;
+      const TOWER_BASE_Y = H - 60;
+      const PULL_THRESHOLD = BLOCK_W * 1.3;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let clearAnim = 0;
+      let wobble = 0;
+      let wobbleTarget = 0;
+
+      // Blocks: [{x, y, row, col, pulled, color, pullX, stability}]
+      let blocks = [];
+      let pulledCount = 0;
+      let dragging = null; // index of block being dragged
+      let dragOffsetX = 0;
+      let dragStartX = 0;
+      let particles = [];
+      let stability = 100; // 0-100, tower falls at 0
+      let towerAngle = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function generateTower() {
+        blocks = [];
+        const colors = [COL.wood1, COL.wood2, COL.wood3];
+        for (let row = 0; row < NUM_ROWS; row++) {
+          const rowY = TOWER_BASE_Y - (row + 1) * BLOCK_H;
+          for (let col = 0; col < BLOCKS_PER_ROW; col++) {
+            const blockX = TOWER_X - BLOCK_W * 1.5 + col * BLOCK_W + BLOCK_W / 2;
+            blocks.push({
+              x: blockX,
+              y: rowY,
+              row, col,
+              pulled: false,
+              color: colors[(row + col) % 3],
+              pullX: 0,
+              canPull: row < NUM_ROWS - 1, // can't pull top row
+            });
+          }
+        }
+      }
+
+      function getBlockStability(blockIdx) {
+        const block = blocks[blockIdx];
+        if (block.pulled) return 1;
+        // Middle blocks are easier, edge blocks are harder
+        // Blocks in rows with fewer remaining blocks are riskier
+        const rowBlocks = blocks.filter(b => b.row === block.row && !b.pulled);
+        if (rowBlocks.length <= 1) return 0; // Can't pull last block
+        const isMiddle = block.col === 1;
+        return isMiddle ? 0.9 : 0.6;
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x, y,
+            vx: rand(-60, 60), vy: rand(-80, -20),
+            life: 1, color,
+            size: rand(2, 5),
+          });
+        }
+      }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function reset() {
+        elapsed = 0; shake = 0; clearAnim = 0;
+        wobble = 0; wobbleTarget = 0; towerAngle = 0;
+        pulledCount = 0; dragging = null; stability = 100;
+        particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateTower();
+      }
+
+      function pullBlock(idx) {
+        const block = blocks[idx];
+        block.pulled = true;
+        pulledCount++;
+
+        // Calculate stability loss
+        const stab = getBlockStability(idx);
+        const loss = rand(8, 18) * (1 - stab * 0.5);
+        stability -= loss;
+        wobbleTarget = rand(-3, 3) * (1 + (100 - stability) / 50);
+
+        spawnParticles(block.x, block.y, reducedMotion ? 3 : 8, COL.woodLight);
+
+        if (stability <= 0) {
+          // Tower falls!
+          shake = 15;
+          towerAngle = rand(-0.15, 0.15);
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("탑 붕괴");
+          return;
+        }
+
+        if (pulledCount >= TARGET_PULLS) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+          spawnParticles(CX, CY, reducedMotion ? 6 : 20, COL.safe);
+        }
+      }
+
+      function update(dt) {
+        if (mode === "running") {
+          elapsed += dt;
+          if (elapsed >= DURATION) {
+            mode = "failed";
+            window.relayStageResult.status = "failed";
+            reportFailed("시간 초과");
+            return;
+          }
+        }
+
+        // Wobble animation
+        wobble = lerp(wobble, wobbleTarget, dt * 3);
+        wobbleTarget *= 0.96;
+
+        // Failed tower collapse
+        if (mode === "failed" && stability <= 0) {
+          towerAngle += (towerAngle > 0 ? 1 : -1) * dt * 0.8;
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 200 * dt; p.life -= dt * 2.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88;
+        if (shake < 0.3) shake = 0;
+      }
+
+      function drawBlock(b, isHighlight, isDragging) {
+        if (b.pulled && !isDragging) return;
+
+        ctx.save();
+        const bx = isDragging ? b.x + b.pullX : b.x;
+        const by = b.y;
+
+        // Shadow
+        ctx.fillStyle = COL.shadow;
+        ctx.fillRect(bx - BLOCK_W / 2 + 3, by + 3, BLOCK_W - 2, BLOCK_H - 2);
+
+        // Block body
+        ctx.fillStyle = isHighlight ? COL.highlight : b.color;
+        ctx.fillRect(bx - BLOCK_W / 2, by, BLOCK_W - 2, BLOCK_H - 2);
+
+        // Wood grain
+        ctx.strokeStyle = COL.woodDark;
+        ctx.globalAlpha = 0.15;
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 3; i++) {
+          const gy = by + 4 + i * 6;
+          ctx.beginPath();
+          ctx.moveTo(bx - BLOCK_W / 2 + 4, gy);
+          ctx.lineTo(bx + BLOCK_W / 2 - 6, gy + rand(-1, 1));
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+
+        // Top edge highlight
+        ctx.fillStyle = "rgba(255,255,255,0.15)";
+        ctx.fillRect(bx - BLOCK_W / 2, by, BLOCK_W - 2, 2);
+
+        ctx.restore();
+      }
+
+      function drawTower() {
+        ctx.save();
+        // Apply tower wobble/tilt
+        ctx.translate(TOWER_X, TOWER_BASE_Y);
+        ctx.rotate((wobble + towerAngle) * Math.PI / 180);
+        ctx.translate(-TOWER_X, -TOWER_BASE_Y);
+
+        // Draw blocks bottom to top
+        for (let i = 0; i < blocks.length; i++) {
+          if (i === dragging) continue; // draw dragged block on top
+          drawBlock(blocks[i], false, false);
+        }
+        ctx.restore();
+
+        // Draw dragged block (not affected by tower rotation)
+        if (dragging !== null) {
+          drawBlock(blocks[dragging], true, true);
+        }
+      }
+
+      function drawStabilityMeter() {
+        const meterX = 40;
+        const meterY = 80;
+        const meterW = 16;
+        const meterH = 200;
+
+        // Background
+        ctx.fillStyle = "rgba(90,65,40,0.1)";
+        ctx.fillRect(meterX, meterY, meterW, meterH);
+
+        // Fill
+        const fill = stability / 100;
+        const fillColor = fill > 0.5 ? COL.safe : fill > 0.25 ? COL.highlight : COL.danger;
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(meterX, meterY + meterH * (1 - fill), meterW, meterH * fill);
+
+        // Border
+        ctx.strokeStyle = COL.textLight;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(meterX, meterY, meterW, meterH);
+
+        // Label
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "500 12px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("안정", meterX + meterW / 2, meterY - 8);
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 18px Trebuchet MS";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`뽑기: ${pulledCount}/${TARGET_PULLS}`, 80, 20);
+
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.textAlign = "right";
+        ctx.fillStyle = timeLeft < 10 ? COL.danger : COL.text;
+        ctx.fillText(`${Math.ceil(timeLeft)}초`, W - 24, 20);
+
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.fillRect(80, 46, W - 104, 4);
+        ctx.fillStyle = COL.safe;
+        ctx.fillRect(80, 46, (W - 104) * (pulledCount / TARGET_PULLS), 4);
+
+        drawStabilityMeter();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * Math.max(0, p.life), 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = Math.max(0, p.life);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // Pulled blocks stack on the right
+      function drawPulledStack() {
+        const stackX = W - 80;
+        const stackBaseY = H - 60;
+        let count = 0;
+        for (const b of blocks) {
+          if (!b.pulled) continue;
+          const sy = stackBaseY - count * (BLOCK_H + 2);
+          ctx.fillStyle = b.color;
+          ctx.fillRect(stackX - 30, sy, 60, BLOCK_H - 2);
+          ctx.fillStyle = "rgba(255,255,255,0.1)";
+          ctx.fillRect(stackX - 30, sy, 60, 2);
+          count++;
+        }
+        if (count > 0) {
+          ctx.fillStyle = COL.textLight;
+          ctx.font = "500 12px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText("뽑은 블록", stackX, stackBaseY + 16);
+        }
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath();
+        c.moveTo(x + r, y); c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r);
+        c.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 50 + lines.length * lineH + 44;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(245,237,224,0.95)";
+        roundRect(ctx, cardX, cardY, cardW, cardH, 12);
+        ctx.fill();
+
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 24px Trebuchet MS";
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "500 14px Trebuchet MS";
+        ctx.fillStyle = COL.textLight;
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+
+        ctx.fillStyle = "rgba(90,65,40,0.3)";
+        ctx.font = "400 13px Trebuchet MS";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        ctx.fillStyle = COL.bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Table surface
+        ctx.fillStyle = "#D4B888";
+        ctx.fillRect(0, TOWER_BASE_Y, W, H - TOWER_BASE_Y);
+        ctx.fillStyle = "#C4A878";
+        ctx.fillRect(0, TOWER_BASE_Y, W, 3);
+
+        drawTower();
+        drawPulledStack();
+        drawParticles();
+        if (mode === "running") drawHUD();
+        ctx.restore();
+
+        if (mode === "menu") {
+          ctx.fillStyle = "rgba(245,237,224,0.5)";
+          ctx.fillRect(0, 0, W, H);
+          drawCard("젠가 뽑기", [
+            "블록을 옆으로 드래그해서",
+            "조심스럽게 빼내세요!",
+            "",
+            "조작: 드래그로 블록 뽑기",
+            "클리어: 블록 8개 뽑기 성공",
+            "실패: 탑이 쓰러지면 게임 끝",
+          ], COL.highlight);
+        } else if (mode === "clear") {
+          clearAnim = clamp(clearAnim + 0.02, 0, 1);
+          ctx.fillStyle = `rgba(245,237,224,${clearAnim * 0.5})`;
+          ctx.fillRect(0, 0, W, H);
+          if (clearAnim > 0.3) {
+            drawCard("완벽한 손놀림!", [
+              `${Math.ceil(elapsed)}초 만에 완료`,
+              `안정도: ${Math.round(stability)}%`,
+            ], COL.safe);
+          }
+        } else if (mode === "failed") {
+          ctx.fillStyle = "rgba(90,50,30,0.25)";
+          ctx.fillRect(0, 0, W, H);
+          drawCard("탑이 무너졌다!", [
+            elapsed >= DURATION ? "시간이 다했습니다" : "너무 무리하게 뽑았습니다",
+            `뽑은 블록: ${pulledCount}/${TARGET_PULLS}`,
+          ], COL.danger);
+        }
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      function getBlockAt(x, y) {
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          const b = blocks[i];
+          if (b.pulled) continue;
+          if (!b.canPull) continue;
+          // Check remaining blocks in row
+          const rowBlocks = blocks.filter(bb => bb.row === b.row && !bb.pulled);
+          if (rowBlocks.length <= 1) continue;
+          if (x >= b.x - BLOCK_W / 2 && x <= b.x + BLOCK_W / 2 &&
+              y >= b.y && y <= b.y + BLOCK_H) {
+            return i;
+          }
+        }
+        return -1;
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") {
+          if (mode === "menu" || mode === "clear" || mode === "failed") {
+            reset(); mode = "running";
+          }
+          return;
+        }
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        const idx = getBlockAt(pos.x, pos.y);
+        if (idx >= 0) {
+          dragging = idx;
+          dragStartX = pos.x;
+          dragOffsetX = 0;
+          blocks[idx].pullX = 0;
+          canvas.setPointerCapture(e.pointerId);
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (dragging === null) return;
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        dragOffsetX = pos.x - dragStartX;
+        blocks[dragging].pullX = dragOffsetX;
+
+        // Add wobble as pulling
+        const pullRatio = Math.abs(dragOffsetX) / PULL_THRESHOLD;
+        wobbleTarget = Math.sin(elapsed * 8) * pullRatio * 2;
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (dragging === null) return;
+        const pullDist = Math.abs(blocks[dragging].pullX);
+        if (pullDist > PULL_THRESHOLD) {
+          pullBlock(dragging);
+        } else {
+          blocks[dragging].pullX = 0;
+        }
+        dragging = null;
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") { reset(); mode = "running"; }
+        }
+      });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          pulledCount, stability: Math.round(stability),
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          pulledCount = TARGET_PULLS;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          stability = 0;
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      generateTower();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
