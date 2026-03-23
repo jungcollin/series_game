@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>자물쇠 장인</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E0D0C0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(160, 130, 90, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 65, 45, 0.92);
+        color: #F0E8D8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E0D0C0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(160, 130, 90, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">자물쇠 장인. 화면을 드래그하여 다이얼을 돌리고 올바른 번호에 맞추어 자물쇠를 여세요. 모바일에서는 화면 터치와 드래그로 플레이합니다. 자물쇠 5개를 열면 클리어. 실수 3회 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="자물쇠 장인" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "lock-picker",
+        title: "자물쇠 장인",
+        description: "다이얼을 돌려 올바른 번호에 맞추어 자물쇠를 여세요",
+        creator: "jungcollin",
+        genre: "Dial precision",
+        clearCondition: "자물쇠 5개를 열면 클리어",
+        failCondition: "실수 3회 시 실패",
+        controls: "화면 드래그로 다이얼 회전",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#E0D0C0", bgDark: "#C8B8A4",
+        brass: "#B89850", brassDark: "#8A7030", brassLight: "#D4B870",
+        steel: "#8A8A88", steelDark: "#6A6A68", steelLight: "#A8A8A6",
+        dial: "#F0E8D8", dialMark: "#4A3A28",
+        text: "#4A3A28", textLight: "#8A7A60",
+        success: "#6A9A50", danger: "#B84040",
+        accent: "#B89850",
+        greenZone: "rgba(106,154,80,0.25)",
+      };
+
+      const TOTAL_LOCKS = 5;
+      const MAX_MISTAKES = 3;
+      const DIAL_NUMBERS = 12;
+      const DIAL_RADIUS = 120;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      let locksOpened = 0;
+      let mistakes = 0;
+      let shake = 0;
+      let flashAlpha = 0;
+
+      // Dial state
+      let dialAngle = 0; // current visual angle
+      let targetNumbers = []; // sequence of target numbers
+      let currentTarget = 0;
+      let dialDirection = 1; // 1 = clockwise, -1 = counter
+      let lockUnlockAnim = 0;
+
+      // Drag
+      let dragging = false;
+      let lastDragAngle = 0;
+
+      // Particles
+      let particles = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function randInt(lo, hi) { return Math.floor(rand(lo, hi + 1)); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange, speedRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), s = rand(speedRange[0], speedRange[1]);
+          particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+            life: 1, decay: rand(0.6, 1.2), color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+
+      function numberToAngle(num) {
+        return (num / DIAL_NUMBERS) * Math.PI * 2 - Math.PI / 2;
+      }
+
+      function angleToNumber(angle) {
+        let normalized = ((angle + Math.PI / 2) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+        return Math.round(normalized / (Math.PI * 2) * DIAL_NUMBERS) % DIAL_NUMBERS;
+      }
+
+      function generateLock() {
+        const diff = Math.min(locksOpened / TOTAL_LOCKS, 1);
+        const count = Math.min(2 + locksOpened, 4);
+        targetNumbers = [];
+        for (let i = 0; i < count; i++) {
+          let num;
+          do { num = randInt(0, DIAL_NUMBERS - 1); }
+          while (targetNumbers.includes(num));
+          targetNumbers.push(num);
+        }
+        currentTarget = 0;
+        dialAngle = rand(0, Math.PI * 2);
+        dialDirection = 1; // first move clockwise
+        lockUnlockAnim = 0;
+      }
+
+      function startGame() {
+        mode = "running"; elapsed = 0; locksOpened = 0; mistakes = 0;
+        shake = 0; flashAlpha = 0; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateLock();
+      }
+
+      function failGame(reason) {
+        mode = "failed"; window.relayStageResult.status = "failed"; reportFailed(reason);
+      }
+      function clearGame() {
+        mode = "cleared"; window.relayStageResult.status = "cleared"; reportCleared();
+        for (let i = 0; i < 40; i++)
+          spawnParticles(rand(100, 860), rand(80, 400), 1, [COL.brass, COL.brassLight, "#FFD700", "#FFF"][randInt(0, 3)], [3, 7], [40, 120]);
+      }
+
+      function checkNumber() {
+        const currentNum = angleToNumber(dialAngle);
+        if (currentNum === targetNumbers[currentTarget]) {
+          // Correct!
+          spawnParticles(CX, CY, 10, COL.brassLight, [2, 4], [40, 100]);
+          currentTarget++;
+          if (currentTarget >= targetNumbers.length) {
+            locksOpened++;
+            lockUnlockAnim = 1;
+            if (locksOpened >= TOTAL_LOCKS) {
+              setTimeout(() => clearGame(), 500);
+            } else {
+              setTimeout(() => { if (mode === "running") generateLock(); }, 700);
+            }
+          } else {
+            dialDirection *= -1; // Alternate direction
+          }
+        } else {
+          // Wrong
+          mistakes++;
+          shake = 0.4;
+          flashAlpha = 0.5;
+          spawnParticles(CX, CY, 6, "#888", [2, 4], [30, 70]);
+          if (mistakes >= MAX_MISTAKES) {
+            setTimeout(() => failGame("실수 3회"), 300);
+          }
+        }
+      }
+
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = W / rect.width, sy = H / rect.height;
+        const touch = e.touches ? e.touches[0] : e;
+        return { x: (touch.clientX - rect.left) * sx, y: (touch.clientY - rect.top) * sy };
+      }
+
+      function getAngleFromCenter(x, y) {
+        return Math.atan2(y - CY, x - CX);
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { startGame(); return; }
+        const pos = getCanvasPos(e);
+        const d = dist(pos.x, pos.y, CX, CY);
+        if (d < DIAL_RADIUS + 40 && d > 30) {
+          dragging = true;
+          lastDragAngle = getAngleFromCenter(pos.x, pos.y);
+          canvas.setPointerCapture?.(e.pointerId);
+        } else if (d < 30) {
+          // Click center = confirm
+          checkNumber();
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        const pos = getCanvasPos(e);
+        const currentAngle = getAngleFromCenter(pos.x, pos.y);
+        let delta = currentAngle - lastDragAngle;
+        // Handle wrap-around
+        if (delta > Math.PI) delta -= Math.PI * 2;
+        if (delta < -Math.PI) delta += Math.PI * 2;
+        dialAngle += delta;
+        lastDragAngle = currentAngle;
+      });
+
+      canvas.addEventListener("pointerup", () => { dragging = false; });
+      canvas.addEventListener("pointercancel", () => { dragging = false; });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && mode !== "running") { e.preventDefault(); startGame(); }
+        if (mode === "running") {
+          if (e.key === "ArrowRight") { dialAngle += Math.PI * 2 / DIAL_NUMBERS; e.preventDefault(); }
+          if (e.key === "ArrowLeft") { dialAngle -= Math.PI * 2 / DIAL_NUMBERS; e.preventDefault(); }
+          if (e.key === " ") { checkNumber(); e.preventDefault(); }
+        }
+      });
+
+      function update(dt) {
+        elapsed += dt;
+        if (shake > 0) shake = Math.max(0, shake - dt * 3);
+        if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt * 2);
+        if (lockUnlockAnim > 0 && lockUnlockAnim < 2) lockUnlockAnim += dt;
+        particles = particles.filter(p => {
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 60 * dt;
+          p.life -= p.decay * dt; return p.life > 0;
+        });
+      }
+
+      function drawDial() {
+        // Outer ring
+        ctx.beginPath(); ctx.arc(CX, CY, DIAL_RADIUS + 20, 0, Math.PI * 2);
+        ctx.fillStyle = COL.steel; ctx.fill();
+        ctx.beginPath(); ctx.arc(CX, CY, DIAL_RADIUS + 15, 0, Math.PI * 2);
+        ctx.fillStyle = COL.steelLight; ctx.fill();
+
+        // Dial face
+        ctx.beginPath(); ctx.arc(CX, CY, DIAL_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = COL.dial; ctx.fill();
+
+        // Target zone highlight
+        if (currentTarget < targetNumbers.length) {
+          const targetAngle = numberToAngle(targetNumbers[currentTarget]);
+          const zoneSize = Math.PI * 2 / DIAL_NUMBERS * 0.4;
+          ctx.beginPath();
+          ctx.moveTo(CX, CY);
+          ctx.arc(CX, CY, DIAL_RADIUS - 5, targetAngle - zoneSize, targetAngle + zoneSize);
+          ctx.closePath();
+          ctx.fillStyle = COL.greenZone; ctx.fill();
+        }
+
+        // Number marks
+        for (let i = 0; i < DIAL_NUMBERS; i++) {
+          const angle = numberToAngle(i);
+          const innerR = DIAL_RADIUS - 25;
+          const outerR = DIAL_RADIUS - 8;
+          const mx = CX + Math.cos(angle) * outerR;
+          const my = CY + Math.sin(angle) * outerR;
+          const tx = CX + Math.cos(angle) * (innerR - 8);
+          const ty = CY + Math.sin(angle) * (innerR - 8);
+
+          // Tick
+          ctx.beginPath();
+          ctx.moveTo(CX + Math.cos(angle) * innerR, CY + Math.sin(angle) * innerR);
+          ctx.lineTo(mx, my);
+          ctx.strokeStyle = COL.dialMark; ctx.lineWidth = 2; ctx.stroke();
+
+          // Number
+          ctx.fillStyle = COL.dialMark;
+          ctx.font = "bold 16px 'Trebuchet MS'"; ctx.textAlign = "center";
+          ctx.fillText(i.toString(), tx, ty + 5);
+        }
+
+        // Pointer (rotates with dialAngle)
+        const pointerAngle = dialAngle;
+        const px = CX + Math.cos(pointerAngle) * (DIAL_RADIUS - 35);
+        const py = CY + Math.sin(pointerAngle) * (DIAL_RADIUS - 35);
+        ctx.beginPath(); ctx.moveTo(CX, CY);
+        ctx.lineTo(px, py);
+        ctx.strokeStyle = COL.danger; ctx.lineWidth = 3; ctx.stroke();
+        // Pointer tip
+        ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2);
+        ctx.fillStyle = COL.danger; ctx.fill();
+
+        // Center button
+        ctx.beginPath(); ctx.arc(CX, CY, 22, 0, Math.PI * 2);
+        ctx.fillStyle = COL.brass; ctx.fill();
+        ctx.beginPath(); ctx.arc(CX, CY, 18, 0, Math.PI * 2);
+        ctx.fillStyle = COL.brassLight; ctx.fill();
+        // Keyhole
+        ctx.beginPath(); ctx.arc(CX, CY - 3, 3, 0, Math.PI * 2);
+        ctx.fillStyle = COL.brassDark; ctx.fill();
+        ctx.fillRect(CX - 2, CY - 1, 4, 8);
+
+        // Arrow indicator at top
+        ctx.beginPath();
+        ctx.moveTo(CX, CY - DIAL_RADIUS - 25);
+        ctx.lineTo(CX - 8, CY - DIAL_RADIUS - 35);
+        ctx.lineTo(CX + 8, CY - DIAL_RADIUS - 35);
+        ctx.closePath();
+        ctx.fillStyle = COL.accent; ctx.fill();
+      }
+
+      function drawTargetSequence() {
+        const seqY = 32;
+        ctx.font = "bold 16px 'Trebuchet MS'"; ctx.textAlign = "center";
+        ctx.fillStyle = COL.textLight;
+        ctx.fillText("목표:", CX - 80, seqY);
+
+        targetNumbers.forEach((num, i) => {
+          const x = CX - 40 + i * 40;
+          const done = i < currentTarget;
+          const active = i === currentTarget;
+
+          ctx.beginPath(); ctx.arc(x, seqY - 4, 15, 0, Math.PI * 2);
+          ctx.fillStyle = done ? COL.success : (active ? COL.accent + "40" : "rgba(0,0,0,0.05)");
+          ctx.fill();
+          if (active) {
+            ctx.strokeStyle = COL.accent; ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+          ctx.fillStyle = done ? "#FFF" : COL.text;
+          ctx.font = "bold 16px 'Trebuchet MS'";
+          ctx.fillText(num.toString(), x, seqY + 1);
+        });
+
+        // Direction indicator
+        if (currentTarget < targetNumbers.length) {
+          const dirText = dialDirection > 0 ? "→ 시계" : "← 반시계";
+          ctx.fillStyle = COL.textLight; ctx.font = "14px 'Trebuchet MS'";
+          ctx.fillText(dirText, CX + 80, seqY);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function drawLockBody() {
+        // Shackle
+        const shackleOpen = lockUnlockAnim > 0 ? Math.min(lockUnlockAnim * 15, 15) : 0;
+        ctx.strokeStyle = COL.steel; ctx.lineWidth = 12; ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.arc(CX, CY - DIAL_RADIUS - 55 - shackleOpen, 35, Math.PI, 0);
+        ctx.stroke();
+        ctx.strokeStyle = COL.steelLight; ctx.lineWidth = 8;
+        ctx.beginPath();
+        ctx.arc(CX, CY - DIAL_RADIUS - 55 - shackleOpen, 35, Math.PI, 0);
+        ctx.stroke();
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.textAlign = "left"; ctx.fillText("열림 " + locksOpened + "/" + TOTAL_LOCKS, 20, 32);
+        ctx.textAlign = "right";
+        ctx.fillStyle = mistakes >= 2 ? COL.danger : COL.text;
+        ctx.fillText("실수 " + mistakes + "/" + MAX_MISTAKES, W - 20, 32);
+        ctx.textAlign = "left";
+
+        // Current number display
+        const currentNum = angleToNumber(dialAngle);
+        ctx.fillStyle = COL.text; ctx.font = "bold 28px 'Trebuchet MS'";
+        ctx.textAlign = "center";
+        ctx.fillText(currentNum.toString(), CX, H - 30);
+
+        // Confirm hint
+        if (!dragging && currentTarget < targetNumbers.length) {
+          const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+          ctx.fillStyle = `rgba(184,152,80,${pulse})`;
+          ctx.font = "14px 'Trebuchet MS'";
+          ctx.fillText("중앙 탭으로 확인", CX, H - 10);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function drawParticles() {
+        particles.forEach(p => {
+          ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2); ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function renderMenu() {
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+        // Decorative lock silhouettes
+        ctx.fillStyle = "rgba(0,0,0,0.04)";
+        ctx.beginPath(); ctx.arc(200, 300, 80, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(760, 250, 60, 0, Math.PI * 2); ctx.fill();
+
+        const cw = 340, ch = 300, cx = CX - cw / 2, cy = CY - ch / 2 - 10;
+        ctx.fillStyle = "rgba(240,232,216,0.95)";
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = COL.accent; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.fillStyle = COL.accent; ctx.font = "bold 34px 'Trebuchet MS'";
+        ctx.fillText("자물쇠 장인", CX, cy + 48);
+        ctx.fillStyle = COL.text; ctx.font = "17px 'Trebuchet MS'";
+        ctx.fillText("다이얼을 돌려 자물쇠를 여세요", CX, cy + 82);
+        ctx.fillStyle = COL.textLight; ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("조작: 화면 드래그로 회전, 중앙 탭 확인", CX, cy + 116);
+        ctx.fillStyle = COL.success; ctx.fillText("클리어: 자물쇠 5개 열기", CX, cy + 148);
+        ctx.fillStyle = COL.danger; ctx.fillText("실패: 실수 3회", CX, cy + 175);
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = `rgba(184,152,80,${pulse})`; ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.fillText("탭하여 시작", CX, cy + 240);
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+        if (shake > 0) { ctx.save(); ctx.translate(rand(-shake * 8, shake * 8), rand(-shake * 8, shake * 8)); }
+        drawLockBody();
+        drawDial();
+        drawTargetSequence();
+        drawHUD();
+        if (flashAlpha > 0) {
+          ctx.fillStyle = `rgba(184,64,64,${flashAlpha * 0.3})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+        drawParticles();
+        if (shake > 0) ctx.restore();
+      }
+
+      function renderResult(title, subtitle, color) {
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+        drawParticles();
+        const cw = 340, ch = 210, cx = CX - cw / 2, cy = CY - ch / 2;
+        ctx.fillStyle = "rgba(240,232,216,0.95)";
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = color; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.fillStyle = color; ctx.font = "bold 34px 'Trebuchet MS'"; ctx.fillText(title, CX, cy + 50);
+        ctx.fillStyle = COL.text; ctx.font = "17px 'Trebuchet MS'"; ctx.fillText(subtitle, CX, cy + 85);
+        ctx.fillStyle = COL.textLight; ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("열림 " + locksOpened + "개 | " + elapsed.toFixed(1) + "초", CX, cy + 115);
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = `rgba(184,152,80,${pulse})`; ctx.font = "bold 18px 'Trebuchet MS'";
+        ctx.fillText("탭하여 재시작", CX, cy + 175);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (mode === "menu") { renderMenu(); return; }
+        if (mode === "running") { renderRunning(); return; }
+        if (mode === "cleared") { renderResult("클리어!", "모든 자물쇠를 열었습니다!", COL.success); return; }
+        if (mode === "failed") { renderResult("실패", "자물쇠가 잠겼습니다...", COL.danger); return; }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), locksOpened, mistakes, currentTarget, totalTargets: targetNumbers.length, currentNum: angleToNumber(dialAngle) });
+      }
+
+      function frame(ts) {
+        const dt = lastTimestamp ? Math.min((ts - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = ts; update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { startGame(); clearGame(); render(); },
+        forceFail() { startGame(); failGame("debug_force_fail"); render(); },
+      };
+
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+      reportReady(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

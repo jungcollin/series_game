@@ -835,5 +835,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "핀 30개를 쓰러뜨리면 클리어",
     thumbnail: "./bowling-puzzle/thumbnail.png",
     path: "./bowling-puzzle/index.html",
+  },
+  {
+    id: "lock-picker",
+    title: "자물쇠 장인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Dial precision",
+    clearCondition: "자물쇠 5개를 열면 클리어",
+    thumbnail: "./lock-picker/thumbnail.png",
+    path: "./lock-picker/index.html",
   }
 ];
