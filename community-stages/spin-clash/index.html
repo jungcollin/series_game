@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>팽이 대결</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body { margin:0; width:100%; height:100%; overflow:hidden; font-family:"Trebuchet MS","Segoe UI",sans-serif; background:#ede8f4; }
+      body { display:grid; place-items:center; }
+      a, canvas { -webkit-tap-highlight-color: rgba(148,163,184,0.2); }
+      .skip-link { position:absolute; top:12px; left:12px; z-index:10; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); clip-path:inset(50%); border-radius:999px; background:rgba(50,30,70,0.92); color:#ede8f4; font-weight:800; text-decoration:none; white-space:nowrap; transition:transform 0.15s ease; }
+      .skip-link:focus, .skip-link:focus-visible { width:auto; height:auto; padding:12px 16px; overflow:visible; clip:auto; clip-path:none; }
+      .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+      canvas { display:block; width:100%; height:100%; background:#ede8f4; touch-action:none; }
+      canvas:focus-visible { outline:4px solid rgba(120,80,180,0.6); outline-offset:-8px; }
+      @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration:0.01ms!important; animation-iteration-count:1!important; transition-duration:0.01ms!important; scroll-behavior:auto!important; } }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">팽이 대결. 화면 터치 드래그로 팽이를 발사하여 상대를 밀어내세요.</p>
+    <canvas id="game" width="960" height="540" aria-label="팽이 대결" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+    "use strict";
+    const canvas = document.querySelector("#game");
+    const ctx = canvas.getContext("2d");
+    const W = 960, H = 540;
+    const FIXED_DT = 1/60, MAX_DT = 1/20;
+    const relayCtx = window.RelayRuntime?.readContext("spin-clash") || { history:[], clearCount:0, previousStageId:null };
+
+    const COL = {
+      bg:"#ede8f4", lavender:"#9878c0", lavDark:"#7050a0", mint:"#60c8a0", mintDark:"#40a878",
+      gold:"#d4a843", goldDark:"#b08930", ring:"#d8d0e0", ringBorder:"#b0a0c0",
+      text:"#302040", textLight:"#706080", cardBg:"rgba(237,232,244,0.96)",
+      fail:"#c04040", clear:"#2d8a50", enemy:"#e07050", enemyDark:"#c05040"
+    };
+
+    const TIME_LIMIT = 40, TARGET_WINS = 5, MAX_LOSSES = 3;
+    const RING_R = 180, RING_CX = W/2, RING_CY = H/2 + 20;
+    let mode = "menu", elapsed = 0, lastRunTime = 0;
+    let hostFailedReported = false, hostClearedReported = false;
+    let animFrame = 0, lastTs = 0;
+    let wins = 0, losses = 0;
+    let player = null, enemy = null;
+    let phase = "aim"; // aim, spinning, result
+    let dragStart = null, dragEnd = null;
+    let shakeTimer = 0, shakeIntensity = 0;
+    let particles = [], resultTimer = 0;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch(e) { return false; } }
+    function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+    function reportFailed(reason) { if (!inRelayHost()||hostFailedReported) return; hostFailedReported=true; window.parent.RelayHost.onStageFailed?.({stageId:"spin-clash",stageTitle:"팽이 대결",reason,durationSec:+lastRunTime.toFixed(1)}); }
+    function reportCleared() { if (!inRelayHost()||hostClearedReported) return; hostClearedReported=true; window.parent.RelayHost.onStageCleared?.({stageId:"spin-clash",stageTitle:"팽이 대결",clearCountAfter:relayCtx.clearCount+1,durationSec:+lastRunTime.toFixed(1)}); }
+
+    function makeTop(x, y, r, color, colorDark) {
+      return { x, y, vx:0, vy:0, r, spin:0, color, colorDark, mass: r*r };
+    }
+
+    function spawnRound() {
+      phase = "aim"; dragStart = null; dragEnd = null;
+      player = makeTop(RING_CX, RING_CY + 100, 22, COL.mint, COL.mintDark);
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 40 + Math.random() * 60;
+      enemy = makeTop(RING_CX + Math.cos(angle)*dist, RING_CY + Math.sin(angle)*dist - 40, 20+Math.random()*6, COL.enemy, COL.enemyDark);
+      enemy.spin = 8 + Math.random() * 4;
+      enemy.vx = (Math.random()-0.5) * 30;
+      enemy.vy = (Math.random()-0.5) * 30;
+    }
+
+    function startGame() {
+      mode = "running"; elapsed = 0; lastRunTime = 0;
+      wins = 0; losses = 0; particles = [];
+      hostFailedReported = false; hostClearedReported = false;
+      window.relayStageResult.status = "running";
+      shakeTimer = 0; resultTimer = 0;
+      spawnRound();
+    }
+    function failGame(reason) { mode = "failed"; lastRunTime = elapsed; window.relayStageResult.status = "failed"; reportFailed(reason); }
+    function clearGame() { mode = "cleared"; lastRunTime = elapsed; window.relayStageResult.status = "cleared"; reportCleared(); }
+
+    function spawnParticles(x, y, color, count) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.random()*Math.PI*2, spd = 60+Math.random()*100;
+        particles.push({ x, y, vx:Math.cos(a)*spd, vy:Math.sin(a)*spd, life:1, decay:1.5+Math.random(), size:2+Math.random()*3, color });
+      }
+    }
+
+    function getCanvasPos(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x:(e.clientX-r.left)/r.width*W, y:(e.clientY-r.top)/r.height*H };
+    }
+
+    canvas.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      if (mode !== "running") { startGame(); return; }
+      if (phase === "aim") {
+        dragStart = getCanvasPos(e); dragEnd = dragStart;
+      } else if (phase === "result") {
+        spawnRound();
+      }
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      e.preventDefault();
+      if (phase === "aim" && dragStart) dragEnd = getCanvasPos(e);
+    });
+    canvas.addEventListener("pointerup", (e) => {
+      e.preventDefault();
+      if (phase === "aim" && dragStart && dragEnd) {
+        const dx = dragStart.x - dragEnd.x, dy = dragStart.y - dragEnd.y;
+        const power = Math.min(Math.hypot(dx, dy), 200);
+        if (power > 15) {
+          const angle = Math.atan2(dy, dx);
+          player.vx = Math.cos(angle) * power * 2.5;
+          player.vy = Math.sin(angle) * power * 2.5;
+          player.spin = power * 0.08;
+          phase = "spinning";
+        }
+        dragStart = null; dragEnd = null;
+      }
+    });
+    canvas.addEventListener("pointercancel", () => { dragStart = null; dragEnd = null; });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); if (mode !== "running") startGame(); else if (phase === "result") spawnRound(); }
+      if (mode === "running" && phase === "aim" && e.key === " ") {
+        e.preventDefault();
+        player.vx = 0; player.vy = -350; player.spin = 12;
+        phase = "spinning";
+      }
+    });
+
+    function update(dt) {
+      if (mode !== "running") return;
+      elapsed += dt;
+      if (elapsed >= TIME_LIMIT) { failGame("시간 초과"); return; }
+      if (shakeTimer > 0) shakeTimer = Math.max(0, shakeTimer - dt);
+      if (resultTimer > 0) { resultTimer = Math.max(0, resultTimer - dt); if (resultTimer <= 0 && phase === "result") spawnRound(); }
+
+      if (phase === "spinning") {
+        // Friction
+        const friction = 0.98;
+        player.vx *= friction; player.vy *= friction;
+        enemy.vx *= friction; enemy.vy *= friction;
+        player.spin *= 0.997; enemy.spin *= 0.997;
+
+        player.x += player.vx * dt; player.y += player.vy * dt;
+        enemy.x += enemy.vx * dt; enemy.y += enemy.vy * dt;
+
+        // Collision between tops
+        const dx = enemy.x - player.x, dy = enemy.y - player.y;
+        const dist = Math.hypot(dx, dy);
+        const minDist = player.r + enemy.r;
+        if (dist < minDist && dist > 0) {
+          const nx = dx/dist, ny = dy/dist;
+          const overlap = minDist - dist;
+          player.x -= nx * overlap * 0.5; player.y -= ny * overlap * 0.5;
+          enemy.x += nx * overlap * 0.5; enemy.y += ny * overlap * 0.5;
+
+          // Elastic collision
+          const relVx = player.vx - enemy.vx, relVy = player.vy - enemy.vy;
+          const dot = relVx * nx + relVy * ny;
+          if (dot > 0) {
+            const totalMass = player.mass + enemy.mass;
+            const pFactor = 2 * enemy.mass / totalMass;
+            const eFactor = 2 * player.mass / totalMass;
+            player.vx -= pFactor * dot * nx; player.vy -= pFactor * dot * ny;
+            enemy.vx += eFactor * dot * nx; enemy.vy += eFactor * dot * ny;
+            spawnParticles((player.x+enemy.x)/2, (player.y+enemy.y)/2, COL.gold, 8);
+            shakeTimer = 0.15; shakeIntensity = 4;
+          }
+        }
+
+        // Check ring bounds
+        const pDist = Math.hypot(player.x - RING_CX, player.y - RING_CY);
+        const eDist = Math.hypot(enemy.x - RING_CX, enemy.y - RING_CY);
+
+        if (eDist > RING_R - enemy.r) {
+          // Enemy out!
+          wins++;
+          spawnParticles(enemy.x, enemy.y, COL.gold, 15);
+          phase = "result"; resultTimer = 1.0;
+          if (wins >= TARGET_WINS) setTimeout(() => clearGame(), 600);
+        } else if (pDist > RING_R - player.r) {
+          // Player out!
+          losses++;
+          shakeTimer = 0.3; shakeIntensity = 8;
+          spawnParticles(player.x, player.y, COL.fail, 10);
+          phase = "result"; resultTimer = 1.0;
+          if (losses >= MAX_LOSSES) setTimeout(() => failGame("탈락 3회"), 400);
+        }
+
+        // Stop if both slow
+        if (Math.hypot(player.vx, player.vy) < 5 && Math.hypot(enemy.vx, enemy.vy) < 5 && phase === "spinning") {
+          // Draw - restart
+          phase = "result"; resultTimer = 0.8;
+        }
+      }
+
+      for (const p of particles) { p.x += p.vx*dt; p.y += p.vy*dt; p.life -= p.decay*dt; }
+      particles = particles.filter(p => p.life > 0);
+    }
+
+    function drawRR(x,y,w,h,r) { ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r); ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath(); }
+    function drawCard(title, lines, accent) {
+      ctx.fillStyle="rgba(237,232,244,0.5)"; ctx.fillRect(0,0,W,H);
+      const cw=320, ch=44+lines.length*28+44, cx=(W-cw)/2, cy=(H-ch)/2;
+      drawRR(cx,cy,cw,ch,10); ctx.fillStyle=COL.cardBg; ctx.fill();
+      ctx.fillStyle=accent; ctx.fillRect(cx+20,cy+8,cw-40,3);
+      ctx.textAlign="center"; ctx.fillStyle=COL.text; ctx.font="bold 24px 'Trebuchet MS',sans-serif";
+      ctx.fillText(title,W/2,cy+38);
+      ctx.font="400 13px 'Trebuchet MS',sans-serif"; ctx.fillStyle=COL.textLight;
+      lines.forEach((l,i) => ctx.fillText(l,W/2,cy+64+i*28));
+      ctx.fillStyle="#aaa"; ctx.font="400 12px 'Trebuchet MS',sans-serif";
+      ctx.fillText("TAP 또는 ENTER",W/2,cy+ch-16); ctx.textAlign="left";
+    }
+
+    function drawTop(top, spinOffset) {
+      ctx.save(); ctx.translate(top.x, top.y); ctx.rotate(spinOffset);
+      // Body
+      ctx.beginPath(); ctx.arc(0, 0, top.r, 0, Math.PI*2);
+      ctx.fillStyle = top.color; ctx.fill(); ctx.strokeStyle = top.colorDark; ctx.lineWidth = 2; ctx.stroke();
+      // Spiral pattern
+      for (let i = 0; i < 3; i++) {
+        const a = (Math.PI*2/3) * i;
+        ctx.beginPath(); ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(a)*top.r*0.8, Math.sin(a)*top.r*0.8);
+        ctx.strokeStyle = top.colorDark; ctx.lineWidth = 2; ctx.stroke();
+      }
+      // Center dot
+      ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI*2);
+      ctx.fillStyle = top.colorDark; ctx.fill();
+      // Tip (shadow)
+      ctx.beginPath(); ctx.arc(0, top.r*0.3, 3, 0, Math.PI*2);
+      ctx.fillStyle = "rgba(0,0,0,0.15)"; ctx.fill();
+      ctx.restore();
+    }
+
+    function drawHUD() {
+      const tl = Math.max(0, TIME_LIMIT - elapsed);
+      ctx.fillStyle=COL.text; ctx.font="600 16px 'Trebuchet MS',sans-serif"; ctx.textAlign="left";
+      ctx.fillText(`승리 ${wins} / ${TARGET_WINS}`, 20, 30);
+      ctx.textAlign="right"; ctx.fillStyle=tl<10?COL.fail:COL.text;
+      ctx.fillText(Math.ceil(tl)+"s", W-20, 30);
+      ctx.fillStyle="#d8d0e0"; ctx.fillRect(W-180,38,160,4);
+      ctx.fillStyle=tl<10?COL.fail:COL.lavender; ctx.fillRect(W-180,38,160*(tl/TIME_LIMIT),4);
+      ctx.textAlign="left";
+      for (let i=0;i<MAX_LOSSES;i++) { ctx.fillStyle=i<losses?COL.fail:"#d8d0e0"; ctx.font="16px sans-serif"; ctx.fillText("\u2716",20+i*22,58); }
+    }
+
+    let spinAnim = 0;
+    function render() {
+      spinAnim += 0.15;
+      ctx.save();
+      if (shakeTimer>0&&!reducedMotion) { const s=shakeIntensity*(shakeTimer/0.3); ctx.translate((Math.random()-0.5)*s,(Math.random()-0.5)*s); }
+      ctx.fillStyle=COL.bg; ctx.fillRect(-10,-10,W+20,H+20);
+
+      // Ring
+      ctx.beginPath(); ctx.arc(RING_CX, RING_CY, RING_R, 0, Math.PI*2);
+      ctx.fillStyle=COL.ring; ctx.fill(); ctx.strokeStyle=COL.ringBorder; ctx.lineWidth=4; ctx.stroke();
+      // Ring inner decorations
+      ctx.beginPath(); ctx.arc(RING_CX, RING_CY, RING_R-15, 0, Math.PI*2);
+      ctx.strokeStyle=COL.ringBorder+"60"; ctx.lineWidth=1; ctx.stroke();
+
+      if (mode==="menu") {
+        drawTop(makeTop(RING_CX-40, RING_CY, 22, COL.mint, COL.mintDark), spinAnim);
+        drawTop(makeTop(RING_CX+40, RING_CY, 24, COL.enemy, COL.enemyDark), -spinAnim);
+        drawCard("팽이 대결", ["화면 터치 드래그로 팽이 발사","클리어: 상대 팽이 5개를 밀어내면 클리어","실패: 시간 초과 또는 탈락 3회 시 실패"], COL.lavender);
+        ctx.restore(); return;
+      }
+      if (mode==="running") {
+        if (player) drawTop(player, spinAnim * (player.spin/10));
+        if (enemy) drawTop(enemy, -spinAnim * (enemy.spin/10));
+
+        // Drag line
+        if (dragStart && dragEnd && phase === "aim") {
+          const dx = dragStart.x - dragEnd.x, dy = dragStart.y - dragEnd.y;
+          const len = Math.min(Math.hypot(dx,dy), 200);
+          const angle = Math.atan2(dy, dx);
+          ctx.beginPath(); ctx.moveTo(player.x, player.y);
+          ctx.lineTo(player.x + Math.cos(angle)*len*0.5, player.y + Math.sin(angle)*len*0.5);
+          ctx.strokeStyle=COL.lavender; ctx.lineWidth=3; ctx.setLineDash([6,4]); ctx.stroke(); ctx.setLineDash([]);
+          // Arrow head
+          const ax = player.x + Math.cos(angle)*len*0.5, ay = player.y + Math.sin(angle)*len*0.5;
+          ctx.beginPath(); ctx.arc(ax, ay, 5, 0, Math.PI*2); ctx.fillStyle=COL.lavender; ctx.fill();
+        }
+
+        // Phase hint
+        if (phase === "aim") {
+          ctx.textAlign="center"; ctx.fillStyle=COL.textLight; ctx.font="400 12px 'Trebuchet MS',sans-serif";
+          ctx.fillText("화면 터치 드래그로 팽이 발사 방향 조절", W/2, H-12);
+        }
+
+        for (const p of particles) { ctx.globalAlpha=p.life; ctx.fillStyle=p.color; ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill(); }
+        ctx.globalAlpha=1;
+        drawHUD(); ctx.restore(); return;
+      }
+      if (mode==="failed") {
+        drawCard("실패", [losses>=MAX_LOSSES?"탈락 3회 초과":"시간 초과",`승리: ${wins}회 · 시간: ${lastRunTime.toFixed(1)}초`], COL.fail);
+        ctx.restore(); return;
+      }
+      if (mode==="cleared") {
+        for (let i=0;i<5;i++) { const t=makeTop(RING_CX-120+i*60,RING_CY,16+i*2,COL.mint,COL.mintDark); drawTop(t,spinAnim+i); }
+        drawCard("승리!", [`상대 ${TARGET_WINS}개 격파`,`시간: ${lastRunTime.toFixed(1)}초`], COL.clear);
+        ctx.restore(); return;
+      }
+      ctx.restore();
+    }
+
+    function frame(ts) { const dt=lastTs?Math.min((ts-lastTs)/1000,MAX_DT):FIXED_DT; lastTs=ts; update(dt); render(); animFrame=requestAnimationFrame(frame); }
+    function renderGameToText() { return JSON.stringify({mode,elapsed:Math.round(elapsed*10)/10,wins,losses,phase,playerPos:player?{x:Math.round(player.x),y:Math.round(player.y)}:null,enemyPos:enemy?{x:Math.round(enemy.x),y:Math.round(enemy.y)}:null,timeLeft:Math.max(0,Math.round((TIME_LIMIT-elapsed)*10)/10),result:window.relayStageResult.status}); }
+
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = (ms=16.67) => { const steps=Math.max(1,Math.round(ms/(FIXED_DT*1000))); for(let i=0;i<steps;i++) update(FIXED_DT); render(); return renderGameToText(); };
+    window.relayStageMeta = { id:"spin-clash", title:"팽이 대결", creator:"jungcollin", genre:"Spin battle", clearCondition:"상대 팽이 5개를 밀어내면 클리어" };
+    window.relayStageResult = { status:"running" };
+    window.relayStageDebug = { forceClear() { startGame(); clearGame(); render(); }, forceFail() { startGame(); failGame("debug_force_fail"); render(); } };
+
+    canvas.addEventListener("click", () => canvas.focus());
+    window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    reportReady(); render(); canvas.focus(); animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

@@ -1069,5 +1069,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "풍선 동물 5개 완성 시 클리어",
     thumbnail: "./balloon-twist/thumbnail.png",
     path: "./balloon-twist/index.html",
+  },
+  {
+    id: "spin-clash",
+    title: "팽이 대결",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Spin battle",
+    clearCondition: "상대 팽이 5개를 밀어내면 클리어",
+    thumbnail: "./spin-clash/thumbnail.png",
+    path: "./spin-clash/index.html",
   }
 ];
