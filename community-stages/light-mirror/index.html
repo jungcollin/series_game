@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>빛의 거울</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #fdf6e3; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(200, 170, 100, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 60, 20, 0.92);
+        color: #fdf6e3; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #fdf6e3; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(200, 150, 50, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">빛의 거울. 거울을 탭(터치)하여 45도씩 회전시켜 빛을 출구까지 반사시키세요. 모바일에서는 화면 터치로 거울을 탭합니다. 5개 퍼즐을 40초 안에 풀면 클리어.</p>
+    <canvas id="game" width="960" height="540" aria-label="빛의 거울" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "light-mirror",
+        title: "빛의 거울",
+        description: "거울을 탭해 회전시켜 빛을 반사시키세요",
+        creator: "jungcollin",
+        genre: "Reflection puzzle",
+        clearCondition: "퍼즐 5개를 풀면 클리어",
+        failCondition: "40초 안에 미완성 시 실패",
+        controls: "거울을 탭(터치)하여 45도 회전",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#fdf6e3", bgDark: "#f0e6cc", grid: "#e8d9b8",
+        beam: "#d4920a", beamGlow: "rgba(212, 146, 10, 0.3)",
+        mirror: "#5c4a2e", mirrorFace: "#c8a84e",
+        source: "#d4920a", target: "#2e8b57",
+        targetGlow: "rgba(46, 139, 87, 0.3)",
+        text: "#3e2f14", accent: "#d4920a",
+        fail: "#b03030", wall: "#8b7355",
+      };
+
+      const DURATION = 40;
+      const TARGET_PUZZLES = 5;
+      const GRID_COLS = 7, GRID_ROWS = 5;
+      const CELL = 64;
+      const GRID_X = CX - (GRID_COLS * CELL) / 2;
+      const GRID_Y = CY - (GRID_ROWS * CELL) / 2 + 10;
+
+      let mode = "menu", elapsed = 0, puzzlesSolved = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, clearAnim = 0, solveFlash = 0, puzzleCooldown = 0;
+      let beamProgress = 0, beamPath = [], beamHitsTarget = false;
+      let grid = [], mirrors = [];
+      let source = { col: 0, row: 0, dir: "right" };
+      let target = { col: 0, row: 0 };
+      let particles = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      const DIRS = {
+        right: { dx: 1, dy: 0 }, left: { dx: -1, dy: 0 },
+        down: { dx: 0, dy: 1 }, up: { dx: 0, dy: -1 },
+      };
+
+      function reflectBeam(dir, angle) {
+        if (angle === 0) {
+          if (dir === "right") return "down";
+          if (dir === "left") return "up";
+          if (dir === "down") return "right";
+          if (dir === "up") return "left";
+        } else {
+          if (dir === "right") return "up";
+          if (dir === "left") return "down";
+          if (dir === "down") return "left";
+          if (dir === "up") return "right";
+        }
+        return dir;
+      }
+
+      function traceBeam() {
+        beamPath = [];
+        let col = source.col, row = source.row, dir = source.dir;
+        const d = DIRS[dir];
+        col += d.dx; row += d.dy;
+        beamPath.push({ col: source.col, row: source.row });
+        let steps = 0;
+        beamHitsTarget = false;
+        while (steps < 50) {
+          if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) break;
+          if (grid[row * GRID_COLS + col] === "wall") break;
+          beamPath.push({ col, row });
+          if (col === target.col && row === target.row) { beamHitsTarget = true; break; }
+          const mirror = mirrors.find(m => m.col === col && m.row === row);
+          if (mirror) dir = reflectBeam(dir, mirror.angle);
+          const nd = DIRS[dir];
+          col += nd.dx; row += nd.dy;
+          steps++;
+        }
+      }
+
+      function generatePuzzle(difficulty) {
+        grid = new Array(GRID_COLS * GRID_ROWS).fill(null);
+        mirrors = [];
+        const sourceEdge = difficulty % 2 === 0 ? "left" : "top";
+        if (sourceEdge === "left") {
+          source = { col: 0, row: 1 + Math.floor(Math.random() * (GRID_ROWS - 2)), dir: "right" };
+        } else {
+          source = { col: 1 + Math.floor(Math.random() * (GRID_COLS - 2)), row: 0, dir: "down" };
+        }
+        const path = [];
+        let col = source.col + DIRS[source.dir].dx;
+        let row = source.row + DIRS[source.dir].dy;
+        let dir = source.dir;
+        const numTurns = 2 + Math.min(difficulty, 3);
+        for (let i = 0; i < numTurns; i++) {
+          const walkDist = 1 + Math.floor(Math.random() * 2);
+          for (let j = 0; j < walkDist; j++) {
+            if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) break;
+            path.push({ col, row });
+            col += DIRS[dir].dx; row += DIRS[dir].dy;
+          }
+          col -= DIRS[dir].dx; row -= DIRS[dir].dy;
+          if (col < 1 || col >= GRID_COLS - 1 || row < 1 || row >= GRID_ROWS - 1) break;
+          let newDir;
+          if (dir === "right" || dir === "left") newDir = Math.random() < 0.5 ? "down" : "up";
+          else newDir = Math.random() < 0.5 ? "right" : "left";
+          let correctAngle;
+          if ((dir === "right" && newDir === "down") || (dir === "up" && newDir === "left")) correctAngle = 0;
+          else if ((dir === "right" && newDir === "up") || (dir === "down" && newDir === "left")) correctAngle = 1;
+          else if ((dir === "left" && newDir === "down") || (dir === "up" && newDir === "right")) correctAngle = 1;
+          else correctAngle = 0;
+          const wrongAngle = Math.random() < 0.6 ? (1 - correctAngle) : correctAngle;
+          mirrors.push({ col, row, angle: wrongAngle, correctAngle });
+          dir = newDir;
+          col += DIRS[dir].dx; row += DIRS[dir].dy;
+        }
+        const extraWalk = 1 + Math.floor(Math.random() * 2);
+        for (let j = 0; j < extraWalk; j++) {
+          if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) break;
+          path.push({ col, row });
+          col += DIRS[dir].dx; row += DIRS[dir].dy;
+        }
+        col -= DIRS[dir].dx; row -= DIRS[dir].dy;
+        target = { col: clamp(col, 0, GRID_COLS - 1), row: clamp(row, 0, GRID_ROWS - 1) };
+        if (target.col === source.col && target.row === source.row) { target.col = GRID_COLS - 1; target.row = GRID_ROWS - 1; }
+        if (difficulty >= 2) {
+          for (let i = 0; i < difficulty; i++) {
+            const wc = Math.floor(Math.random() * GRID_COLS), wr = Math.floor(Math.random() * GRID_ROWS);
+            if ((wc === source.col && wr === source.row) || (wc === target.col && wr === target.row)) continue;
+            if (mirrors.some(m => m.col === wc && m.row === wr)) continue;
+            if (path.some(p => p.col === wc && p.row === wr)) continue;
+            grid[wr * GRID_COLS + wc] = "wall";
+          }
+        }
+        traceBeam();
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), spd = rand(60, 180);
+          particles.push({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, life: 1, color, size: rand(2, 5) });
+        }
+      }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function reset() {
+        elapsed = 0; puzzlesSolved = 0; shake = 0; clearAnim = 0; solveFlash = 0; puzzleCooldown = 0;
+        beamProgress = 0; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generatePuzzle(0);
+      }
+
+      function cellCenter(col, row) {
+        return { x: GRID_X + col * CELL + CELL / 2, y: GRID_Y + row * CELL + CELL / 2 };
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        beamProgress = clamp(beamProgress + dt * 8, 0, beamPath.length);
+        if (puzzleCooldown > 0) {
+          puzzleCooldown -= dt;
+          if (puzzleCooldown <= 0) { generatePuzzle(puzzlesSolved); beamProgress = 0; }
+        }
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 0.92; p.vy *= 0.92;
+          p.life -= dt * 2.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        solveFlash *= 0.92;
+        if (beamHitsTarget && beamProgress >= beamPath.length - 0.5 && puzzleCooldown <= 0) {
+          puzzlesSolved++; solveFlash = 1;
+          const tc = cellCenter(target.col, target.row);
+          spawnParticles(tc.x, tc.y, reducedMotion ? 5 : 15, COL.target);
+          if (puzzlesSolved >= TARGET_PUZZLES) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared"; reportCleared();
+          } else { puzzleCooldown = 0.4; }
+        }
+        if (elapsed >= DURATION && puzzlesSolved < TARGET_PUZZLES) {
+          mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("시간 초과");
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+        if (mode === "running" || mode === "clear" || mode === "failed") {
+          drawGrid(); drawWalls(); drawBeam(); drawMirrors(); drawSource(); drawTarget(); drawParticles();
+          if (mode === "running") drawHUD();
+        }
+        if (solveFlash > 0.01) { ctx.fillStyle = `rgba(46, 139, 87, ${solveFlash * 0.15})`; ctx.fillRect(0, 0, W, H); }
+        ctx.restore();
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawGrid() {
+        ctx.strokeStyle = COL.grid; ctx.lineWidth = 1;
+        for (let r = 0; r <= GRID_ROWS; r++) { ctx.beginPath(); ctx.moveTo(GRID_X, GRID_Y + r * CELL); ctx.lineTo(GRID_X + GRID_COLS * CELL, GRID_Y + r * CELL); ctx.stroke(); }
+        for (let c = 0; c <= GRID_COLS; c++) { ctx.beginPath(); ctx.moveTo(GRID_X + c * CELL, GRID_Y); ctx.lineTo(GRID_X + c * CELL, GRID_Y + GRID_ROWS * CELL); ctx.stroke(); }
+      }
+
+      function drawWalls() {
+        for (let r = 0; r < GRID_ROWS; r++) for (let c = 0; c < GRID_COLS; c++) {
+          if (grid[r * GRID_COLS + c] === "wall") {
+            const p = cellCenter(c, r); const s = CELL - 8;
+            ctx.fillStyle = COL.wall; ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+          }
+        }
+      }
+
+      function drawBeam() {
+        if (beamPath.length < 2) return;
+        const segments = Math.min(Math.floor(beamProgress), beamPath.length - 1);
+        const p0 = cellCenter(beamPath[0].col, beamPath[0].row);
+        ctx.lineWidth = 12; ctx.strokeStyle = COL.beamGlow; ctx.lineCap = "round";
+        ctx.beginPath(); ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i <= segments; i++) { const p = cellCenter(beamPath[i].col, beamPath[i].row); ctx.lineTo(p.x, p.y); }
+        ctx.stroke();
+        ctx.lineWidth = 4; ctx.strokeStyle = COL.beam;
+        ctx.beginPath(); ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i <= segments; i++) { const p = cellCenter(beamPath[i].col, beamPath[i].row); ctx.lineTo(p.x, p.y); }
+        ctx.stroke();
+        if (segments > 0) {
+          const tip = cellCenter(beamPath[segments].col, beamPath[segments].row);
+          ctx.beginPath(); ctx.arc(tip.x, tip.y, 8 + Math.sin(elapsed * 6) * 2, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(212, 146, 10, 0.4)"; ctx.fill();
+        }
+      }
+
+      function drawMirrors() {
+        for (const m of mirrors) {
+          const p = cellCenter(m.col, m.row); const len = CELL * 0.35;
+          ctx.save(); ctx.translate(p.x, p.y);
+          ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.fillStyle = COL.mirror; ctx.fill();
+          ctx.lineWidth = 5; ctx.strokeStyle = COL.mirrorFace; ctx.lineCap = "round"; ctx.beginPath();
+          if (m.angle === 0) { ctx.moveTo(-len, -len); ctx.lineTo(len, len); }
+          else { ctx.moveTo(len, -len); ctx.lineTo(-len, len); }
+          ctx.stroke();
+          ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255, 255, 220, 0.5)"; ctx.beginPath();
+          if (m.angle === 0) { ctx.moveTo(-len + 4, -len + 4); ctx.lineTo(-2, -2); }
+          else { ctx.moveTo(len - 4, -len + 4); ctx.lineTo(2, -2); }
+          ctx.stroke(); ctx.restore();
+        }
+      }
+
+      function drawSource() {
+        const p = cellCenter(source.col, source.row);
+        ctx.beginPath(); ctx.arc(p.x, p.y, 20 + Math.sin(elapsed * 4) * 3, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(212, 146, 10, 0.2)"; ctx.fill();
+        ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2); ctx.fillStyle = COL.source; ctx.fill();
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2 + elapsed * 1.5;
+          ctx.beginPath(); ctx.moveTo(p.x + Math.cos(a) * 15, p.y + Math.sin(a) * 15);
+          ctx.lineTo(p.x + Math.cos(a) * 20, p.y + Math.sin(a) * 20);
+          ctx.strokeStyle = COL.source; ctx.lineWidth = 2; ctx.stroke();
+        }
+      }
+
+      function drawTarget() {
+        const p = cellCenter(target.col, target.row);
+        ctx.beginPath(); ctx.arc(p.x, p.y, 22 + Math.sin(elapsed * 3) * 3, 0, Math.PI * 2);
+        ctx.fillStyle = COL.targetGlow; ctx.fill();
+        ctx.save(); ctx.translate(p.x, p.y);
+        ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(12, -4); ctx.lineTo(8, 14); ctx.lineTo(-8, 14); ctx.lineTo(-12, -4); ctx.closePath();
+        ctx.fillStyle = COL.target; ctx.fill();
+        ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(6, -4); ctx.lineTo(0, 2); ctx.lineTo(-6, -4); ctx.closePath();
+        ctx.fillStyle = "rgba(255, 255, 255, 0.3)"; ctx.fill(); ctx.restore();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = p.life; ctx.fill(); ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "600 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`퍼즐 ${puzzlesSolved} / ${TARGET_PUZZLES}`, 24, 16);
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.textAlign = "right"; ctx.fillText(`${Math.ceil(timeLeft)}초`, W - 24, 16);
+        const barW = W - 48; ctx.fillStyle = COL.grid; ctx.fillRect(24, 40, barW, 3);
+        const ratio = clamp(1 - elapsed / DURATION, 0, 1);
+        ctx.fillStyle = ratio < 0.25 ? COL.fail : COL.accent; ctx.fillRect(24, 40, barW * ratio, 3);
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r); ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h); ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40), cardH = 42 + lines.length * 28 + 44;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(253, 246, 227, 0.95)"; ctx.beginPath(); roundRect(cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 14, cardY, cardW - 28, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 22px 'Segoe UI', sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 16);
+        ctx.font = "400 14px 'Segoe UI', sans-serif"; ctx.fillStyle = "rgba(62, 47, 20, 0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 48 + i * 28);
+        ctx.fillStyle = "rgba(62, 47, 20, 0.4)"; ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("TAP 또는 ENTER", CX, cardY + cardH - 24);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(253, 246, 227, 0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("빛의 거울", ["거울을 탭해 빛을 반사시키세요", "", "조작: 거울 탭(터치)으로 45도 회전", "클리어: 퍼즐 5개 완성", "실패: 40초 초과"], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(253, 246, 227, ${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, `퍼즐 ${puzzlesSolved}개 해결`], COL.target);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80, 40, 20, 0.3)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["시간이 다했습니다", `퍼즐 ${puzzlesSolved} / ${TARGET_PUZZLES} 해결`], COL.fail);
+      }
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() { if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; } }
+
+      function handleTap(cx, cy) {
+        if (mode !== "running" || puzzleCooldown > 0) return;
+        for (const m of mirrors) {
+          const p = cellCenter(m.col, m.row);
+          const dx = cx - p.x, dy = cy - p.y;
+          if (dx * dx + dy * dy < (CELL / 2) * (CELL / 2)) {
+            m.angle = 1 - m.angle; beamProgress = 0; traceBeam();
+            spawnParticles(p.x, p.y, reducedMotion ? 3 : 6, COL.mirrorFace);
+            return;
+          }
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY); handleTap(p.x, p.y);
+      });
+      canvas.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); } });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT); lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), puzzlesSolved, beamHitsTarget, result: window.relayStageResult.status, mirrors: mirrors.length });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT); draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; puzzlesSolved = TARGET_PUZZLES; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; elapsed = DURATION; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      generatePuzzle(0); reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

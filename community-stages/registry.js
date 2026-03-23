@@ -666,6 +666,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./summit-climber/index.html",
   },
   {
+    id: "light-mirror",
+    title: "빛의 거울",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reflection puzzle",
+    clearCondition: "퍼즐 5개를 풀면 클리어",
+    thumbnail: "./light-mirror/thumbnail.png",
+    path: "./light-mirror/index.html",
+  },
+  {
     id: "mochi-pound",
     title: "떡방아",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
