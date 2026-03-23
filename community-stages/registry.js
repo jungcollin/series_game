@@ -799,5 +799,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 지형 5개를 완성하면 클리어",
     thumbnail: "./canyon-carver/thumbnail.png",
     path: "./canyon-carver/index.html",
+  },
+  {
+    id: "bowling-puzzle",
+    title: "볼링 퍼즐",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Puzzle bowling",
+    clearCondition: "핀 30개를 쓰러뜨리면 클리어",
+    thumbnail: "./bowling-puzzle/thumbnail.png",
+    path: "./bowling-puzzle/index.html",
   }
 ];
