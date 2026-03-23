@@ -799,5 +799,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 지형 5개를 완성하면 클리어",
     thumbnail: "./canyon-carver/thumbnail.png",
     path: "./canyon-carver/index.html",
+  },
+  {
+    id: "paper-plane",
+    title: "종이비행기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Flick launch",
+    clearCondition: "링 8개를 통과하면 클리어",
+    thumbnail: "./paper-plane/thumbnail.png",
+    path: "./paper-plane/index.html",
   }
 ];
