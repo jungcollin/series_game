@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>폭탄 해제</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E8D5B5; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(125, 139, 94, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(90, 80, 60, 0.92);
+        color: #f4ece0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8D5B5; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(125, 139, 94, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">폭탄 해제. 올바른 와이어를 골라 폭탄을 해제하세요. 화면 터치 또는 마우스 클릭으로 와이어를 탭하여 절단합니다. 모바일에서는 화면 터치만으로 플레이할 수 있습니다. 폭탄 5개를 해제하면 클리어. 틀린 와이어를 3번 자르면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="폭탄 해제" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "bomb-defusal",
+        title: "폭탄 해제",
+        description: "올바른 와이어를 골라 폭탄을 해제하세요",
+        creator: "jungcollin",
+        genre: "Wire puzzle",
+        clearCondition: "폭탄 5개를 해제하면 클리어",
+        failCondition: "틀린 와이어를 3번 자르면 실패",
+        controls: "와이어를 탭하여 절단",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#E8D5B5", bgDark: "#D4C4A0", olive: "#7D8B5E",
+        coral: "#E07A5F", sand: "#F0E6D2",
+        wire1: "#E07A5F", wire2: "#7D8B5E", wire3: "#D4A04A",
+        wire4: "#6B8CAE", wire5: "#9B6B8C",
+        bombBody: "#5A5A52", bombLight: "#7A7A6E",
+        text: "#3A3428", textLight: "#6A6050", hud: "#4A4238",
+        danger: "#C04040", success: "#5A8A4A",
+      };
+
+      const WIRE_COLORS = [COL.wire1, COL.wire2, COL.wire3, COL.wire4, COL.wire5];
+      const TOTAL_BOMBS = 5;
+      const MAX_MISTAKES = 3;
+      const BOMB_TIME = 8;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      let bombsDefused = 0;
+      let mistakes = 0;
+      let bombTimer = 0;
+      let shake = 0;
+      let flashAlpha = 0;
+
+      let wires = [];
+      let correctOrder = [];
+      let currentStep = 0;
+      let hintTimer = 0;
+      let hintPhase = "showing";
+      let particles = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function randInt(lo, hi) { return Math.floor(rand(lo, hi + 1)); }
+      function shuffle(arr) {
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = randInt(0, i);
+          [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
+      }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function generateBomb() {
+        const wireCount = Math.min(3 + bombsDefused, 5);
+        const indices = shuffle([0, 1, 2, 3, 4]).slice(0, wireCount);
+        const spacing = 240 / (wireCount);
+        wires = indices.map((colorIdx, i) => {
+          const startX = CX - 120 + spacing * (i + 0.5);
+          const endX = startX + rand(-25, 25);
+          return {
+            colorIdx, color: WIRE_COLORS[colorIdx],
+            startX, startY: 160, endX, endY: 420,
+            cp1x: startX + rand(-35, 35), cp1y: rand(220, 280),
+            cp2x: endX + rand(-35, 35), cp2y: rand(310, 370),
+            cut: false, hovered: false,
+          };
+        });
+        const cutCount = Math.min(2 + Math.floor(bombsDefused / 2), wireCount - 1);
+        const shuffledIdx = shuffle([...Array(wireCount).keys()]);
+        correctOrder = shuffledIdx.slice(0, cutCount);
+        currentStep = 0;
+        bombTimer = BOMB_TIME;
+        hintTimer = 2.2;
+        hintPhase = "showing";
+      }
+
+      function startGame() {
+        mode = "running";
+        elapsed = 0;
+        bombsDefused = 0;
+        mistakes = 0;
+        shake = 0;
+        flashAlpha = 0;
+        particles = [];
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateBomb();
+      }
+
+      function failGame(reason) {
+        mode = "failed";
+        window.relayStageResult.status = "failed";
+        reportFailed(reason);
+      }
+
+      function clearGame() {
+        mode = "cleared";
+        window.relayStageResult.status = "cleared";
+        reportCleared();
+        for (let i = 0; i < 40; i++) {
+          spawnParticles(rand(100, 860), rand(100, 440), 1,
+            ["#FFD700", COL.olive, COL.coral, "#FFF"][randInt(0, 3)], [3, 8], [40, 140]);
+        }
+      }
+
+      let pendingNextBomb = false;
+      function nextBomb() {
+        bombsDefused++;
+        if (bombsDefused >= TOTAL_BOMBS) {
+          clearGame();
+        } else {
+          for (let i = 0; i < 15; i++)
+            spawnParticles(rand(300, 660), rand(200, 400), 1, COL.success, [3, 6], [50, 120]);
+          generateBomb();
+        }
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange, speedRange) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(speedRange[0], speedRange[1]);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - rand(20, 60),
+            life: 1, decay: rand(0.8, 1.5), color, size: rand(sizeRange[0], sizeRange[1]),
+          });
+        }
+      }
+
+      function bezierPoint(w, t) {
+        const mt = 1 - t, mt2 = mt * mt, mt3 = mt2 * mt;
+        const t2 = t * t, t3 = t2 * t;
+        return {
+          x: mt3 * w.startX + 3 * mt2 * t * w.cp1x + 3 * mt * t2 * w.cp2x + t3 * w.endX,
+          y: mt3 * w.startY + 3 * mt2 * t * w.cp1y + 3 * mt * t2 * w.cp2y + t3 * w.endY,
+        };
+      }
+
+      function pointOnWire(wire, px, py) {
+        if (wire.cut) return false;
+        for (let t = 0; t <= 1; t += 0.02) {
+          const p = bezierPoint(wire, t);
+          if (dist(p.x, p.y, px, py) < 20) return true;
+        }
+        return false;
+      }
+
+      function handleTap(cx, cy) {
+        if (mode !== "running") { startGame(); return; }
+        if (hintPhase === "showing") return;
+        for (let i = 0; i < wires.length; i++) {
+          if (pointOnWire(wires[i], cx, cy)) {
+            cutWire(i);
+            return;
+          }
+        }
+      }
+
+      function cutWire(wireIdx) {
+        const wire = wires[wireIdx];
+        if (wire.cut) return;
+        wire.cut = true;
+        const mid = bezierPoint(wire, 0.5);
+
+        if (wireIdx === correctOrder[currentStep]) {
+          currentStep++;
+          spawnParticles(mid.x, mid.y, 12, COL.coral, [2, 5], [60, 150]);
+          spawnParticles(mid.x, mid.y, 6, "#FFD700", [1, 3], [40, 100]);
+          if (currentStep >= correctOrder.length) {
+            pendingNextBomb = true;
+            setTimeout(() => { if (mode === "running") { pendingNextBomb = false; nextBomb(); } }, 500);
+          }
+        } else {
+          mistakes++;
+          shake = 0.4;
+          flashAlpha = 0.5;
+          spawnParticles(mid.x, mid.y, 8, "#888", [3, 6], [30, 80]);
+          if (mistakes >= MAX_MISTAKES) {
+            setTimeout(() => failGame("실수 3회"), 300);
+          }
+        }
+      }
+
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = W / rect.width, sy = H / rect.height;
+        const touch = e.touches ? e.touches[0] : e;
+        return { x: (touch.clientX - rect.left) * sx, y: (touch.clientY - rect.top) * sy };
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        const pos = getCanvasPos(e);
+        handleTap(pos.x, pos.y);
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (mode !== "running") return;
+        const pos = getCanvasPos(e);
+        wires.forEach(w => { w.hovered = !w.cut && pointOnWire(w, pos.x, pos.y); });
+      });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && mode !== "running") { e.preventDefault(); startGame(); }
+      });
+
+      function update(dt) {
+        if (mode === "running") {
+          elapsed += dt;
+          if (hintPhase === "showing") {
+            hintTimer -= dt;
+            if (hintTimer <= 0) hintPhase = "waiting";
+          }
+          if (hintPhase === "waiting" && !pendingNextBomb) {
+            bombTimer -= dt;
+            if (bombTimer <= 0) failGame("시간 초과");
+          }
+        }
+        if (shake > 0) shake = Math.max(0, shake - dt * 2);
+        if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt * 2);
+        particles = particles.filter(p => {
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * dt;
+          p.life -= p.decay * dt;
+          return p.life > 0;
+        });
+      }
+
+      function drawWire(wire) {
+        ctx.beginPath();
+        ctx.moveTo(wire.startX, wire.startY);
+        ctx.bezierCurveTo(wire.cp1x, wire.cp1y, wire.cp2x, wire.cp2y, wire.endX, wire.endY);
+        if (wire.cut) {
+          ctx.strokeStyle = "rgba(150,140,130,0.3)";
+          ctx.setLineDash([6, 8]);
+        } else {
+          ctx.strokeStyle = wire.color;
+          ctx.setLineDash([]);
+        }
+        ctx.lineWidth = wire.hovered && !wire.cut ? 9 : 6;
+        ctx.lineCap = "round";
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (wire.cut) {
+          const mid = bezierPoint(wire, 0.5);
+          ctx.beginPath();
+          ctx.moveTo(mid.x - 8, mid.y - 8);
+          ctx.lineTo(mid.x + 8, mid.y + 8);
+          ctx.moveTo(mid.x + 8, mid.y - 8);
+          ctx.lineTo(mid.x - 8, mid.y + 8);
+          ctx.strokeStyle = COL.danger;
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
+
+        if (!wire.cut) {
+          ctx.beginPath();
+          ctx.arc(wire.startX, wire.startY - 8, 9, 0, Math.PI * 2);
+          ctx.fillStyle = wire.color;
+          ctx.fill();
+          ctx.strokeStyle = "#FFF";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      function drawBomb() {
+        const bx = CX - 130, by = 115, bw = 260, bh = 340;
+        // Shadow
+        ctx.fillStyle = "rgba(60,50,40,0.15)";
+        ctx.beginPath();
+        ctx.roundRect(bx + 4, by + 4, bw, bh, 18);
+        ctx.fill();
+        // Body
+        ctx.fillStyle = COL.bombBody;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, 18);
+        ctx.fill();
+        // Inner panel
+        ctx.fillStyle = COL.bombLight;
+        ctx.beginPath();
+        ctx.roundRect(bx + 14, by + 14, bw - 28, bh - 28, 10);
+        ctx.fill();
+        // Screws
+        [{ x: bx + 18, y: by + 18 }, { x: bx + bw - 18, y: by + 18 },
+         { x: bx + 18, y: by + bh - 18 }, { x: bx + bw - 18, y: by + bh - 18 }].forEach(s => {
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, 5, 0, Math.PI * 2);
+          ctx.fillStyle = "#999";
+          ctx.fill();
+        });
+
+        if (hintPhase === "waiting") {
+          const timeLeft = Math.max(0, bombTimer);
+          const timerColor = timeLeft < 3 ? COL.danger : COL.text;
+          // Timer circle
+          ctx.beginPath();
+          ctx.arc(CX, by + 42, 22, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(0,0,0,0.2)";
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(CX, by + 42, 22, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (timeLeft / BOMB_TIME));
+          ctx.strokeStyle = timerColor;
+          ctx.lineWidth = 5;
+          ctx.stroke();
+          ctx.fillStyle = timerColor;
+          ctx.font = "bold 18px 'Trebuchet MS'";
+          ctx.textAlign = "center";
+          ctx.fillText(timeLeft.toFixed(1), CX, by + 48);
+          // Blink
+          if (timeLeft < 3 && Math.sin(elapsed * 10) > 0) {
+            ctx.fillStyle = "rgba(192,64,64,0.12)";
+            ctx.beginPath();
+            ctx.roundRect(bx, by, bw, bh, 18);
+            ctx.fill();
+          }
+        }
+      }
+
+      function drawHint() {
+        if (hintPhase !== "showing") return;
+        ctx.fillStyle = "rgba(0,0,0,0.45)";
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = COL.sand;
+        ctx.font = "bold 24px 'Trebuchet MS'";
+        ctx.textAlign = "center";
+        ctx.fillText("이 순서대로 자르세요!", CX, 75);
+
+        const progress = 1 - (hintTimer / 2.2);
+        const visibleCount = Math.floor(progress * (correctOrder.length + 1));
+        for (let i = 0; i < Math.min(visibleCount, correctOrder.length); i++) {
+          const wire = wires[correctOrder[i]];
+          const numX = CX - ((correctOrder.length - 1) * 50) / 2 + i * 50;
+          ctx.beginPath();
+          ctx.arc(numX, 110, 18, 0, Math.PI * 2);
+          ctx.fillStyle = wire.color;
+          ctx.fill();
+          ctx.strokeStyle = "#FFF";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.fillStyle = "#FFF";
+          ctx.font = "bold 18px 'Trebuchet MS'";
+          ctx.fillText((i + 1).toString(), numX, 116);
+        }
+
+        const remaining = Math.ceil(hintTimer);
+        ctx.fillStyle = COL.sand;
+        ctx.font = "bold 40px 'Trebuchet MS'";
+        ctx.fillText(remaining.toString(), CX, H - 50);
+        ctx.textAlign = "left";
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.hud;
+        ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.textAlign = "left";
+        ctx.fillText("해제 " + bombsDefused + "/" + TOTAL_BOMBS, 20, 32);
+        ctx.textAlign = "center";
+        ctx.fillText("폭탄 #" + (bombsDefused + 1), CX, 32);
+        ctx.textAlign = "right";
+        ctx.fillStyle = mistakes >= 2 ? COL.danger : COL.hud;
+        ctx.fillText("실수 " + mistakes + "/" + MAX_MISTAKES, W - 20, 32);
+        if (hintPhase === "waiting") {
+          ctx.textAlign = "center";
+          ctx.fillStyle = COL.textLight;
+          ctx.font = "16px 'Trebuchet MS'";
+          ctx.fillText(currentStep + "/" + correctOrder.length + " 절단", CX, H - 16);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function drawParticles() {
+        particles.forEach(p => {
+          ctx.globalAlpha = clamp(p.life, 0, 1);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function renderMenu() {
+        ctx.fillStyle = COL.bg;
+        ctx.fillRect(0, 0, W, H);
+        for (let i = 0; i < 5; i++) {
+          ctx.beginPath();
+          ctx.moveTo(150 + i * 170, 0);
+          ctx.bezierCurveTo(150 + i * 170 + 20, 180, 150 + i * 170 - 20, 360, 150 + i * 170 + 10, H);
+          ctx.strokeStyle = WIRE_COLORS[i] + "30";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
+        const cw = 340, ch = 300, cx = CX - cw / 2, cy = CY - ch / 2;
+        ctx.fillStyle = COL.sand;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = COL.olive; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = COL.coral;
+        ctx.font = "bold 34px 'Trebuchet MS'";
+        ctx.fillText("폭탄 해제", CX, cy + 48);
+        ctx.fillStyle = COL.text;
+        ctx.font = "17px 'Trebuchet MS'";
+        ctx.fillText("올바른 와이어를 골라 해제하세요", CX, cy + 82);
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("조작: 화면 터치로 와이어 절단", CX, cy + 116);
+        ctx.fillStyle = COL.success;
+        ctx.fillText("클리어: 폭탄 5개 해제", CX, cy + 148);
+        ctx.fillStyle = COL.danger;
+        ctx.fillText("실패: 실수 3회", CX, cy + 175);
+
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = "rgba(125,139,94," + pulse + ")";
+        ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.fillText("탭하여 시작", CX, cy + 240);
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        ctx.fillStyle = COL.bg;
+        ctx.fillRect(0, 0, W, H);
+        if (shake > 0) {
+          ctx.save();
+          ctx.translate(rand(-shake * 12, shake * 12), rand(-shake * 12, shake * 12));
+        }
+        // Table edge
+        ctx.fillStyle = COL.bgDark;
+        ctx.fillRect(0, H - 50, W, 50);
+        ctx.fillStyle = "rgba(90,80,60,0.3)";
+        ctx.fillRect(0, H - 52, W, 2);
+
+        drawBomb();
+        wires.forEach(w => drawWire(w));
+        drawHint();
+        drawHUD();
+        if (flashAlpha > 0) {
+          ctx.fillStyle = "rgba(192,64,64," + (flashAlpha * 0.3) + ")";
+          ctx.fillRect(0, 0, W, H);
+        }
+        drawParticles();
+        if (shake > 0) ctx.restore();
+      }
+
+      function renderResult(title, subtitle, color) {
+        ctx.fillStyle = COL.bg;
+        ctx.fillRect(0, 0, W, H);
+        drawParticles();
+        const cw = 340, ch = 220, cx = CX - cw / 2, cy = CY - ch / 2;
+        ctx.fillStyle = COL.sand;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = color; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = color;
+        ctx.font = "bold 34px 'Trebuchet MS'";
+        ctx.fillText(title, CX, cy + 50);
+        ctx.fillStyle = COL.text;
+        ctx.font = "17px 'Trebuchet MS'";
+        ctx.fillText(subtitle, CX, cy + 85);
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("해제 " + bombsDefused + "개 | 실수 " + mistakes + "회 | " + elapsed.toFixed(1) + "초", CX, cy + 120);
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = "rgba(125,139,94," + pulse + ")";
+        ctx.font = "bold 18px 'Trebuchet MS'";
+        ctx.fillText("탭하여 재시작", CX, cy + 185);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (mode === "menu") { renderMenu(); return; }
+        if (mode === "running") { renderRunning(); return; }
+        if (mode === "cleared") { renderResult("클리어!", "모든 폭탄을 해제했습니다!", COL.success); return; }
+        if (mode === "failed") { renderResult("실패", "폭탄이 폭발했습니다...", COL.danger); return; }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          bombsDefused, mistakes, bombTimer: +bombTimer.toFixed(1),
+          currentStep, totalSteps: correctOrder.length, wireCount: wires.length,
+        });
+      }
+
+      function frame(ts) {
+        const dt = lastTimestamp ? Math.min((ts - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = ts;
+        update(dt);
+        render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { startGame(); clearGame(); render(); },
+        forceFail() { startGame(); failGame("debug_force_fail"); render(); },
+      };
+
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+      reportReady();
+      render();
+      canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

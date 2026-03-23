@@ -799,5 +799,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 지형 5개를 완성하면 클리어",
     thumbnail: "./canyon-carver/thumbnail.png",
     path: "./canyon-carver/index.html",
+  },
+  {
+    id: "bomb-defusal",
+    title: "폭탄 해제",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Wire puzzle",
+    clearCondition: "폭탄 5개를 해제하면 클리어",
+    thumbnail: "./bomb-defusal/thumbnail.png",
+    path: "./bomb-defusal/index.html",
   }
 ];
