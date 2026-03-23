@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>모래시계</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body { margin:0; width:100%; height:100%; overflow:hidden; font-family:"Trebuchet MS","Segoe UI",sans-serif; background:#f0ead8; }
+      body { display:grid; place-items:center; }
+      a, canvas { -webkit-tap-highlight-color: rgba(148,163,184,0.2); }
+      .skip-link { position:absolute; top:12px; left:12px; z-index:10; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); clip-path:inset(50%); border-radius:999px; background:rgba(80,50,20,0.92); color:#f0ead8; font-weight:800; text-decoration:none; white-space:nowrap; transition:transform 0.15s ease; }
+      .skip-link:focus, .skip-link:focus-visible { width:auto; height:auto; padding:12px 16px; overflow:visible; clip:auto; clip-path:none; }
+      .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+      canvas { display:block; width:100%; height:100%; background:#f0ead8; touch-action:none; }
+      canvas:focus-visible { outline:4px solid rgba(180,120,50,0.6); outline-offset:-8px; }
+      @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration:0.01ms!important; animation-iteration-count:1!important; transition-duration:0.01ms!important; scroll-behavior:auto!important; } }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">모래시계. 화면 터치로 기울기를 조절하여 모래를 그릇에 채우세요.</p>
+    <canvas id="game" width="960" height="540" aria-label="모래시계" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+    "use strict";
+    const canvas = document.querySelector("#game");
+    const ctx = canvas.getContext("2d");
+    const W = 960, H = 540;
+    const FIXED_DT = 1/60, MAX_DT = 1/20;
+    const relayCtx = window.RelayRuntime?.readContext("sand-flow") || { history:[], clearCount:0, previousStageId:null };
+
+    const COL = {
+      bg:"#f0ead8", sand:"#d4a843", sandLight:"#e8c878", sandDark:"#b08930",
+      terra:"#c06840", terraDark:"#a05030", sky:"#88b8d8", skyLight:"#c0dce8",
+      bowl:"#a08060", bowlDark:"#806040", text:"#503218", textLight:"#907050",
+      cardBg:"rgba(240,234,216,0.96)", fail:"#c04040", clear:"#2d8a50", gold:"#d4a843"
+    };
+
+    const TIME_LIMIT = 40, TARGET_BOWLS = 5, MAX_OVERFLOW = 3;
+    let mode = "menu", elapsed = 0, lastRunTime = 0;
+    let hostFailedReported = false, hostClearedReported = false;
+    let animFrame = 0, lastTs = 0;
+    let bowlsFilled = 0, overflows = 0;
+    let tiltAngle = 0; // -1 to 1
+    let hourglass = { sand: 100, pouring: false };
+    let bowl = { x: 0, targetFill: 0, currentFill: 0, width: 80 };
+    let sandParticles = [];
+    let pourStream = [];
+    let shakeTimer = 0, shakeIntensity = 0;
+    let particles = [], feedbackTimer = 0, feedbackSuccess = false;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch(e) { return false; } }
+    function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+    function reportFailed(reason) { if (!inRelayHost()||hostFailedReported) return; hostFailedReported=true; window.parent.RelayHost.onStageFailed?.({stageId:"sand-flow",stageTitle:"모래시계",reason,durationSec:+lastRunTime.toFixed(1)}); }
+    function reportCleared() { if (!inRelayHost()||hostClearedReported) return; hostClearedReported=true; window.parent.RelayHost.onStageCleared?.({stageId:"sand-flow",stageTitle:"모래시계",clearCountAfter:relayCtx.clearCount+1,durationSec:+lastRunTime.toFixed(1)}); }
+
+    function createBowl() {
+      bowl.x = 200 + Math.random() * (W - 400);
+      bowl.targetFill = 30 + Math.random() * 50; // 30-80%
+      bowl.currentFill = 0;
+      bowl.width = 70 + Math.random() * 30;
+      hourglass.sand = 100;
+      hourglass.pouring = false;
+      tiltAngle = 0;
+      pourStream = [];
+    }
+
+    function startGame() {
+      mode = "running"; elapsed = 0; lastRunTime = 0;
+      bowlsFilled = 0; overflows = 0; particles = [];
+      hostFailedReported = false; hostClearedReported = false;
+      window.relayStageResult.status = "running";
+      shakeTimer = 0; feedbackTimer = 0;
+      createBowl();
+    }
+    function failGame(reason) { mode = "failed"; lastRunTime = elapsed; window.relayStageResult.status = "failed"; reportFailed(reason); }
+    function clearGame() { mode = "cleared"; lastRunTime = elapsed; window.relayStageResult.status = "cleared"; reportCleared(); }
+
+    function spawnParticles(x, y, color, count) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.random()*Math.PI*2, spd = 50+Math.random()*80;
+        particles.push({ x, y, vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-30, life:1, decay:1.5+Math.random(), size:2+Math.random()*3, color });
+      }
+    }
+
+    let pointerActive = false;
+    canvas.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      if (mode !== "running") { startGame(); return; }
+      pointerActive = true;
+      hourglass.pouring = true;
+      updateTiltFromPointer(e);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      e.preventDefault();
+      if (mode === "running" && pointerActive) updateTiltFromPointer(e);
+    });
+    canvas.addEventListener("pointerup", (e) => { e.preventDefault(); pointerActive = false; hourglass.pouring = false; });
+    canvas.addEventListener("pointercancel", (e) => { e.preventDefault(); pointerActive = false; hourglass.pouring = false; });
+
+    function updateTiltFromPointer(e) {
+      const r = canvas.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width * W;
+      tiltAngle = (px / W - 0.5) * 2; // -1 to 1
+    }
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); if (mode !== "running") startGame(); else checkBowl(); }
+      if (mode === "running") {
+        if (e.key === "ArrowLeft") tiltAngle = Math.max(-1, tiltAngle - 0.05);
+        if (e.key === "ArrowRight") tiltAngle = Math.min(1, tiltAngle + 0.05);
+        if (e.key === " ") { e.preventDefault(); hourglass.pouring = !hourglass.pouring; }
+      }
+    });
+
+    function checkBowl() {
+      const diff = Math.abs(bowl.currentFill - bowl.targetFill);
+      if (diff < 12) {
+        // Success
+        bowlsFilled++;
+        feedbackTimer = 0.6; feedbackSuccess = true;
+        spawnParticles(bowl.x, H - 100, COL.gold, 15);
+        if (bowlsFilled >= TARGET_BOWLS) {
+          setTimeout(() => clearGame(), 600);
+        } else {
+          setTimeout(() => createBowl(), 800);
+        }
+      } else if (bowl.currentFill > bowl.targetFill + 10) {
+        // Overflow
+        overflows++;
+        feedbackTimer = 0.5; feedbackSuccess = false;
+        shakeTimer = 0.3; shakeIntensity = 5;
+        if (overflows >= MAX_OVERFLOW) {
+          setTimeout(() => failGame("넘침 3회"), 400);
+        } else {
+          setTimeout(() => createBowl(), 800);
+        }
+      }
+    }
+
+    function update(dt) {
+      if (mode !== "running") return;
+      elapsed += dt;
+      if (elapsed >= TIME_LIMIT) { failGame("시간 초과"); return; }
+      if (shakeTimer > 0) shakeTimer = Math.max(0, shakeTimer - dt);
+      if (feedbackTimer > 0) feedbackTimer = Math.max(0, feedbackTimer - dt);
+
+      // Pour sand
+      if (hourglass.pouring && hourglass.sand > 0) {
+        const pourRate = 40 * dt; // sand per second
+        const poured = Math.min(pourRate, hourglass.sand);
+        hourglass.sand -= poured;
+
+        // Calculate pour destination based on tilt
+        const hgX = W / 2;
+        const hgY = 120;
+        const pourX = hgX + tiltAngle * 200;
+        const pourY = hgY + 80;
+
+        // Add pour stream particles
+        for (let i = 0; i < 3; i++) {
+          pourStream.push({
+            x: pourX + (Math.random()-0.5)*8,
+            y: pourY,
+            vy: 200 + Math.random()*100,
+            vx: tiltAngle * 30 + (Math.random()-0.5)*20,
+            life: 1, size: 2+Math.random()*2
+          });
+        }
+
+        // Check if sand lands in bowl
+        const landX = pourX + tiltAngle * 60;
+        if (Math.abs(landX - bowl.x) < bowl.width/2 + 15) {
+          bowl.currentFill += poured * 0.7;
+          // Auto-check overflow
+          if (bowl.currentFill > 100) {
+            bowl.currentFill = 100;
+            overflows++;
+            feedbackTimer = 0.5; feedbackSuccess = false;
+            shakeTimer = 0.3; shakeIntensity = 5;
+            hourglass.pouring = false;
+            if (overflows >= MAX_OVERFLOW) {
+              setTimeout(() => failGame("넘침 3회"), 400);
+            } else {
+              setTimeout(() => createBowl(), 800);
+            }
+          }
+        }
+      }
+
+      // Update pour stream
+      for (const p of pourStream) {
+        p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; p.life -= 2 * dt;
+      }
+      pourStream = pourStream.filter(p => p.life > 0 && p.y < H - 50);
+
+      // Auto-check: if stopped pouring and fill is close enough
+      if (!hourglass.pouring && bowl.currentFill > 5 && feedbackTimer <= 0) {
+        const diff = Math.abs(bowl.currentFill - bowl.targetFill);
+        if (diff < 12 && bowl.currentFill > 0) checkBowl();
+      }
+
+      for (const p of particles) { p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 150*dt; p.life -= p.decay*dt; }
+      particles = particles.filter(p => p.life > 0);
+    }
+
+    function drawRR(x,y,w,h,r) { ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r); ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath(); }
+
+    function drawCard(title, lines, accent) {
+      ctx.fillStyle = "rgba(240,234,216,0.5)"; ctx.fillRect(0,0,W,H);
+      const cw=320, ch=44+lines.length*28+44, cx=(W-cw)/2, cy=(H-ch)/2;
+      drawRR(cx,cy,cw,ch,10); ctx.fillStyle=COL.cardBg; ctx.fill();
+      ctx.fillStyle=accent; ctx.fillRect(cx+20,cy+8,cw-40,3);
+      ctx.textAlign="center"; ctx.fillStyle=COL.text; ctx.font="bold 24px 'Trebuchet MS',sans-serif";
+      ctx.fillText(title,W/2,cy+38);
+      ctx.font="400 13px 'Trebuchet MS',sans-serif"; ctx.fillStyle=COL.textLight;
+      lines.forEach((l,i) => ctx.fillText(l,W/2,cy+64+i*28));
+      ctx.fillStyle="#aaa"; ctx.font="400 12px 'Trebuchet MS',sans-serif";
+      ctx.fillText("TAP 또는 ENTER",W/2,cy+ch-16); ctx.textAlign="left";
+    }
+
+    function drawHourglass(cx, cy, sandPct, tilt) {
+      ctx.save(); ctx.translate(cx, cy); ctx.rotate(tilt * 0.4);
+      // Frame
+      ctx.strokeStyle = COL.terra; ctx.lineWidth = 3;
+      // Top bulb
+      ctx.beginPath(); ctx.moveTo(-35, -60); ctx.lineTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(35, -60); ctx.closePath();
+      ctx.fillStyle = COL.skyLight; ctx.fill(); ctx.stroke();
+      // Bottom bulb
+      ctx.beginPath(); ctx.moveTo(-35, 60); ctx.lineTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(35, 60); ctx.closePath();
+      ctx.fillStyle = COL.skyLight; ctx.fill(); ctx.stroke();
+      // Sand in top
+      if (sandPct > 0) {
+        const h = sandPct / 100 * 50;
+        ctx.beginPath();
+        const topW = 5 + (h/50) * 30;
+        ctx.moveTo(-topW, -60 + (50-h)); ctx.lineTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(topW, -60 + (50-h)); ctx.closePath();
+        ctx.fillStyle = COL.sand; ctx.fill();
+      }
+      // Sand in bottom (inverted sandPct)
+      const bottom = 100 - sandPct;
+      if (bottom > 0) {
+        const bh = bottom / 100 * 50;
+        ctx.beginPath();
+        const bw = 5 + (bh/50) * 30;
+        ctx.moveTo(-bw, 60); ctx.lineTo(-5 + (5-bw)*(1-bh/50), 60-bh); ctx.lineTo(5 + (bw-5)*(1-bh/50), 60-bh); ctx.lineTo(bw, 60); ctx.closePath();
+        ctx.fillStyle = COL.sandDark; ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawBowl(bx, by, w, targetFill, currentFill) {
+      // Bowl shape
+      ctx.beginPath();
+      ctx.moveTo(bx - w/2, by - 40);
+      ctx.quadraticCurveTo(bx - w/2 - 10, by + 10, bx, by + 15);
+      ctx.quadraticCurveTo(bx + w/2 + 10, by + 10, bx + w/2, by - 40);
+      ctx.strokeStyle = COL.bowlDark; ctx.lineWidth = 3; ctx.stroke();
+      ctx.fillStyle = COL.bowl + "40"; ctx.fill();
+
+      // Target line
+      const targetY = by + 15 - (targetFill / 100) * 55;
+      ctx.setLineDash([4,4]);
+      ctx.beginPath(); ctx.moveTo(bx - w/2 + 5, targetY); ctx.lineTo(bx + w/2 - 5, targetY);
+      ctx.strokeStyle = COL.terra; ctx.lineWidth = 2; ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Current fill
+      if (currentFill > 0) {
+        const fillH = (currentFill / 100) * 55;
+        const fillY = by + 15 - fillH;
+        ctx.beginPath();
+        const fw = w * (0.3 + 0.7 * Math.min(1, fillH/55));
+        ctx.moveTo(bx - fw/2, by + 15);
+        ctx.quadraticCurveTo(bx - fw/2 - 3, fillY + fillH*0.3, bx - fw*0.3, fillY);
+        ctx.lineTo(bx + fw*0.3, fillY);
+        ctx.quadraticCurveTo(bx + fw/2 + 3, fillY + fillH*0.3, bx + fw/2, by + 15);
+        ctx.closePath();
+        ctx.fillStyle = COL.sand; ctx.fill();
+      }
+
+      // Label
+      ctx.textAlign = "center"; ctx.fillStyle = COL.terra;
+      ctx.font = "bold 12px 'Trebuchet MS',sans-serif";
+      ctx.fillText(`목표: ${Math.round(targetFill)}%`, bx, by + 35);
+      ctx.fillStyle = currentFill > targetFill + 10 ? COL.fail : COL.text;
+      ctx.fillText(`${Math.round(currentFill)}%`, bx, by + 50);
+    }
+
+    function drawHUD() {
+      const tl = Math.max(0, TIME_LIMIT - elapsed);
+      ctx.fillStyle=COL.text; ctx.font="600 16px 'Trebuchet MS',sans-serif"; ctx.textAlign="left";
+      ctx.fillText(`${bowlsFilled} / ${TARGET_BOWLS}`, 20, 30);
+      ctx.textAlign="right"; ctx.fillStyle=tl<10?COL.fail:COL.text;
+      ctx.fillText(Math.ceil(tl)+"s", W-20, 30);
+      ctx.fillStyle="#e0d8c8"; ctx.fillRect(W-180,38,160,4);
+      ctx.fillStyle=tl<10?COL.fail:COL.terra; ctx.fillRect(W-180,38,160*(tl/TIME_LIMIT),4);
+      ctx.textAlign="left";
+      for (let i=0;i<MAX_OVERFLOW;i++) { ctx.fillStyle=i<overflows?COL.fail:"#d8d0c0"; ctx.font="16px sans-serif"; ctx.fillText("\u2716",20+i*22,58); }
+      ctx.textAlign="center"; ctx.fillStyle=COL.textLight; ctx.font="400 12px 'Trebuchet MS',sans-serif";
+      ctx.fillText("화면 터치로 기울기 조절 · 놓으면 멈춤", W/2, H-12);
+    }
+
+    function render() {
+      ctx.save();
+      if (shakeTimer>0&&!reducedMotion) { const s=shakeIntensity*(shakeTimer/0.3); ctx.translate((Math.random()-0.5)*s,(Math.random()-0.5)*s); }
+      // Background gradient
+      const grad = ctx.createLinearGradient(0,0,0,H);
+      grad.addColorStop(0, COL.skyLight); grad.addColorStop(0.4, COL.bg); grad.addColorStop(1, "#e8dcc0");
+      ctx.fillStyle = grad; ctx.fillRect(-10,-10,W+20,H+20);
+
+      if (mode==="menu") {
+        drawHourglass(W/2, H/2-40, 70, 0);
+        drawCard("모래시계", ["화면 터치로 기울기 조절","클리어: 모래를 5개 그릇에 채우면 클리어","실패: 시간 초과 또는 넘침 3회 시 실패"], COL.terra);
+        ctx.restore(); return;
+      }
+      if (mode==="running") {
+        drawHourglass(W/2, 120, hourglass.sand, tiltAngle);
+        drawBowl(bowl.x, H - 120, bowl.width, bowl.targetFill, bowl.currentFill);
+
+        // Pour stream
+        for (const p of pourStream) {
+          ctx.globalAlpha = p.life;
+          ctx.fillStyle = COL.sandLight;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // Feedback flash
+        if (feedbackTimer > 0) {
+          ctx.fillStyle = feedbackSuccess ? `rgba(45,138,80,${feedbackTimer*0.4})` : `rgba(192,64,64,${feedbackTimer*0.4})`;
+          ctx.fillRect(0,0,W,H);
+        }
+
+        for (const p of particles) { ctx.globalAlpha=p.life; ctx.fillStyle=p.color; ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill(); }
+        ctx.globalAlpha=1;
+        drawHUD(); ctx.restore(); return;
+      }
+      if (mode==="failed") {
+        drawCard("실패", [overflows>=MAX_OVERFLOW?"넘침 3회 초과":"시간 초과",`완성: ${bowlsFilled}개 · 시간: ${lastRunTime.toFixed(1)}초`], COL.fail);
+        ctx.restore(); return;
+      }
+      if (mode==="cleared") {
+        for (let i=0;i<5;i++) drawHourglass(W/2-160+i*80, H/2-40, 50-i*10, (i-2)*0.1);
+        drawCard("채우기 완료!", [`그릇 ${TARGET_BOWLS}개 완성`,`시간: ${lastRunTime.toFixed(1)}초`], COL.clear);
+        ctx.restore(); return;
+      }
+      ctx.restore();
+    }
+
+    function frame(ts) { const dt=lastTs?Math.min((ts-lastTs)/1000,MAX_DT):FIXED_DT; lastTs=ts; update(dt); render(); animFrame=requestAnimationFrame(frame); }
+    function renderGameToText() { return JSON.stringify({mode,elapsed:Math.round(elapsed*10)/10,bowlsFilled,overflows,sandLeft:Math.round(hourglass.sand),bowlFill:Math.round(bowl.currentFill),bowlTarget:Math.round(bowl.targetFill),timeLeft:Math.max(0,Math.round((TIME_LIMIT-elapsed)*10)/10),result:window.relayStageResult.status}); }
+
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = (ms=16.67) => { const steps=Math.max(1,Math.round(ms/(FIXED_DT*1000))); for(let i=0;i<steps;i++) update(FIXED_DT); render(); return renderGameToText(); };
+    window.relayStageMeta = { id:"sand-flow", title:"모래시계", creator:"jungcollin", genre:"Tilt physics puzzle", clearCondition:"모래를 5개 그릇에 채우면 클리어" };
+    window.relayStageResult = { status:"running" };
+    window.relayStageDebug = { forceClear() { startGame(); clearGame(); render(); }, forceFail() { startGame(); failGame("debug_force_fail"); render(); } };
+
+    canvas.addEventListener("click", () => canvas.focus());
+    window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    reportReady(); render(); canvas.focus(); animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
