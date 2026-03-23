@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>종이비행기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #B8D8F0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 200, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(60, 90, 120, 0.92);
+        color: #f0f6fc; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #B8D8F0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(100, 160, 200, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">종이비행기. 화면을 스와이프하여 종이비행기를 날려 하늘의 링을 통과시키세요. 모바일에서는 화면 터치와 드래그로 플레이합니다. 링 8개를 통과하면 클리어. 비행기 3대를 놓치면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="종이비행기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "paper-plane",
+        title: "종이비행기",
+        description: "종이비행기를 날려 하늘의 링을 통과시키세요",
+        creator: "jungcollin",
+        genre: "Flick launch",
+        clearCondition: "링 8개를 통과하면 클리어",
+        failCondition: "비행기 3대를 놓치면 실패",
+        controls: "스와이프로 비행기 발사",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        skyTop: "#8BC4E8", skyBottom: "#D4E8F4",
+        cloud: "rgba(255,255,255,0.7)", paper: "#FAFAF5", paperFold: "#E0DCD2",
+        ring: "#E8A060", ringGlow: "rgba(232,160,96,0.3)",
+        grass: "#8CB860", grassDark: "#6A9A40",
+        text: "#3A5060", textLight: "#6A8898",
+        success: "#5A9A4A", danger: "#C05040",
+        accent: "#E89050",
+      };
+
+      const TARGET_RINGS = 8;
+      const MAX_MISS = 3;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      let ringsHit = 0;
+      let misses = 0;
+      let shake = 0;
+      let plane = null;
+      let planeTrail = [];
+      let dragging = false;
+      let dragStart = { x: 0, y: 0 };
+      let dragCurrent = { x: 0, y: 0 };
+      let ring = null;
+      let clouds = [];
+      let particles = [];
+      let wind = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function randInt(lo, hi) { return Math.floor(rand(lo, hi + 1)); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange, speedRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), s = rand(speedRange[0], speedRange[1]);
+          particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+            life: 1, decay: rand(0.6, 1.2), color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+
+      function initClouds() {
+        clouds = [];
+        for (let i = 0; i < 6; i++)
+          clouds.push({ x: rand(0, W), y: rand(30, 200), w: rand(80, 180), h: rand(30, 50), speed: rand(8, 20) });
+      }
+
+      function spawnRing() {
+        const diff = Math.min(ringsHit / TARGET_RINGS, 1);
+        ring = { x: rand(320, W - 80), y: rand(80, 300), radius: lerp(50, 35, diff), passed: false, glow: 0, appear: 0 };
+        wind = rand(-30, 30) * (1 + diff * 0.5);
+      }
+
+      function startGame() {
+        mode = "running"; elapsed = 0; ringsHit = 0; misses = 0; shake = 0;
+        plane = null; planeTrail = []; particles = []; dragging = false;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initClouds(); spawnRing();
+      }
+
+      function failGame(reason) {
+        mode = "failed"; window.relayStageResult.status = "failed"; reportFailed(reason);
+      }
+      function clearGame() {
+        mode = "cleared"; window.relayStageResult.status = "cleared"; reportCleared();
+        for (let i = 0; i < 40; i++)
+          spawnParticles(rand(100, 860), rand(80, 400), 1, ["#FFD700", COL.accent, "#FFF", COL.success][randInt(0, 3)], [3, 7], [40, 120]);
+      }
+
+      function launchPlane(sx, sy, ex, ey) {
+        const dx = sx - ex, dy = sy - ey;
+        const power = clamp(Math.hypot(dx, dy), 20, 250);
+        const angle = Math.atan2(dy, dx);
+        const speed = power * 2.5;
+        plane = { x: 100, y: H - 100, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, angle, active: true, age: 0 };
+        planeTrail = [];
+      }
+
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const sx = W / rect.width, sy = H / rect.height;
+        const touch = e.touches ? e.touches[0] : e;
+        return { x: (touch.clientX - rect.left) * sx, y: (touch.clientY - rect.top) * sy };
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { startGame(); return; }
+        if (plane && plane.active) return;
+        const pos = getCanvasPos(e);
+        dragging = true; dragStart = { ...pos }; dragCurrent = { ...pos };
+        canvas.setPointerCapture?.(e.pointerId);
+      });
+      canvas.addEventListener("pointermove", (e) => { if (dragging) dragCurrent = getCanvasPos(e); });
+      canvas.addEventListener("pointerup", (e) => {
+        if (!dragging) return;
+        dragging = false;
+        const end = getCanvasPos(e);
+        if (dist(dragStart.x, dragStart.y, end.x, end.y) > 20)
+          launchPlane(dragStart.x, dragStart.y, end.x, end.y);
+      });
+      canvas.addEventListener("pointercancel", () => { dragging = false; });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && mode !== "running") { e.preventDefault(); startGame(); }
+      });
+
+      function update(dt) {
+        elapsed += dt;
+        clouds.forEach(c => { c.x += c.speed * dt; if (c.x > W + 100) c.x = -c.w; });
+
+        if (mode !== "running") {
+          particles = particles.filter(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= p.decay * dt; return p.life > 0; });
+          return;
+        }
+        if (ring) ring.appear = Math.min(1, ring.appear + dt * 3);
+        if (shake > 0) shake = Math.max(0, shake - dt * 3);
+
+        if (plane && plane.active) {
+          plane.age += dt;
+          plane.vy += 180 * dt;
+          plane.vx += wind * dt;
+          plane.vx *= 0.998; plane.vy *= 0.998;
+          plane.x += plane.vx * dt; plane.y += plane.vy * dt;
+          plane.angle = Math.atan2(plane.vy, plane.vx);
+
+          if (!reducedMotion && plane.age > 0.05) {
+            planeTrail.push({ x: plane.x, y: plane.y, life: 1 });
+            if (planeTrail.length > 30) planeTrail.shift();
+          }
+
+          if (ring && !ring.passed && dist(plane.x, plane.y, ring.x, ring.y) < ring.radius) {
+            ring.passed = true; ring.glow = 1; ringsHit++;
+            spawnParticles(ring.x, ring.y, 15, COL.accent, [2, 5], [50, 130]);
+            spawnParticles(ring.x, ring.y, 8, "#FFD700", [1, 3], [30, 80]);
+            if (ringsHit >= TARGET_RINGS) { clearGame(); return; }
+          }
+
+          if (plane.x > W + 50 || plane.y > H + 50 || plane.x < -50 || plane.y < -200) {
+            plane.active = false;
+            if (!ring.passed) {
+              misses++; shake = 0.3;
+              if (misses >= MAX_MISS) { failGame("놓침 3회"); return; }
+              plane = null;
+            } else {
+              setTimeout(() => { if (mode === "running") spawnRing(); }, 400);
+            }
+          }
+        }
+
+        planeTrail.forEach(t => t.life -= dt * 2);
+        planeTrail = planeTrail.filter(t => t.life > 0);
+        particles = particles.filter(p => {
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 60 * dt; p.life -= p.decay * dt;
+          return p.life > 0;
+        });
+      }
+
+      function drawSky() {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, COL.skyTop); g.addColorStop(1, COL.skyBottom);
+        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      }
+
+      function drawClouds() {
+        ctx.fillStyle = COL.cloud;
+        clouds.forEach(c => {
+          ctx.beginPath(); ctx.ellipse(c.x + c.w / 2, c.y, c.w / 2, c.h / 2, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.ellipse(c.x + c.w * 0.3, c.y - c.h * 0.2, c.w * 0.3, c.h * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+        });
+      }
+
+      function drawGround() {
+        ctx.fillStyle = COL.grass; ctx.fillRect(0, H - 55, W, 55);
+        ctx.fillStyle = COL.grassDark; ctx.fillRect(0, H - 57, W, 3);
+      }
+
+      function drawRing() {
+        if (!ring) return;
+        const r = ring.radius * ring.appear;
+        if (ring.glow > 0) {
+          ctx.beginPath(); ctx.arc(ring.x, ring.y, r + 10, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(232,160,96,${ring.glow * 0.4})`; ctx.fill();
+          ring.glow = Math.max(0, ring.glow - 0.02);
+        }
+        ctx.beginPath(); ctx.arc(ring.x, ring.y, r, 0, Math.PI * 2);
+        ctx.strokeStyle = ring.passed ? COL.success : COL.ring;
+        ctx.lineWidth = 6; ctx.stroke();
+        if (!ring.passed) {
+          ctx.beginPath(); ctx.arc(ring.x, ring.y, r - 3, 0, Math.PI * 2);
+          ctx.strokeStyle = COL.ringGlow; ctx.lineWidth = 3; ctx.stroke();
+        }
+      }
+
+      function drawPlane() {
+        planeTrail.forEach(t => {
+          ctx.globalAlpha = t.life * 0.4; ctx.fillStyle = "#FFF";
+          ctx.beginPath(); ctx.arc(t.x, t.y, 2, 0, Math.PI * 2); ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+        if (!plane) return;
+        ctx.save(); ctx.translate(plane.x, plane.y); ctx.rotate(plane.angle);
+        ctx.beginPath(); ctx.moveTo(20, 0); ctx.lineTo(-14, -10); ctx.lineTo(-8, 0); ctx.lineTo(-14, 10); ctx.closePath();
+        ctx.fillStyle = COL.paper; ctx.fill();
+        ctx.strokeStyle = COL.paperFold; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(20, 0); ctx.lineTo(-8, 0);
+        ctx.strokeStyle = COL.paperFold; ctx.lineWidth = 1; ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawLaunchZone() {
+        if (plane && plane.active) return;
+        if (!dragging) {
+          const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+          ctx.fillStyle = `rgba(58,80,96,${pulse})`;
+          ctx.font = "15px 'Trebuchet MS'"; ctx.textAlign = "center";
+          ctx.fillText("스와이프하여 발사 →", 140, H - 75);
+          ctx.textAlign = "left";
+        }
+        if (dragging) {
+          const dx = dragStart.x - dragCurrent.x, dy = dragStart.y - dragCurrent.y;
+          const power = Math.min(Math.hypot(dx, dy), 250);
+          const angle = Math.atan2(dy, dx);
+          const ax = dragStart.x + Math.cos(angle) * power * 0.6;
+          const ay = dragStart.y + Math.sin(angle) * power * 0.6;
+          ctx.beginPath(); ctx.moveTo(dragStart.x, dragStart.y); ctx.lineTo(ax, ay);
+          ctx.strokeStyle = "rgba(232,144,80,0.8)"; ctx.lineWidth = 3;
+          ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+          ctx.fillStyle = COL.accent; ctx.font = "bold 16px 'Trebuchet MS'";
+          ctx.textAlign = "center"; ctx.fillText(Math.round(power / 250 * 100) + "%", ax, ay - 12);
+          ctx.textAlign = "left";
+        }
+      }
+
+      function drawWind() {
+        if (!ring || ring.passed) return;
+        const dir = wind > 0 ? "→" : wind < 0 ? "←" : "·";
+        const str = Math.abs(wind) < 10 ? "약" : Math.abs(wind) < 25 ? "중" : "강";
+        ctx.fillStyle = COL.textLight; ctx.font = "14px 'Trebuchet MS'";
+        ctx.textAlign = "center"; ctx.fillText("바람 " + dir + " " + str, CX, H - 65);
+        ctx.textAlign = "left";
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.textAlign = "left"; ctx.fillText("통과 " + ringsHit + "/" + TARGET_RINGS, 20, 32);
+        ctx.textAlign = "right";
+        ctx.fillStyle = misses >= 2 ? COL.danger : COL.text;
+        ctx.fillText("놓침 " + misses + "/" + MAX_MISS, W - 20, 32);
+        ctx.textAlign = "left";
+      }
+
+      function drawParticles() {
+        particles.forEach(p => {
+          ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2); ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function renderMenu() {
+        drawSky(); drawClouds(); drawGround();
+        const cw = 340, ch = 300, cx = CX - cw / 2, cy = CY - ch / 2 - 10;
+        ctx.fillStyle = "rgba(250,250,245,0.95)";
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = COL.accent; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.fillStyle = COL.accent; ctx.font = "bold 34px 'Trebuchet MS'";
+        ctx.fillText("종이비행기", CX, cy + 48);
+        ctx.fillStyle = COL.text; ctx.font = "17px 'Trebuchet MS'";
+        ctx.fillText("비행기를 날려 링을 통과시키세요", CX, cy + 82);
+        ctx.fillStyle = COL.textLight; ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("조작: 화면 스와이프로 발사", CX, cy + 116);
+        ctx.fillStyle = COL.success; ctx.fillText("클리어: 링 8개 통과", CX, cy + 148);
+        ctx.fillStyle = COL.danger; ctx.fillText("실패: 놓침 3회", CX, cy + 175);
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = `rgba(232,144,80,${pulse})`; ctx.font = "bold 20px 'Trebuchet MS'";
+        ctx.fillText("탭하여 시작", CX, cy + 240);
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        drawSky();
+        if (shake > 0) { ctx.save(); ctx.translate(rand(-shake * 8, shake * 8), rand(-shake * 8, shake * 8)); }
+        drawClouds(); drawRing(); drawPlane(); drawGround();
+        drawLaunchZone(); drawWind(); drawHUD(); drawParticles();
+        if (shake > 0) ctx.restore();
+      }
+
+      function renderResult(title, subtitle, color) {
+        drawSky(); drawClouds(); drawGround(); drawParticles();
+        const cw = 340, ch = 210, cx = CX - cw / 2, cy = CY - ch / 2;
+        ctx.fillStyle = "rgba(250,250,245,0.95)";
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+        ctx.strokeStyle = color; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.fillStyle = color; ctx.font = "bold 34px 'Trebuchet MS'"; ctx.fillText(title, CX, cy + 50);
+        ctx.fillStyle = COL.text; ctx.font = "17px 'Trebuchet MS'"; ctx.fillText(subtitle, CX, cy + 85);
+        ctx.fillStyle = COL.textLight; ctx.font = "15px 'Trebuchet MS'";
+        ctx.fillText("통과 " + ringsHit + "개 | " + elapsed.toFixed(1) + "초", CX, cy + 115);
+        const pulse = Math.sin(elapsed * 3) * 0.3 + 0.7;
+        ctx.fillStyle = `rgba(232,144,80,${pulse})`; ctx.font = "bold 18px 'Trebuchet MS'";
+        ctx.fillText("탭하여 재시작", CX, cy + 175);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (mode === "menu") { renderMenu(); return; }
+        if (mode === "running") { renderRunning(); return; }
+        if (mode === "cleared") { renderResult("클리어!", "하늘 위의 비행사!", COL.success); return; }
+        if (mode === "failed") { renderResult("실패", "비행기가 추락했습니다...", COL.danger); return; }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), ringsHit, misses, planeActive: plane ? plane.active : false, wind: +wind.toFixed(1) });
+      }
+
+      function frame(ts) {
+        const dt = lastTimestamp ? Math.min((ts - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = ts; update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { startGame(); clearGame(); render(); },
+        forceFail() { startGame(); failGame("debug_force_fail"); render(); },
+      };
+
+      initClouds();
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+      reportReady(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
