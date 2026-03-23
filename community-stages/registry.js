@@ -756,6 +756,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./iron-master/index.html",
   },
   {
+    id: "ripple-guide",
+    title: "잔물결 길잡이",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Ripple physics",
+    clearCondition: "나뭇잎 5장을 연꽃에 안착",
+    thumbnail: "./ripple-guide/thumbnail.png",
+    path: "./ripple-guide/index.html",
+  },
+  {
     id: "salt-bloom",
     title: "소금꽃",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
