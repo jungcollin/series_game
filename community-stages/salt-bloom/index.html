@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>소금꽃</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #F5EDE0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(200,180,150,0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0,0,0,0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(90,70,50,0.92);
+        color: #faf5ee; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #F5EDE0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(200,160,100,0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">소금꽃. 화면 터치 또는 드래그로 햇빛을 모아 소금 호수의 물을 증발시키세요. 소금 결정 5개를 피우면 클리어. 시간 내에 완성하지 못하면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="소금꽃" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "salt-bloom",
+        title: "소금꽃",
+        description: "소금 호수에 햇빛을 모아 소금꽃을 피우세요",
+        creator: "jungcollin",
+        genre: "Evaporation puzzle",
+        clearCondition: "소금 결정 5개를 피우면 클리어",
+        failCondition: "시간 내에 완성하지 못하면 실패",
+        controls: "드래그로 햇빛을 모아 물을 증발시키세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // Colors
+      const COL = {
+        bg1: "#F5EDE0", bg2: "#EDE3D0", bg3: "#E5D8C4",
+        sand: "#D4C4A8", sandLight: "#E8DCC8",
+        sun: "#FFD54F", sunGlow: "rgba(255,213,79,0.3)",
+        salt: "#FFFFFF", saltPink: "#F8D0D8", saltShine: "rgba(255,255,255,0.9)",
+        hud: "#8A7A60", fail: "#C25050", success: "#6A9A5A",
+        cardBg: "rgba(255,255,255,0.95)", card: "#8A7A60",
+      };
+
+      const DURATION = 40;
+      const TARGET = 5;
+      const POOL_COUNT = 8;
+      const SUNBEAM_RADIUS = 60;
+      const EVAP_RATE = 0.4;
+      const FILL_RATE = 0.06;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+      let crystals = 0;
+      let pools = [];
+      let sunPos = { x: CX, y: CY };
+      let isDragging = false;
+      let particles = [];
+      let sparkles = [];
+      let heatShimmer = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function generatePools() {
+        pools = [];
+        const margin = 80;
+        for (let i = 0; i < POOL_COUNT; i++) {
+          let p, attempts = 0;
+          do {
+            p = {
+              x: rand(margin, W - margin), y: rand(margin + 40, H - margin),
+              r: rand(30, 50), water: 1, crystallized: false, crystalAge: 0,
+              shimmer: rand(0, Math.PI * 2),
+            };
+            attempts++;
+          } while (attempts < 50 && pools.some(q => dist(p.x, p.y, q.x, q.y) < p.r + q.r + 20));
+          pools.push(p);
+        }
+      }
+
+      function spawnParticles(x, y, count, color, sizeR, speedR) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2);
+          const spd = rand(speedR[0], speedR[1]);
+          particles.push({
+            x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - rand(10, 40),
+            life: 1, decay: rand(0.6, 1.2), color, size: rand(sizeR[0], sizeR[1]),
+          });
+        }
+      }
+
+      function spawnSparkle(x, y) {
+        sparkles.push({ x: x + rand(-20, 20), y: y + rand(-20, 20), life: 1, size: rand(2, 5) });
+      }
+
+      function startGame() {
+        mode = "running"; elapsed = 0; crystals = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        particles = []; sparkles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generatePools();
+      }
+
+      function doFail(reason) {
+        mode = "failed";
+        window.relayStageResult.status = "failed";
+        reportFailed(reason);
+      }
+
+      function doClear() {
+        mode = "cleared"; clearAnim = 0;
+        window.relayStageResult.status = "cleared";
+        reportCleared();
+      }
+
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (e.clientX - rect.left) / rect.width * W, y: (e.clientY - rect.top) / rect.height * H };
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { startGame(); return; }
+        isDragging = true;
+        const p = getCanvasPos(e);
+        sunPos.x = p.x; sunPos.y = p.y;
+        canvas.setPointerCapture?.(e.pointerId);
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (!isDragging || mode !== "running") return;
+        const p = getCanvasPos(e);
+        sunPos.x = p.x; sunPos.y = p.y;
+      });
+      canvas.addEventListener("pointerup", () => { isDragging = false; });
+      canvas.addEventListener("pointercancel", () => { isDragging = false; });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && mode !== "running") startGame();
+      });
+
+      function update(dt) {
+        if (mode !== "running") { if (mode === "cleared") clearAnim += dt; return; }
+        elapsed += dt;
+        heatShimmer += dt;
+
+        if (elapsed >= DURATION) {
+          if (crystals >= TARGET) doClear(); else doFail("시간 초과");
+          return;
+        }
+
+        for (const pool of pools) {
+          if (pool.crystallized) {
+            pool.crystalAge += dt;
+            if (!reducedMotion && Math.random() < 0.05) spawnSparkle(pool.x, pool.y);
+            continue;
+          }
+          pool.water = Math.min(1, pool.water + FILL_RATE * dt);
+          if (isDragging) {
+            const d = dist(sunPos.x, sunPos.y, pool.x, pool.y);
+            if (d < SUNBEAM_RADIUS + pool.r) {
+              const overlap = 1 - d / (SUNBEAM_RADIUS + pool.r);
+              pool.water -= EVAP_RATE * overlap * dt;
+              if (!reducedMotion && Math.random() < overlap * 0.4) {
+                spawnParticles(pool.x + rand(-pool.r * 0.5, pool.r * 0.5), pool.y - pool.r * 0.3, 1, "rgba(255,255,255,0.6)", [2, 4], [5, 20]);
+              }
+            }
+          }
+          if (pool.water <= 0) {
+            pool.water = 0; pool.crystallized = true; pool.crystalAge = 0;
+            crystals++; flashAlpha = 0.25;
+            spawnParticles(pool.x, pool.y, 15, COL.saltPink, [2, 6], [30, 80]);
+            spawnParticles(pool.x, pool.y, 8, COL.salt, [3, 7], [20, 60]);
+            if (crystals >= TARGET) { doClear(); return; }
+          }
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy -= 15 * dt; p.vx *= 0.97;
+          p.life -= p.decay * dt;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+        for (let i = sparkles.length - 1; i >= 0; i--) {
+          sparkles[i].life -= dt * 1.5;
+          if (sparkles[i].life <= 0) sparkles.splice(i, 1);
+        }
+        if (shake > 0) shake = Math.max(0, shake - dt * 2);
+        if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt * 0.8);
+      }
+
+      function drawBackground() {
+        const grd = ctx.createLinearGradient(0, 0, 0, H);
+        grd.addColorStop(0, "#FFF8E8");
+        grd.addColorStop(0.3, COL.bg1);
+        grd.addColorStop(1, COL.bg3);
+        ctx.fillStyle = grd;
+        ctx.fillRect(0, 0, W, H);
+        if (!reducedMotion) {
+          ctx.fillStyle = "rgba(180,160,130,0.08)";
+          for (let i = 0; i < 60; i++) {
+            const sx = (i * 137.5) % W, sy = (i * 89.3 + Math.sin(i) * 30) % H;
+            ctx.beginPath(); ctx.arc(sx, sy, 1 + (i % 3), 0, Math.PI * 2); ctx.fill();
+          }
+        }
+      }
+
+      function drawPool(pool) {
+        if (pool.crystallized) {
+          const grow = Math.min(1, pool.crystalAge * 3);
+          const r = pool.r * grow;
+          ctx.beginPath(); ctx.arc(pool.x, pool.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = COL.salt; ctx.fill();
+          for (let i = 0; i < 6; i++) {
+            const angle = (i / 6) * Math.PI * 2;
+            ctx.save(); ctx.translate(pool.x, pool.y); ctx.rotate(angle);
+            ctx.beginPath(); ctx.ellipse(0, -r * 0.5 * grow, r * 0.25, r * 0.55 * grow, 0, 0, Math.PI * 2);
+            ctx.fillStyle = COL.saltPink; ctx.globalAlpha = 0.6; ctx.fill();
+            ctx.globalAlpha = 1; ctx.restore();
+          }
+          ctx.beginPath(); ctx.arc(pool.x, pool.y, r * 0.2, 0, Math.PI * 2);
+          ctx.fillStyle = COL.saltShine; ctx.fill();
+          return;
+        }
+        const shimmer = Math.sin(heatShimmer * 2 + pool.shimmer) * 0.05;
+        ctx.beginPath(); ctx.ellipse(pool.x, pool.y + 3, pool.r + 2, pool.r * 0.6 + 2, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(160,140,110,0.15)"; ctx.fill();
+        ctx.beginPath(); ctx.ellipse(pool.x, pool.y, pool.r, pool.r * 0.6, 0, 0, Math.PI * 2);
+        ctx.fillStyle = COL.sandLight; ctx.fill();
+        if (pool.water > 0) {
+          ctx.beginPath(); ctx.ellipse(pool.x, pool.y, pool.r * 0.9, pool.r * 0.55, 0, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(130,185,210,${0.3 + pool.water * 0.4 + shimmer})`; ctx.fill();
+          ctx.beginPath(); ctx.ellipse(pool.x - pool.r * 0.2, pool.y - pool.r * 0.15, pool.r * 0.3, pool.r * 0.15, -0.3, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,255,255,${0.2 * pool.water})`; ctx.fill();
+        }
+        const barW = pool.r * 1.4, barH = 4;
+        const barX = pool.x - barW / 2, barY = pool.y + pool.r * 0.6 + 8;
+        ctx.fillStyle = "rgba(180,160,130,0.3)";
+        ctx.beginPath(); ctx.roundRect(barX, barY, barW, barH, 2); ctx.fill();
+        ctx.fillStyle = pool.water > 0.3 ? "rgba(130,185,210,0.7)" : "rgba(200,160,100,0.8)";
+        ctx.beginPath(); ctx.roundRect(barX, barY, barW * pool.water, barH, 2); ctx.fill();
+      }
+
+      function drawSunbeam() {
+        if (!isDragging) return;
+        const grd = ctx.createRadialGradient(sunPos.x, sunPos.y, 0, sunPos.x, sunPos.y, SUNBEAM_RADIUS);
+        grd.addColorStop(0, "rgba(255,213,79,0.35)");
+        grd.addColorStop(0.5, "rgba(255,213,79,0.15)");
+        grd.addColorStop(1, "rgba(255,213,79,0)");
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(sunPos.x, sunPos.y, SUNBEAM_RADIUS, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(sunPos.x, sunPos.y, 12, 0, Math.PI * 2);
+        ctx.fillStyle = COL.sun; ctx.fill();
+        if (!reducedMotion) {
+          for (let i = 0; i < 8; i++) {
+            const angle = (i / 8) * Math.PI * 2 + elapsed * 0.5;
+            ctx.beginPath();
+            ctx.moveTo(sunPos.x + Math.cos(angle) * 16, sunPos.y + Math.sin(angle) * 16);
+            ctx.lineTo(sunPos.x + Math.cos(angle) * 28, sunPos.y + Math.sin(angle) * 28);
+            ctx.strokeStyle = "rgba(255,213,79,0.5)"; ctx.lineWidth = 2; ctx.stroke();
+          }
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.globalAlpha = p.life * 0.8; ctx.fillStyle = p.color; ctx.fill();
+        }
+        for (const s of sparkles) {
+          const sz = s.size * s.life;
+          ctx.beginPath();
+          ctx.moveTo(s.x - sz, s.y); ctx.lineTo(s.x, s.y - sz);
+          ctx.lineTo(s.x + sz, s.y); ctx.lineTo(s.x, s.y + sz); ctx.closePath();
+          ctx.globalAlpha = s.life * 0.8; ctx.fillStyle = COL.saltShine; ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHUD() {
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        const barW = 200, barH = 8, barX = W / 2 - barW / 2, barY = 18;
+        ctx.fillStyle = "rgba(200,180,150,0.25)";
+        ctx.beginPath(); ctx.roundRect(barX, barY, barW, barH, 4); ctx.fill();
+        const ratio = timeLeft / DURATION;
+        ctx.fillStyle = ratio > 0.25 ? "rgba(200,160,100,0.7)" : COL.fail;
+        ctx.beginPath(); ctx.roundRect(barX, barY, barW * ratio, barH, 4); ctx.fill();
+        ctx.font = "bold 20px Trebuchet MS"; ctx.textAlign = "left";
+        ctx.fillStyle = COL.hud;
+        ctx.fillText(`❄ ${crystals}/${TARGET}`, 20, 32);
+        ctx.textAlign = "center"; ctx.font = "600 16px Trebuchet MS";
+        ctx.fillText(`${Math.ceil(timeLeft)}초`, W / 2, 44);
+        ctx.textAlign = "right"; ctx.font = "400 14px Trebuchet MS";
+        ctx.fillStyle = "rgba(138,122,96,0.6)";
+        ctx.fillText(isDragging ? "☀ 가열 중..." : "드래그하세요", W - 20, 32);
+        ctx.textAlign = "left";
+      }
+
+      function drawCard(title, lines, accent, sub) {
+        ctx.fillStyle = "rgba(245,237,224,0.92)";
+        ctx.fillRect(0, 0, W, H);
+        const cardW = Math.min(600, W - 40), cardH = Math.min(360, H - 40);
+        const cardX = (W - cardW) / 2, cardY = (H - cardH) / 2;
+        ctx.fillStyle = "rgba(200,180,150,0.15)";
+        ctx.beginPath(); ctx.roundRect(cardX + 4, cardY + 4, cardW, cardH, 18); ctx.fill();
+        ctx.fillStyle = COL.cardBg;
+        ctx.beginPath(); ctx.roundRect(cardX, cardY, cardW, cardH, 18); ctx.fill();
+        ctx.fillStyle = accent;
+        ctx.beginPath(); ctx.roundRect(cardX, cardY, cardW, 6, [18, 18, 0, 0]); ctx.fill();
+        ctx.fillStyle = accent; ctx.font = "bold 32px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText(title, W / 2, cardY + 56);
+        ctx.fillStyle = "#5A4A3A"; ctx.font = "500 18px Trebuchet MS";
+        lines.forEach((line, i) => { ctx.fillText(line, W / 2, cardY + 100 + i * 36); });
+        if (sub) { ctx.fillStyle = "rgba(90,74,58,0.5)"; ctx.font = "400 15px Trebuchet MS"; ctx.fillText(sub, W / 2, cardY + cardH - 24); }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.save();
+        if (shake > 0) ctx.translate((Math.random() - 0.5) * shake * 14, (Math.random() - 0.5) * shake * 14);
+        if (mode === "menu") {
+          drawCard("소금꽃", [
+            "소금 호수에 햇빛을 모아 소금꽃을 피우세요",
+            "☀ 화면 터치 & 드래그로 햇빛 집중",
+            "❄ 소금 결정 5개 완성 → 클리어",
+            "⏱ 제한시간 40초",
+          ], COL.card, "화면 터치 또는 Enter로 시작");
+          ctx.restore(); return;
+        }
+        if (mode === "running") {
+          drawBackground();
+          for (const pool of pools) drawPool(pool);
+          drawSunbeam(); drawParticles(); drawHUD();
+          if (flashAlpha > 0) { ctx.fillStyle = `rgba(255,240,220,${flashAlpha})`; ctx.fillRect(0, 0, W, H); }
+          ctx.restore(); return;
+        }
+        if (mode === "cleared") {
+          drawBackground();
+          for (const pool of pools) drawPool(pool);
+          drawParticles();
+          ctx.globalAlpha = Math.min(1, clearAnim * 2);
+          drawCard("클리어!", [`소금꽃 ${crystals}개 완성!`, `소요 시간: ${elapsed.toFixed(1)}초`], COL.success, "탭으로 다시 시작");
+          ctx.globalAlpha = 1; ctx.restore(); return;
+        }
+        if (mode === "failed") {
+          drawBackground();
+          for (const pool of pools) drawPool(pool);
+          drawCard("실패", ["시간 내에 소금꽃을 완성하지 못했습니다", `완성: ${crystals}/${TARGET}`], COL.fail, "탭으로 다시 시작");
+          ctx.restore(); return;
+        }
+        ctx.restore();
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = function() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1), crystals,
+          pools: pools.map(p => ({ water: +p.water.toFixed(2), crystallized: p.crystallized })),
+          result: window.relayStageResult.status,
+        });
+      };
+      window.advanceTime = function(ms) {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render(); return window.render_game_to_text();
+      };
+      window.relayStageDebug = {
+        forceClear() { startGame(); doClear(); render(); },
+        forceFail() { startGame(); doFail("debug_force_fail"); render(); },
+      };
+
+      reportReady(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    </script>
+  </body>
+</html>

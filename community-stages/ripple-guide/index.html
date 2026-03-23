@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>잔물결 길잡이</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E8F4F8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(126,200,200,0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0,0,0,0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(60,90,90,0.92);
+        color: #f0fafa; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8F4F8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(126,200,200,0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">잔물결 길잡이. 고요한 호수에 탭하여 파문을 만들고 나뭇잎을 연꽃까지 안내하세요. 나뭇잎 5장을 연꽃에 안착시키면 클리어. 나뭇잎 3장이 화면 밖으로 나가면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="잔물결 길잡이" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "ripple-guide",
+        title: "잔물결 길잡이",
+        description: "고요한 호수에 파문을 일으켜 나뭇잎을 연꽃까지 안내하세요",
+        creator: "jungcollin",
+        genre: "Ripple physics",
+        clearCondition: "나뭇잎 5장을 연꽃에 안착",
+        failCondition: "나뭇잎 3장이 화면 밖으로 나가면 실패",
+        controls: "탭으로 파문을 만들어 나뭇잎을 밀어보세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // --- Colors ---
+      const COL = {
+        bg1: "#E8F4F8", bg2: "#D0EAF0", bg3: "#B8DDE8",
+        ripple: "#7EC8C8", rippleLight: "rgba(126,200,200,0.3)",
+        leaf: "#6DAF4A", leafLight: "#8BC34A", leafVein: "#4A8A2A",
+        lotus: "#F8BBD0", lotusCenter: "#FFD54F", lotusLight: "#FCE4EC",
+        hud: "#3A7A7A", hudBg: "rgba(232,244,248,0.85)",
+        card: "#3A7A7A", cardBg: "rgba(255,255,255,0.95)",
+        fail: "#C25050", success: "#4A9A5A",
+        water: "rgba(126,200,200,0.08)",
+      };
+
+      // --- State ---
+      const DURATION = 40;
+      const TARGET = 5;
+      const MAX_MISS = 3;
+      const LEAF_RADIUS = 16;
+      const LOTUS_RADIUS = 30;
+      const SETTLE_DIST = 36;
+      const SETTLE_TIME = 0.6;
+      const RIPPLE_SPEED = 180;
+      const RIPPLE_MAX_R = 200;
+      const RIPPLE_FORCE = 220;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      let settled = 0;
+      let missed = 0;
+      let currentLeaf = null;
+      let currentLotus = null;
+      let ripples = [];
+      let particles = [];
+      let ambientWaves = [];
+      let settleTimer = 0;
+
+      // --- Helpers ---
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      // --- Spawning ---
+      function randomPos(margin) {
+        return { x: rand(margin, W - margin), y: rand(margin, H - margin) };
+      }
+
+      function spawnRound() {
+        const lotusMargin = 80;
+        currentLotus = randomPos(lotusMargin);
+        // Leaf spawns away from lotus
+        let lp;
+        do {
+          lp = randomPos(60);
+        } while (dist(lp.x, lp.y, currentLotus.x, currentLotus.y) < 200);
+        currentLeaf = { x: lp.x, y: lp.y, vx: 0, vy: 0, angle: rand(0, Math.PI * 2), settled: false, alpha: 1 };
+        settleTimer = 0;
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange, speedRange) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(speedRange[0], speedRange[1]);
+          particles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 1, decay: rand(0.8, 1.5),
+            color, size: rand(sizeRange[0], sizeRange[1]),
+          });
+        }
+      }
+
+      function initAmbient() {
+        ambientWaves = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 6; i++) {
+          ambientWaves.push({
+            x: rand(0, W), y: rand(0, H),
+            r: rand(20, 80), maxR: rand(100, 200),
+            alpha: rand(0.02, 0.06), speed: rand(15, 30),
+          });
+        }
+      }
+
+      // --- Game Logic ---
+      function startGame() {
+        mode = "running";
+        elapsed = 0;
+        settled = 0;
+        missed = 0;
+        shake = 0;
+        flashAlpha = 0;
+        clearAnim = 0;
+        ripples = [];
+        particles = [];
+        hostFailedReported = false;
+        hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        initAmbient();
+        spawnRound();
+      }
+
+      function doFail(reason) {
+        mode = "failed";
+        window.relayStageResult.status = "failed";
+        reportFailed(reason);
+      }
+
+      function doClear() {
+        mode = "cleared";
+        clearAnim = 0;
+        window.relayStageResult.status = "cleared";
+        reportCleared();
+      }
+
+      // --- Input ---
+      function getCanvasPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (e.clientX - rect.left) / rect.width * W,
+          y: (e.clientY - rect.top) / rect.height * H,
+        };
+      }
+
+      function handleTap(cx, cy) {
+        if (mode === "menu" || mode === "failed" || mode === "cleared") {
+          startGame();
+          return;
+        }
+        if (mode !== "running") return;
+        ripples.push({ x: cx, y: cy, r: 0, maxR: RIPPLE_MAX_R, alpha: 0.7, speed: RIPPLE_SPEED });
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        const p = getCanvasPos(e);
+        handleTap(p.x, p.y);
+      });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          if (mode === "menu" || mode === "failed" || mode === "cleared") {
+            startGame();
+          }
+        }
+      });
+
+      // --- Update ---
+      function update(dt) {
+        if (mode !== "running") {
+          if (mode === "cleared") clearAnim += dt;
+          return;
+        }
+        elapsed += dt;
+
+        // Time up
+        if (elapsed >= DURATION) {
+          if (settled >= TARGET) doClear();
+          else doFail("시간 초과");
+          return;
+        }
+
+        // Update ripples
+        for (let i = ripples.length - 1; i >= 0; i--) {
+          const rp = ripples[i];
+          rp.r += rp.speed * dt;
+          rp.alpha = lerp(0.7, 0, rp.r / rp.maxR);
+          if (rp.r >= rp.maxR) { ripples.splice(i, 1); continue; }
+
+          // Push leaf
+          if (currentLeaf && !currentLeaf.settled) {
+            const d = dist(rp.x, rp.y, currentLeaf.x, currentLeaf.y);
+            const ringDist = Math.abs(d - rp.r);
+            if (ringDist < 25) {
+              const force = RIPPLE_FORCE * (1 - rp.r / rp.maxR) * dt;
+              if (d > 1) {
+                const dx = (currentLeaf.x - rp.x) / d;
+                const dy = (currentLeaf.y - rp.y) / d;
+                currentLeaf.vx += dx * force;
+                currentLeaf.vy += dy * force;
+              }
+            }
+          }
+        }
+
+        // Update leaf
+        if (currentLeaf && !currentLeaf.settled) {
+          const friction = 0.97;
+          currentLeaf.vx *= friction;
+          currentLeaf.vy *= friction;
+          currentLeaf.x += currentLeaf.vx * dt;
+          currentLeaf.y += currentLeaf.vy * dt;
+          currentLeaf.angle += (currentLeaf.vx * 0.01) * dt;
+
+          // Check settle on lotus
+          if (currentLotus) {
+            const d = dist(currentLeaf.x, currentLeaf.y, currentLotus.x, currentLotus.y);
+            const spd = Math.hypot(currentLeaf.vx, currentLeaf.vy);
+            if (d < SETTLE_DIST && spd < 60) {
+              settleTimer += dt;
+              if (settleTimer >= SETTLE_TIME) {
+                currentLeaf.settled = true;
+                settled++;
+                flashAlpha = 0.3;
+                spawnParticles(currentLotus.x, currentLotus.y, 12, COL.lotus, [3, 7], [30, 100]);
+                spawnParticles(currentLotus.x, currentLotus.y, 6, COL.lotusCenter, [2, 5], [20, 60]);
+                if (settled >= TARGET) { doClear(); return; }
+                setTimeout(() => { if (mode === "running") spawnRound(); }, 500);
+              }
+            } else {
+              settleTimer = Math.max(0, settleTimer - dt * 2);
+            }
+          }
+
+          // Check out of bounds
+          const margin = -30;
+          if (currentLeaf.x < margin || currentLeaf.x > W - margin ||
+              currentLeaf.y < margin || currentLeaf.y > H - margin) {
+            missed++;
+            shake = 0.3;
+            spawnParticles(
+              clamp(currentLeaf.x, 0, W),
+              clamp(currentLeaf.y, 0, H),
+              8, COL.ripple, [2, 5], [40, 80]
+            );
+            if (missed >= MAX_MISS) { doFail("나뭇잎 3장 유실"); return; }
+            spawnRound();
+          }
+        }
+
+        // Update particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vx *= 0.95;
+          p.vy *= 0.95;
+          p.life -= p.decay * dt;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        // Update ambient
+        for (const aw of ambientWaves) {
+          aw.r += aw.speed * dt;
+          if (aw.r >= aw.maxR) {
+            aw.r = rand(10, 30);
+            aw.x = rand(0, W);
+            aw.y = rand(0, H);
+            aw.maxR = rand(80, 180);
+          }
+        }
+
+        // Shake decay
+        if (shake > 0) shake = Math.max(0, shake - dt * 2);
+        if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt);
+      }
+
+      // --- Render ---
+      function drawBackground() {
+        const grd = ctx.createLinearGradient(0, 0, 0, H);
+        grd.addColorStop(0, COL.bg1);
+        grd.addColorStop(0.5, COL.bg2);
+        grd.addColorStop(1, COL.bg3);
+        ctx.fillStyle = grd;
+        ctx.fillRect(0, 0, W, H);
+
+        // Ambient waves
+        for (const aw of ambientWaves) {
+          ctx.beginPath();
+          ctx.arc(aw.x, aw.y, aw.r, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(126,200,200,${aw.alpha * (1 - aw.r / aw.maxR)})`;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+
+      function drawRipples() {
+        for (const rp of ripples) {
+          ctx.beginPath();
+          ctx.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(126,200,200,${rp.alpha})`;
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          // Inner ring
+          if (rp.r > 15) {
+            ctx.beginPath();
+            ctx.arc(rp.x, rp.y, rp.r * 0.6, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(126,200,200,${rp.alpha * 0.4})`;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawLotus(x, y) {
+        // Glow
+        ctx.beginPath();
+        ctx.arc(x, y, LOTUS_RADIUS + 10, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(248,187,208,${0.15 + 0.05 * Math.sin(elapsed * 2)})`;
+        ctx.fill();
+
+        // Petals
+        const petalCount = 5;
+        for (let i = 0; i < petalCount; i++) {
+          const angle = (i / petalCount) * Math.PI * 2 + elapsed * 0.3;
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(angle);
+          ctx.beginPath();
+          ctx.ellipse(0, -LOTUS_RADIUS * 0.5, 10, LOTUS_RADIUS * 0.6, 0, 0, Math.PI * 2);
+          ctx.fillStyle = COL.lotus;
+          ctx.fill();
+          ctx.restore();
+        }
+        // Inner petals
+        for (let i = 0; i < petalCount; i++) {
+          const angle = (i / petalCount) * Math.PI * 2 + elapsed * 0.3 + 0.3;
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(angle);
+          ctx.beginPath();
+          ctx.ellipse(0, -LOTUS_RADIUS * 0.3, 7, LOTUS_RADIUS * 0.4, 0, 0, Math.PI * 2);
+          ctx.fillStyle = COL.lotusLight;
+          ctx.fill();
+          ctx.restore();
+        }
+        // Center
+        ctx.beginPath();
+        ctx.arc(x, y, 8, 0, Math.PI * 2);
+        ctx.fillStyle = COL.lotusCenter;
+        ctx.fill();
+
+        // Settle indicator ring
+        if (settleTimer > 0) {
+          ctx.beginPath();
+          ctx.arc(x, y, SETTLE_DIST, 0, Math.PI * 2 * (settleTimer / SETTLE_TIME));
+          ctx.strokeStyle = `rgba(74,154,90,0.6)`;
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
+      }
+
+      function drawLeaf(leaf) {
+        if (!leaf) return;
+        ctx.save();
+        ctx.translate(leaf.x, leaf.y);
+        ctx.rotate(leaf.angle);
+        ctx.globalAlpha = leaf.alpha;
+
+        // Leaf body
+        ctx.beginPath();
+        ctx.ellipse(0, 0, LEAF_RADIUS, LEAF_RADIUS * 0.6, 0, 0, Math.PI * 2);
+        ctx.fillStyle = COL.leafLight;
+        ctx.fill();
+
+        // Leaf veins
+        ctx.beginPath();
+        ctx.moveTo(-LEAF_RADIUS, 0);
+        ctx.lineTo(LEAF_RADIUS, 0);
+        ctx.strokeStyle = COL.leafVein;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        for (let i = -2; i <= 2; i++) {
+          if (i === 0) continue;
+          ctx.beginPath();
+          ctx.moveTo(i * 5, 0);
+          ctx.lineTo(i * 5 + (i > 0 ? 4 : -4), i > 0 ? -5 : 5);
+          ctx.stroke();
+        }
+
+        // Leaf tip
+        ctx.beginPath();
+        ctx.moveTo(LEAF_RADIUS - 2, 0);
+        ctx.lineTo(LEAF_RADIUS + 4, -2);
+        ctx.lineTo(LEAF_RADIUS + 4, 2);
+        ctx.closePath();
+        ctx.fillStyle = COL.leaf;
+        ctx.fill();
+
+        ctx.globalAlpha = 1;
+        ctx.restore();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.globalAlpha = p.life;
+          ctx.fillStyle = p.color;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHUD() {
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        const barW = 200;
+        const barH = 8;
+        const barX = W / 2 - barW / 2;
+        const barY = 18;
+
+        // Time bar bg
+        ctx.fillStyle = "rgba(126,200,200,0.2)";
+        ctx.beginPath();
+        ctx.roundRect(barX, barY, barW, barH, 4);
+        ctx.fill();
+        // Time bar fill
+        const ratio = timeLeft / DURATION;
+        ctx.fillStyle = ratio > 0.25 ? COL.ripple : COL.fail;
+        ctx.beginPath();
+        ctx.roundRect(barX, barY, barW * ratio, barH, 4);
+        ctx.fill();
+
+        // Settled count
+        ctx.font = "bold 20px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillStyle = COL.hud;
+        ctx.fillText(`🍃 ${settled}/${TARGET}`, 20, 32);
+
+        // Missed count
+        ctx.textAlign = "right";
+        ctx.fillStyle = missed > 0 ? COL.fail : COL.hud;
+        ctx.fillText(`✕ ${missed}/${MAX_MISS}`, W - 20, 32);
+
+        // Time text
+        ctx.textAlign = "center";
+        ctx.font = "600 16px Trebuchet MS";
+        ctx.fillStyle = COL.hud;
+        ctx.fillText(`${Math.ceil(timeLeft)}초`, W / 2, 44);
+        ctx.textAlign = "left";
+      }
+
+      function drawCard(title, lines, accent, sub) {
+        ctx.fillStyle = "rgba(232,244,248,0.92)";
+        ctx.fillRect(0, 0, W, H);
+
+        const cardW = Math.min(600, W - 40);
+        const cardH = Math.min(360, H - 40);
+        const cardX = (W - cardW) / 2;
+        const cardY = (H - cardH) / 2;
+
+        // Card shadow
+        ctx.fillStyle = "rgba(126,200,200,0.15)";
+        ctx.beginPath();
+        ctx.roundRect(cardX + 4, cardY + 4, cardW, cardH, 18);
+        ctx.fill();
+
+        // Card bg
+        ctx.fillStyle = COL.cardBg;
+        ctx.beginPath();
+        ctx.roundRect(cardX, cardY, cardW, cardH, 18);
+        ctx.fill();
+
+        // Accent top bar
+        ctx.fillStyle = accent;
+        ctx.beginPath();
+        ctx.roundRect(cardX, cardY, cardW, 6, [18, 18, 0, 0]);
+        ctx.fill();
+
+        // Title
+        ctx.fillStyle = accent;
+        ctx.font = "bold 32px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, W / 2, cardY + 56);
+
+        // Lines
+        ctx.fillStyle = "#3A5A5A";
+        ctx.font = "500 18px Trebuchet MS";
+        lines.forEach((line, i) => {
+          ctx.fillText(line, W / 2, cardY + 100 + i * 36);
+        });
+
+        // Sub
+        if (sub) {
+          ctx.fillStyle = "rgba(58,90,90,0.5)";
+          ctx.font = "400 15px Trebuchet MS";
+          ctx.fillText(sub, W / 2, cardY + cardH - 24);
+        }
+
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.save();
+
+        // Shake
+        if (shake > 0) {
+          const sx = (Math.random() - 0.5) * shake * 16;
+          const sy = (Math.random() - 0.5) * shake * 16;
+          ctx.translate(sx, sy);
+        }
+
+        if (mode === "menu") {
+          drawCard("잔물결 길잡이", [
+            "호수에 탭하여 파문으로 나뭇잎을 밀어보세요",
+            "🎯 나뭇잎을 연꽃 위로 안내하면 안착!",
+            "🍃 나뭇잎 5장 안착 → 클리어",
+            "✕ 나뭇잎 3장 유실 → 실패",
+            "⏱ 제한시간 40초",
+          ], COL.card, "화면 터치 또는 Enter로 시작");
+          ctx.restore();
+          return;
+        }
+
+        if (mode === "running") {
+          drawBackground();
+          drawRipples();
+          if (currentLotus) drawLotus(currentLotus.x, currentLotus.y);
+          if (currentLeaf && !currentLeaf.settled) drawLeaf(currentLeaf);
+          drawParticles();
+          drawHUD();
+
+          // Flash
+          if (flashAlpha > 0) {
+            ctx.fillStyle = `rgba(248,187,208,${flashAlpha})`;
+            ctx.fillRect(0, 0, W, H);
+          }
+          ctx.restore();
+          return;
+        }
+
+        if (mode === "cleared") {
+          drawBackground();
+          drawParticles();
+          const a = Math.min(1, clearAnim * 2);
+          ctx.globalAlpha = a;
+          drawCard("클리어!", [
+            `나뭇잎 ${settled}장 안착 성공!`,
+            `소요 시간: ${elapsed.toFixed(1)}초`,
+          ], COL.success, "탭으로 다시 시작");
+          ctx.globalAlpha = 1;
+          ctx.restore();
+          return;
+        }
+
+        if (mode === "failed") {
+          drawBackground();
+          drawCard("실패", [
+            missed >= MAX_MISS ? "나뭇잎 3장이 유실되었습니다" : "시간이 초과되었습니다",
+            `안착: ${settled}/${TARGET}`,
+          ], COL.fail, "탭으로 다시 시작");
+          ctx.restore();
+          return;
+        }
+
+        ctx.restore();
+      }
+
+      // --- Frame Loop ---
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      // --- Relay Contracts ---
+      window.render_game_to_text = function() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          settled, missed, rippleCount: ripples.length,
+          leaf: currentLeaf ? { x: +currentLeaf.x.toFixed(0), y: +currentLeaf.y.toFixed(0) } : null,
+          lotus: currentLotus ? { x: +currentLotus.x.toFixed(0), y: +currentLotus.y.toFixed(0) } : null,
+          result: window.relayStageResult.status,
+        });
+      };
+
+      window.advanceTime = function(ms) {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render();
+        return window.render_game_to_text();
+      };
+
+      window.relayStageDebug = {
+        forceClear() { startGame(); doClear(); render(); },
+        forceFail() { startGame(); doFail("debug_force_fail"); render(); },
+      };
+
+      // --- Init ---
+      reportReady();
+      initAmbient();
+      render();
+      canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    </script>
+  </body>
+</html>
