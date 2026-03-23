@@ -979,5 +979,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "도시락 5개 완성 시 클리어",
     thumbnail: "./bento-box/thumbnail.png",
     path: "./bento-box/index.html",
+  },
+  {
+    id: "dew-garden",
+    title: "이슬 정원",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Dew collection",
+    clearCondition: "꽃 8송이에 이슬 전달",
+    thumbnail: "./dew-garden/thumbnail.png",
+    path: "./dew-garden/index.html",
   }
 ];
