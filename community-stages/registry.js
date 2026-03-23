@@ -1069,5 +1069,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "풍선 동물 5개 완성 시 클리어",
     thumbnail: "./balloon-twist/thumbnail.png",
     path: "./balloon-twist/index.html",
+  },
+  {
+    id: "sand-flow",
+    title: "모래시계",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tilt physics puzzle",
+    clearCondition: "모래를 5개 그릇에 채우면 클리어",
+    thumbnail: "./sand-flow/thumbnail.png",
+    path: "./sand-flow/index.html",
   }
 ];
