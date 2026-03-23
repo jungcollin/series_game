@@ -934,5 +934,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "먹이 10마리를 포획하면 클리어",
     thumbnail: "./web-builder/thumbnail.png",
     path: "./web-builder/index.html",
+  },
+  {
+    id: "swing-rider",
+    title: "그네 타기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Momentum timing",
+    clearCondition: "목표 높이에 5회 도달하면 클리어",
+    thumbnail: "./swing-rider/thumbnail.png",
+    path: "./swing-rider/index.html",
   }
 ];
