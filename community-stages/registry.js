@@ -1069,5 +1069,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "풍선 동물 5개 완성 시 클리어",
     thumbnail: "./balloon-twist/thumbnail.png",
     path: "./balloon-twist/index.html",
+  },
+  {
+    id: "gem-cut",
+    title: "보석 세공",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Angle cutting",
+    clearCondition: "보석 5개를 세공하면 클리어",
+    thumbnail: "./gem-cut/thumbnail.png",
+    path: "./gem-cut/index.html",
   }
 ];
