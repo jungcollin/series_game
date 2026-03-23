@@ -709,5 +709,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "마을 5개를 보호하면 클리어",
     thumbnail: "./wildfire-line/thumbnail.png",
     path: "./wildfire-line/index.html",
+  },
+  {
+    id: "iron-master",
+    title: "다림질 달인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Drag smoothing",
+    clearCondition: "옷 5벌을 다리면 클리어",
+    thumbnail: "./iron-master/thumbnail.png",
+    path: "./iron-master/index.html",
   }
 ];
