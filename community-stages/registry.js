@@ -853,5 +853,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "반죽 5개를 완성하면 클리어",
     thumbnail: "./dough-master/thumbnail.png",
     path: "./dough-master/index.html",
+  },
+  {
+    id: "fish-tug",
+    title: "물고기 줄다리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Fishing tug-of-war",
+    clearCondition: "물고기 5마리를 낚으면 클리어",
+    thumbnail: "./fish-tug/thumbnail.png",
+    path: "./fish-tug/index.html",
   }
 ];
