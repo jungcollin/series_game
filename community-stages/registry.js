@@ -988,5 +988,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "64가닥 완성 시 클리어",
     thumbnail: "./noodle-pull/thumbnail.png",
     path: "./noodle-pull/index.html",
+  },
+  {
+    id: "dew-garden",
+    title: "이슬 정원",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Dew collection",
+    clearCondition: "꽃 8송이에 이슬 전달",
+    thumbnail: "./dew-garden/thumbnail.png",
+    path: "./dew-garden/index.html",
   }
 ];
