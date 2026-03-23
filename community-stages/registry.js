@@ -1069,5 +1069,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "풍선 동물 5개 완성 시 클리어",
     thumbnail: "./balloon-twist/thumbnail.png",
     path: "./balloon-twist/index.html",
+  },
+  {
+    id: "trampoline-star",
+    title: "트램폴린 별따기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Bounce collection",
+    clearCondition: "별 15개를 모으면 클리어",
+    thumbnail: "./trampoline-star/thumbnail.png",
+    path: "./trampoline-star/index.html",
   }
 ];
