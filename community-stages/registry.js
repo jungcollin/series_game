@@ -889,5 +889,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "숨겨진 별 10개를 찾으면 클리어",
     thumbnail: "./light-reveal/thumbnail.png",
     path: "./light-reveal/index.html",
+  },
+  {
+    id: "kaleidoscope",
+    title: "만화경",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rotational pattern puzzle",
+    clearCondition: "패턴 5개를 완성하면 클리어",
+    thumbnail: "./kaleidoscope/thumbnail.png",
+    path: "./kaleidoscope/index.html",
   }
 ];
