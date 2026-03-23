@@ -891,6 +891,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./light-reveal/index.html",
   },
   {
+    id: "pinwheel-village",
+    title: "바람개비 마을",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rotational speed-matching",
+    clearCondition: "바람개비 5개를 목표 속도로 회전",
+    thumbnail: "./pinwheel-village/thumbnail.png",
+    path: "./pinwheel-village/index.html",
+  },
+  {
     id: "kaleidoscope",
     title: "만화경",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
