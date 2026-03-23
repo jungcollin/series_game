@@ -844,5 +844,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "자물쇠 5개를 열면 클리어",
     thumbnail: "./lock-picker/thumbnail.png",
     path: "./lock-picker/index.html",
+  },
+  {
+    id: "dough-master",
+    title: "반죽 장인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Kneading simulation",
+    clearCondition: "반죽 5개를 완성하면 클리어",
+    thumbnail: "./dough-master/thumbnail.png",
+    path: "./dough-master/index.html",
   }
 ];
