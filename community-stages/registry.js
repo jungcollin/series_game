@@ -1087,5 +1087,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "도미노 5줄을 모두 쓰러뜨리면 클리어",
     thumbnail: "./domino-chain/thumbnail.png",
     path: "./domino-chain/index.html",
+  },
+  {
+    id: "sand-flow",
+    title: "모래시계",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tilt physics puzzle",
+    clearCondition: "모래를 5개 그릇에 채우면 클리어",
+    thumbnail: "./sand-flow/thumbnail.png",
+    path: "./sand-flow/index.html",
   }
 ];
