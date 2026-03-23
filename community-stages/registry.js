@@ -1033,5 +1033,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "과녁 5회 명중 시 클리어",
     thumbnail: "./wind-darts/thumbnail.png",
     path: "./wind-darts/index.html",
+  },
+  {
+    id: "frost-bloom",
+    title: "서리꽃",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Drawing puzzle",
+    clearCondition: "서리 패턴 5개 완성 시 클리어",
+    thumbnail: "./frost-bloom/thumbnail.png",
+    path: "./frost-bloom/index.html",
   }
 ];
