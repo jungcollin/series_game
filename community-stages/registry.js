@@ -979,5 +979,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "도시락 5개 완성 시 클리어",
     thumbnail: "./bento-box/thumbnail.png",
     path: "./bento-box/index.html",
+  },
+  {
+    id: "quake-stack",
+    title: "지진 탑 쌓기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Earthquake stacking",
+    clearCondition: "탑 높이 10단 달성",
+    thumbnail: "./quake-stack/thumbnail.png",
+    path: "./quake-stack/index.html",
   }
 ];

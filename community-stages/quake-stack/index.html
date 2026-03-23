@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>지진 탑 쌓기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #D4E8F0; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(224, 123, 84, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(139, 125, 107, 0.92);
+        color: #fff; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #D4E8F0; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(139, 125, 107, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">지진 탑 쌓기. 화면 터치로 블록 놓기. 지진이 흔드는 와중에 블록을 쌓아 목표 높이에 도달하는 게임. 탑 높이 10단 달성하면 클리어. 탑이 3번 무너지면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="지진 탑 쌓기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "quake-stack",
+        title: "지진 탑 쌓기",
+        description: "지진이 흔드는 와중에 블록을 쌓아 목표 높이에 도달하는 게임",
+        creator: "jungcollin",
+        genre: "Earthquake stacking",
+        clearCondition: "탑 높이 10단 달성",
+        failCondition: "탑이 3번 무너지면 실패",
+        controls: "화면 터치로 블록 놓기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      /* Colors */
+      const COL = {
+        sky: "#D4E8F0", skyGrad1: "#C2DDE8", skyGrad2: "#E8F0F4",
+        block: "#E07B54", blockDark: "#C4623A", blockLight: "#F0956E",
+        ground: "#8B7D6B", groundDark: "#6B5D4B", groundLight: "#A89880",
+        accent: "#7BAF7B", accentDark: "#5A8F5A",
+        text: "#4A3A2A", textLight: "#FFF8F0",
+        cardBg: "rgba(255, 248, 240, 0.97)",
+        overlay: "rgba(74, 58, 42, 0.82)",
+        danger: "#C44040", dangerDark: "#A03030",
+        heart: "#E05050",
+      };
+
+      /* Game constants */
+      const GROUND_Y = H - 60;
+      const BLOCK_W = 80;
+      const BLOCK_H = 30;
+      const SWING_Y = 40;
+      const TARGET_STACK = 10;
+      const MAX_LIVES = 3;
+      const GAME_DURATION = 40;
+      const GRAVITY = 600;
+      const SWING_SPEED_BASE = 200;
+      const SWING_SPEED_MAX = 400;
+
+      /* State */
+      let state, animationFrame = 0, lastTimestamp = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      function initState() {
+        return {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          lives: MAX_LIVES,
+          stackedBlocks: [],   // {x, y, w, h, vx, settled}
+          swingX: W / 2,
+          swingDir: 1,
+          swingSpeed: SWING_SPEED_BASE,
+          fallingBlock: null,   // {x, y, w, h, vy}
+          quakeTimer: 0,
+          quakeInterval: 5,     // seconds between earthquakes
+          quakeActive: false,
+          quakeDuration: 0,
+          quakeIntensity: 0,
+          quakeOffsetX: 0,
+          quakeOffsetY: 0,
+          quakeCount: 0,
+          particles: [],
+          screenShake: 0,
+          screenShakeX: 0,
+          screenShakeY: 0,
+          dropReady: true,
+          wobbleTime: 0,
+          flashTimer: 0,
+          flashColor: null,
+        };
+      }
+
+      state = initState();
+
+      /* Relay host helpers */
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch(e) { return false; }
+      }
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+      }
+      function reportFailedToHost(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: Number(state.lastRunTime.toFixed(1)) });
+      }
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: Number(state.lastRunTime.toFixed(1)) });
+      }
+
+      function startStage() {
+        const s = initState();
+        s.mode = "running";
+        Object.assign(state, s);
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason) {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason || "failed");
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      /* Particle system */
+      function spawnDust(x, y, count) {
+        for (let i = 0; i < count; i++) {
+          state.particles.push({
+            x: x + (Math.random() - 0.5) * 40,
+            y: y + Math.random() * 5,
+            vx: (Math.random() - 0.5) * 80,
+            vy: -(Math.random() * 60 + 20),
+            life: 0.5 + Math.random() * 0.4,
+            maxLife: 0.5 + Math.random() * 0.4,
+            size: 2 + Math.random() * 3,
+            color: Math.random() > 0.5 ? COL.groundLight : COL.block,
+          });
+        }
+      }
+
+      function spawnCrumble(x, y, count) {
+        for (let i = 0; i < count; i++) {
+          state.particles.push({
+            x: x + (Math.random() - 0.5) * BLOCK_W,
+            y: y,
+            vx: (Math.random() - 0.5) * 150,
+            vy: -(Math.random() * 120 + 40),
+            life: 0.8 + Math.random() * 0.5,
+            maxLife: 0.8 + Math.random() * 0.5,
+            size: 3 + Math.random() * 5,
+            color: Math.random() > 0.3 ? COL.block : COL.blockDark,
+          });
+        }
+      }
+
+      /* Get tower top Y */
+      function towerTopY() {
+        if (state.stackedBlocks.length === 0) return GROUND_Y;
+        let minY = GROUND_Y;
+        for (const b of state.stackedBlocks) {
+          if (b.y < minY) minY = b.y;
+        }
+        return minY;
+      }
+
+      /* Drop block */
+      function dropBlock() {
+        if (!state.dropReady || state.fallingBlock || state.mode !== "running") return;
+        state.dropReady = false;
+        state.fallingBlock = {
+          x: state.swingX - BLOCK_W / 2,
+          y: SWING_Y,
+          w: BLOCK_W,
+          h: BLOCK_H,
+          vy: 0,
+        };
+      }
+
+      /* Check if block lands on tower or ground */
+      function checkLanding(block) {
+        // Check ground
+        if (block.y + block.h >= GROUND_Y) {
+          block.y = GROUND_Y - block.h;
+          return { landed: true, onGround: true };
+        }
+        // Check stacked blocks (from top)
+        for (let i = state.stackedBlocks.length - 1; i >= 0; i--) {
+          const sb = state.stackedBlocks[i];
+          const overlapLeft = Math.max(block.x, sb.x);
+          const overlapRight = Math.min(block.x + block.w, sb.x + sb.w);
+          const overlap = overlapRight - overlapLeft;
+          if (overlap > 10 && block.y + block.h >= sb.y && block.y + block.h <= sb.y + sb.h) {
+            block.y = sb.y - block.h;
+            return { landed: true, onGround: false, overlap };
+          }
+        }
+        // Check if block fell off screen
+        if (block.y > H + 50 || block.x + block.w < -50 || block.x > W + 50) {
+          return { missed: true };
+        }
+        return { landed: false };
+      }
+
+      /* Earthquake logic */
+      function triggerEarthquake() {
+        state.quakeActive = true;
+        state.quakeDuration = 1.0 + Math.min(state.quakeCount * 0.3, 1.5);
+        state.quakeIntensity = 3 + Math.min(state.quakeCount * 1.5, 8);
+        state.quakeCount++;
+        state.screenShake = 0.5;
+      }
+
+      function applyEarthquake(dt) {
+        if (!state.quakeActive) return;
+        state.quakeDuration -= dt;
+        if (state.quakeDuration <= 0) {
+          state.quakeActive = false;
+          state.quakeOffsetX = 0;
+          state.quakeOffsetY = 0;
+          return;
+        }
+        const intensity = state.quakeIntensity;
+        state.quakeOffsetX = (Math.random() - 0.5) * intensity * 2;
+        state.quakeOffsetY = (Math.random() - 0.5) * intensity * 0.5;
+
+        // Shift stacked blocks
+        for (const b of state.stackedBlocks) {
+          if (!b.settled) continue;
+          b.vx += (Math.random() - 0.5) * intensity * 0.8;
+        }
+      }
+
+      /* Check tower stability */
+      function checkTowerStability() {
+        let collapsed = false;
+        for (let i = state.stackedBlocks.length - 1; i >= 0; i--) {
+          const b = state.stackedBlocks[i];
+          // Check if block is supported
+          if (i === 0) {
+            // Bottom block on ground
+            if (b.x + b.w < W * 0.05 || b.x > W * 0.95) {
+              spawnCrumble(b.x + b.w / 2, b.y, 8);
+              state.stackedBlocks.splice(i, 1);
+              collapsed = true;
+            }
+            continue;
+          }
+          const below = state.stackedBlocks[i - 1];
+          const overlapL = Math.max(b.x, below.x);
+          const overlapR = Math.min(b.x + b.w, below.x + below.w);
+          const overlap = overlapR - overlapL;
+          if (overlap < 5) {
+            // Block falls off
+            spawnCrumble(b.x + b.w / 2, b.y, 8);
+            state.stackedBlocks.splice(i, 1);
+            collapsed = true;
+          }
+        }
+        return collapsed;
+      }
+
+      /* Update */
+      function update(dt) {
+        if (state.mode !== "running") return;
+        state.elapsed += dt;
+        state.wobbleTime += dt;
+
+        // Time limit
+        if (state.elapsed >= GAME_DURATION) {
+          failStage("시간 초과");
+          return;
+        }
+
+        // Swing the pending block
+        if (!state.fallingBlock) {
+          state.swingSpeed = SWING_SPEED_BASE + (state.stackedBlocks.length / TARGET_STACK) * (SWING_SPEED_MAX - SWING_SPEED_BASE);
+          state.swingX += state.swingDir * state.swingSpeed * dt;
+          if (state.swingX > W - 60) { state.swingX = W - 60; state.swingDir = -1; }
+          if (state.swingX < 60) { state.swingX = 60; state.swingDir = 1; }
+        }
+
+        // Falling block physics
+        if (state.fallingBlock) {
+          const fb = state.fallingBlock;
+          fb.vy += GRAVITY * dt;
+          fb.y += fb.vy * dt;
+
+          const result = checkLanding(fb);
+          if (result.landed) {
+            state.stackedBlocks.push({
+              x: fb.x, y: fb.y, w: fb.w, h: fb.h, vx: 0, settled: true
+            });
+            state.fallingBlock = null;
+            state.dropReady = true;
+            spawnDust(fb.x + fb.w / 2, fb.y + fb.h, 6);
+            state.screenShake = 0.15;
+
+            // Check win
+            if (state.stackedBlocks.length >= TARGET_STACK) {
+              clearStage();
+              return;
+            }
+          } else if (result.missed) {
+            state.fallingBlock = null;
+            state.dropReady = true;
+            state.lives--;
+            state.flashTimer = 0.3;
+            state.flashColor = COL.danger;
+            if (state.lives <= 0) {
+              failStage("탑이 3번 무너지면 실패");
+              return;
+            }
+          }
+        }
+
+        // Earthquake timer
+        state.quakeTimer += dt;
+        const interval = Math.max(2.5, state.quakeInterval - state.quakeCount * 0.4);
+        if (state.quakeTimer >= interval && !state.quakeActive) {
+          state.quakeTimer = 0;
+          triggerEarthquake();
+        }
+
+        // Apply earthquake
+        applyEarthquake(dt);
+
+        // Move stacked blocks by velocity and apply friction
+        for (const b of state.stackedBlocks) {
+          if (!b.settled) continue;
+          b.x += b.vx * dt;
+          b.vx *= 0.92;
+          // Clamp to screen
+          if (b.x < 0) { b.x = 0; b.vx = Math.abs(b.vx) * 0.3; }
+          if (b.x + b.w > W) { b.x = W - b.w; b.vx = -Math.abs(b.vx) * 0.3; }
+        }
+
+        // Check tower stability after earthquake
+        if (state.quakeActive) {
+          const collapsed = checkTowerStability();
+          if (collapsed) {
+            state.lives--;
+            state.flashTimer = 0.3;
+            state.flashColor = COL.danger;
+            state.screenShake = 0.3;
+            if (state.lives <= 0) {
+              failStage("탑이 3번 무너지면 실패");
+              return;
+            }
+          }
+        }
+
+        // Screen shake decay
+        if (state.screenShake > 0) {
+          state.screenShake -= dt * 2;
+          if (state.screenShake < 0) state.screenShake = 0;
+          state.screenShakeX = (Math.random() - 0.5) * state.screenShake * 12;
+          state.screenShakeY = (Math.random() - 0.5) * state.screenShake * 6;
+        } else {
+          state.screenShakeX = 0;
+          state.screenShakeY = 0;
+        }
+
+        // Flash timer
+        if (state.flashTimer > 0) state.flashTimer -= dt;
+
+        // Update particles
+        for (let i = state.particles.length - 1; i >= 0; i--) {
+          const p = state.particles[i];
+          p.life -= dt;
+          if (p.life <= 0) { state.particles.splice(i, 1); continue; }
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 120 * dt;
+        }
+      }
+
+      /* Drawing helpers */
+      function drawRoundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+      }
+
+      function drawBlock(x, y, w, h, isActive) {
+        // Shadow
+        ctx.fillStyle = "rgba(0,0,0,0.1)";
+        drawRoundRect(x + 2, y + 2, w, h, 4);
+        ctx.fill();
+        // Main
+        ctx.fillStyle = isActive ? COL.blockLight : COL.block;
+        drawRoundRect(x, y, w, h, 4);
+        ctx.fill();
+        // Top highlight
+        ctx.fillStyle = "rgba(255,255,255,0.3)";
+        ctx.fillRect(x + 4, y + 2, w - 8, 4);
+        // Bottom shade
+        ctx.fillStyle = COL.blockDark;
+        ctx.fillRect(x + 2, y + h - 6, w - 4, 4);
+        // Brick lines
+        ctx.strokeStyle = COL.blockDark;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.3;
+        ctx.beginPath();
+        ctx.moveTo(x + w * 0.33, y + 4); ctx.lineTo(x + w * 0.33, y + h - 4);
+        ctx.moveTo(x + w * 0.66, y + 4); ctx.lineTo(x + w * 0.66, y + h - 4);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHeart(cx, cy, size, filled) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.beginPath();
+        ctx.moveTo(0, size * 0.3);
+        ctx.bezierCurveTo(-size * 0.5, -size * 0.3, -size, size * 0.1, 0, size);
+        ctx.moveTo(0, size * 0.3);
+        ctx.bezierCurveTo(size * 0.5, -size * 0.3, size, size * 0.1, 0, size);
+        ctx.closePath();
+        if (filled) {
+          ctx.fillStyle = COL.heart;
+          ctx.fill();
+        } else {
+          ctx.strokeStyle = COL.heart;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      /* Render */
+      function render() {
+        ctx.save();
+
+        if (state.mode === "menu") {
+          renderMenu();
+          ctx.restore();
+          return;
+        }
+        if (state.mode === "failed") {
+          renderGame();
+          renderFailedCard();
+          ctx.restore();
+          return;
+        }
+        if (state.mode === "cleared") {
+          renderGame();
+          renderClearedCard();
+          ctx.restore();
+          return;
+        }
+
+        renderGame();
+        ctx.restore();
+      }
+
+      function renderBackground() {
+        // Sky gradient
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, COL.skyGrad2);
+        grad.addColorStop(0.7, COL.sky);
+        grad.addColorStop(1, COL.skyGrad1);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Clouds
+        ctx.fillStyle = "rgba(255,255,255,0.6)";
+        const t = state.elapsed * 8;
+        for (let i = 0; i < 4; i++) {
+          const cx = ((i * 260 + t + 100) % (W + 200)) - 100;
+          const cy = 60 + i * 35;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, 50 + i * 10, 18 + i * 3, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(cx + 30, cy - 8, 30, 14, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Ground
+        ctx.fillStyle = COL.ground;
+        ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+        ctx.fillStyle = COL.groundDark;
+        ctx.fillRect(0, GROUND_Y, W, 4);
+        // Ground texture
+        ctx.fillStyle = COL.groundLight;
+        for (let i = 0; i < 12; i++) {
+          ctx.fillRect(30 + i * 80, GROUND_Y + 15, 20, 3);
+          ctx.fillRect(60 + i * 80, GROUND_Y + 30, 15, 3);
+        }
+      }
+
+      function renderGame() {
+        ctx.save();
+        // Apply screen shake
+        const shX = state.screenShakeX + (state.quakeActive ? state.quakeOffsetX : 0);
+        const shY = state.screenShakeY + (state.quakeActive ? state.quakeOffsetY : 0);
+        ctx.translate(shX, shY);
+
+        renderBackground();
+
+        // Stacked blocks
+        for (let i = 0; i < state.stackedBlocks.length; i++) {
+          const b = state.stackedBlocks[i];
+          const wobble = state.quakeActive ? Math.sin(state.wobbleTime * 20 + i) * 1.5 : 0;
+          drawBlock(b.x + wobble, b.y, b.w, b.h, false);
+        }
+
+        // Falling block
+        if (state.fallingBlock) {
+          const fb = state.fallingBlock;
+          drawBlock(fb.x, fb.y, fb.w, fb.h, true);
+        }
+
+        // Swing indicator (pending block)
+        if (!state.fallingBlock && state.mode === "running") {
+          const sx = state.swingX - BLOCK_W / 2;
+          // Dotted line from block to tower
+          ctx.setLineDash([4, 6]);
+          ctx.strokeStyle = "rgba(224, 123, 84, 0.4)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(state.swingX, SWING_Y + BLOCK_H);
+          ctx.lineTo(state.swingX, towerTopY());
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // Swing block
+          drawBlock(sx, SWING_Y, BLOCK_W, BLOCK_H, true);
+        }
+
+        // Particles
+        for (const p of state.particles) {
+          const alpha = Math.max(0, p.life / p.maxLife);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // Earthquake warning
+        if (state.quakeActive) {
+          ctx.fillStyle = "rgba(196, 64, 64, 0.12)";
+          ctx.fillRect(0, 0, W, H);
+          // Warning text
+          ctx.save();
+          ctx.fillStyle = COL.danger;
+          ctx.font = "bold 18px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.globalAlpha = 0.5 + Math.sin(state.wobbleTime * 10) * 0.3;
+          ctx.fillText("⚠ 지진! ⚠", W / 2, H / 2 - 30);
+          ctx.restore();
+        }
+
+        ctx.restore(); // End shake transform
+
+        // Flash overlay
+        if (state.flashTimer > 0) {
+          ctx.fillStyle = "rgba(196, 64, 64," + (state.flashTimer * 0.5) + ")";
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        // HUD (no shake)
+        renderHUD();
+      }
+
+      function renderHUD() {
+        const padding = 16;
+        // Stack height - top left
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 22px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText("높이: " + state.stackedBlocks.length + " / " + TARGET_STACK, padding, 30);
+
+        // Time - top right
+        const remaining = Math.max(0, Math.ceil(GAME_DURATION - state.elapsed));
+        ctx.textAlign = "right";
+        ctx.fillStyle = remaining <= 10 ? COL.danger : COL.text;
+        ctx.fillText("시간: " + remaining + "초", W - padding, 30);
+
+        // Lives - bottom center
+        ctx.textAlign = "center";
+        const livesY = H - 24;
+        for (let i = 0; i < MAX_LIVES; i++) {
+          drawHeart(W / 2 - 30 + i * 30, livesY - 10, 10, i < state.lives);
+        }
+      }
+
+      function renderCard(title, lines, accent, accentDark) {
+        ctx.fillStyle = COL.overlay;
+        ctx.fillRect(0, 0, W, H);
+
+        const cardW = Math.min(420, W - 40);
+        const cardH = Math.min(320, H - 40);
+        const cx = (W - cardW) / 2;
+        const cy = (H - cardH) / 2;
+
+        // Card shadow
+        ctx.fillStyle = "rgba(0,0,0,0.15)";
+        drawRoundRect(cx + 4, cy + 4, cardW, cardH, 16);
+        ctx.fill();
+        // Card bg
+        ctx.fillStyle = COL.cardBg;
+        drawRoundRect(cx, cy, cardW, cardH, 16);
+        ctx.fill();
+        // Top accent bar
+        ctx.fillStyle = accent;
+        drawRoundRect(cx, cy, cardW, 8, 16);
+        ctx.fill();
+        ctx.fillRect(cx, cy + 8, cardW, 2);
+
+        // Title
+        ctx.fillStyle = accentDark || accent;
+        ctx.font = "bold 32px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, W / 2, cy + 52);
+
+        // Lines
+        ctx.fillStyle = COL.text;
+        ctx.font = "600 18px Trebuchet MS";
+        lines.forEach((line, i) => {
+          ctx.fillText(line, W / 2, cy + 90 + i * 32);
+        });
+
+        // Start prompt
+        ctx.fillStyle = "rgba(74,58,42,0.5)";
+        ctx.font = "500 16px Trebuchet MS";
+        ctx.fillText("화면 터치 또는 Enter로 시작", W / 2, cy + cardH - 24);
+        ctx.textAlign = "left";
+      }
+
+      function renderMenu() {
+        renderBackground();
+        renderCard(
+          META.title,
+          [
+            META.description,
+            "",
+            "조작: " + META.controls,
+            "클리어: " + META.clearCondition,
+            "실패: " + META.failCondition,
+          ],
+          COL.block,
+          COL.blockDark
+        );
+      }
+
+      function renderFailedCard() {
+        renderCard(
+          "실패!",
+          [
+            META.failCondition,
+            "",
+            "쌓은 높이: " + state.stackedBlocks.length + "단",
+            "경과 시간: " + state.lastRunTime.toFixed(1) + "초",
+          ],
+          COL.danger,
+          COL.dangerDark
+        );
+      }
+
+      function renderClearedCard() {
+        renderCard(
+          "클리어!",
+          [
+            META.clearCondition,
+            "",
+            "경과 시간: " + state.lastRunTime.toFixed(1) + "초",
+            "축하합니다!",
+          ],
+          COL.accent,
+          COL.accentDark
+        );
+      }
+
+      /* Input */
+      function handleInput() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        } else if (state.mode === "running") {
+          dropBlock();
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        canvas.focus();
+        handleInput();
+      });
+      canvas.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+      }, { passive: false });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleInput();
+        }
+      });
+
+      /* Game loop */
+      function frame(timestamp) {
+        const rawDt = lastTimestamp ? (timestamp - lastTimestamp) / 1000 : FIXED_DT;
+        lastTimestamp = timestamp;
+        const dt = Math.min(rawDt, MAX_DT);
+
+        let acc = dt;
+        while (acc >= FIXED_DT) {
+          update(FIXED_DT);
+          acc -= FIXED_DT;
+        }
+        if (acc > 0) update(acc);
+
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      /* Relay contract */
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          stack_height: state.stackedBlocks.length,
+          lives: state.lives,
+          quake_active: state.quakeActive,
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before: relayContext.clearCount,
+            visited: relayContext.history,
+          },
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { startStage(); clearStage(); render(); },
+        forceFail() { startStage(); failStage("debug_force_fail"); render(); },
+      };
+
+      /* Init */
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
