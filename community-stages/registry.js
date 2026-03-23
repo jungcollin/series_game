@@ -889,5 +889,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "숨겨진 별 10개를 찾으면 클리어",
     thumbnail: "./light-reveal/thumbnail.png",
     path: "./light-reveal/index.html",
+  },
+  {
+    id: "tea-steep",
+    title: "차 우리기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Hold-timing simulation",
+    clearCondition: "차 5잔을 완벽하게 우리면 클리어",
+    thumbnail: "./tea-steep/thumbnail.png",
+    path: "./tea-steep/index.html",
   }
 ];
