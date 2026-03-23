@@ -718,5 +718,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "커피 5잔을 추출하면 클리어",
     thumbnail: "./coffee-dripper/thumbnail.png",
     path: "./coffee-dripper/index.html",
+  },
+  {
+    id: "color-alchemist",
+    title: "색 연금술사",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Color mixing puzzle",
+    clearCondition: "목표 색 5개를 만들면 클리어",
+    thumbnail: "./color-alchemist/thumbnail.png",
+    path: "./color-alchemist/index.html",
   }
 ];
