@@ -1015,5 +1015,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "편지 15통 정확히 배달",
     thumbnail: "./mail-dash/thumbnail.png",
     path: "./mail-dash/index.html",
+  },
+  {
+    id: "balloon-twist",
+    title: "풍선 동물",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Shape matching",
+    clearCondition: "풍선 동물 5개 완성 시 클리어",
+    thumbnail: "./balloon-twist/thumbnail.png",
+    path: "./balloon-twist/index.html",
   }
 ];
