@@ -979,5 +979,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "도시락 5개 완성 시 클리어",
     thumbnail: "./bento-box/thumbnail.png",
     path: "./bento-box/index.html",
+  },
+  {
+    id: "mail-dash",
+    title: "우편 배달부",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Speed sorting",
+    clearCondition: "편지 15통 정확히 배달",
+    thumbnail: "./mail-dash/thumbnail.png",
+    path: "./mail-dash/index.html",
   }
 ];
