@@ -943,5 +943,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 높이에 5회 도달하면 클리어",
     thumbnail: "./swing-rider/thumbnail.png",
     path: "./swing-rider/index.html",
+  },
+  {
+    id: "tofu-master",
+    title: "두부 장인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Precision cutting",
+    clearCondition: "주문 5개를 정확히 잘라 완료",
+    thumbnail: "./tofu-master/thumbnail.png",
+    path: "./tofu-master/index.html",
   }
 ];

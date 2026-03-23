@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>두부 장인</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #f5efe6; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(120, 100, 70, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(80, 60, 30, 0.92);
+        color: #f5efe6; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #f5efe6; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(100, 80, 40, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">두부 장인. 화면을 드래그하여 두부를 정확한 크기로 잘라 주문을 완성하세요. 모바일에서는 화면 터치와 드래그로 절단선을 긋고, 두 번 탭하여 제출합니다. 주문 5개 완료 시 클리어. 3번 틀리면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="두부 장인" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "tofu-master",
+        title: "두부 장인",
+        description: "드래그로 두부를 정확한 크기로 잘라 주문을 완성하세요",
+        creator: "jungcollin",
+        genre: "Precision cutting",
+        clearCondition: "주문 5개를 정확히 잘라 완료",
+        failCondition: "3번 틀리면 실패",
+        controls: "터치 드래그로 두부 자르기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#f5efe6", board: "#c4a46c", boardDark: "#a68b55",
+        tofu: "#f0ead8", tofuShadow: "#e0d8c0", tofuEdge: "#d8d0b8",
+        knife: "#b0b8c0", knifeBlade: "#d8dce0",
+        green: "#7aaa5a", greenDark: "#5a8a3a",
+        accent: "#d4825a", gold: "#e8b840",
+        text: "#4a3a20", textLight: "rgba(74,58,32,0.6)",
+        fail: "#c05040",
+      };
+
+      const TOTAL_ORDERS = 5;
+      const MAX_MISSES = 3;
+      const TOFU_X = 200, TOFU_Y = 160;
+      const TOFU_W = 560, TOFU_H = 280;
+      const TOLERANCE = 0.12;
+
+      let mode = "menu";
+      let elapsed = 0, orders = 0, misses = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let shake = 0, clearAnim = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      // Current order
+      let targetPieces = 0;
+      let cutLines = [];
+      let isHorizontal = true;
+      let cutting = false;
+      let cutStart = null, cutEnd = null;
+      let cutPreview = null;
+      let cutAnim = 0;
+      let resultFlash = 0;
+      let resultGood = false;
+
+      let particles = [];
+      let steamParticles = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), speed = rand(30, 120);
+          particles.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, life: 1, color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+
+      function initSteam() {
+        steamParticles = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 8; i++) {
+          steamParticles.push({
+            x: TOFU_X + rand(40, TOFU_W - 40),
+            y: TOFU_Y + rand(-10, 20),
+            vy: rand(-15, -8), life: rand(0, 3), maxLife: rand(2, 4),
+            size: rand(6, 14),
+          });
+        }
+      }
+
+      function newOrder() {
+        cutLines = [];
+        const choices = [2, 3, 4, 6];
+        targetPieces = choices[Math.floor(rand(0, choices.length))];
+        isHorizontal = Math.random() > 0.5;
+        cutAnim = 0; resultFlash = 0;
+        initSteam();
+      }
+
+      function reset() {
+        elapsed = 0; orders = 0; misses = 0;
+        shake = 0; clearAnim = 0;
+        cutting = false; cutStart = null; cutEnd = null; cutPreview = null;
+        particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        newOrder();
+      }
+
+      function getCurrentPieces() {
+        return cutLines.length + 1;
+      }
+
+      function submitCut() {
+        const pieces = getCurrentPieces();
+        if (pieces === targetPieces) {
+          orders++;
+          resultGood = true; resultFlash = 1;
+          const cx = TOFU_X + TOFU_W / 2, cy = TOFU_Y + TOFU_H / 2;
+          spawnParticles(cx, cy, reducedMotion ? 4 : 10, COL.gold, [3, 7]);
+          spawnParticles(cx, cy, reducedMotion ? 2 : 6, COL.green, [2, 5]);
+          if (orders >= TOTAL_ORDERS) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared"; reportCleared();
+          } else {
+            setTimeout(() => { if (mode === "running") newOrder(); }, 600);
+          }
+        } else {
+          misses++;
+          resultGood = false; resultFlash = 1; shake = 6;
+          if (misses >= MAX_MISSES) {
+            mode = "failed";
+            window.relayStageResult.status = "failed"; reportFailed("틀림 3회");
+          } else {
+            setTimeout(() => { if (mode === "running") newOrder(); }, 600);
+          }
+        }
+      }
+
+      function addCutLine(pos) {
+        if (isHorizontal) {
+          const relY = (pos - TOFU_Y) / TOFU_H;
+          if (relY > 0.08 && relY < 0.92) {
+            const tooClose = cutLines.some(l => Math.abs(l - relY) < 0.08);
+            if (!tooClose) {
+              cutLines.push(relY);
+              cutLines.sort((a, b) => a - b);
+              cutAnim = 1;
+              spawnParticles(CX, TOFU_Y + relY * TOFU_H, reducedMotion ? 3 : 6, COL.tofu, [2, 4]);
+            }
+          }
+        } else {
+          const relX = (pos - TOFU_X) / TOFU_W;
+          if (relX > 0.08 && relX < 0.92) {
+            const tooClose = cutLines.some(l => Math.abs(l - relX) < 0.08);
+            if (!tooClose) {
+              cutLines.push(relX);
+              cutLines.sort((a, b) => a - b);
+              cutAnim = 1;
+              spawnParticles(TOFU_X + relX * TOFU_W, CY, reducedMotion ? 3 : 6, COL.tofu, [2, 4]);
+            }
+          }
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        cutAnim *= 0.9;
+        resultFlash *= 0.92;
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 150 * dt; p.life -= dt * 2.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        if (!reducedMotion) {
+          for (const s of steamParticles) {
+            s.y += s.vy * dt; s.life -= dt;
+            if (s.life <= 0) {
+              s.x = TOFU_X + rand(40, TOFU_W - 40);
+              s.y = TOFU_Y + rand(-5, 15);
+              s.life = s.maxLife;
+            }
+          }
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Background
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+
+        // Wooden cutting board
+        const bx = TOFU_X - 40, by = TOFU_Y - 30;
+        const bw = TOFU_W + 80, bh = TOFU_H + 60;
+        ctx.fillStyle = COL.board;
+        ctx.beginPath(); roundRect(ctx, bx, by, bw, bh, 12); ctx.fill();
+        ctx.fillStyle = COL.boardDark;
+        ctx.fillRect(bx + 8, by + bh - 6, bw - 16, 4);
+        // Wood grain
+        ctx.strokeStyle = "rgba(140,100,50,0.15)"; ctx.lineWidth = 1;
+        for (let i = 0; i < 6; i++) {
+          ctx.beginPath();
+          ctx.moveTo(bx + 10, by + 15 + i * (bh / 6));
+          ctx.lineTo(bx + bw - 10, by + 15 + i * (bh / 6));
+          ctx.stroke();
+        }
+
+        // Steam
+        if (!reducedMotion) {
+          for (const s of steamParticles) {
+            const alpha = clamp(s.life / s.maxLife, 0, 0.2);
+            ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255,255,255,${alpha})`; ctx.fill();
+          }
+        }
+
+        // Tofu block
+        ctx.fillStyle = COL.tofuShadow;
+        ctx.fillRect(TOFU_X + 3, TOFU_Y + 3, TOFU_W, TOFU_H);
+        ctx.fillStyle = COL.tofu;
+        ctx.fillRect(TOFU_X, TOFU_Y, TOFU_W, TOFU_H);
+        ctx.strokeStyle = COL.tofuEdge; ctx.lineWidth = 2;
+        ctx.strokeRect(TOFU_X, TOFU_Y, TOFU_W, TOFU_H);
+
+        // Tofu surface texture
+        ctx.fillStyle = "rgba(220,210,190,0.3)";
+        for (let i = 0; i < 8; i++) {
+          const tx = TOFU_X + ((i * 73 + 17) % TOFU_W);
+          const ty = TOFU_Y + ((i * 47 + 23) % TOFU_H);
+          ctx.fillRect(tx, ty, 3, 3);
+        }
+
+        // Cut lines
+        ctx.strokeStyle = "rgba(180,170,150,0.8)"; ctx.lineWidth = 2;
+        for (const l of cutLines) {
+          if (isHorizontal) {
+            const y = TOFU_Y + l * TOFU_H;
+            ctx.beginPath(); ctx.moveTo(TOFU_X, y); ctx.lineTo(TOFU_X + TOFU_W, y); ctx.stroke();
+          } else {
+            const x = TOFU_X + l * TOFU_W;
+            ctx.beginPath(); ctx.moveTo(x, TOFU_Y); ctx.lineTo(x, TOFU_Y + TOFU_H); ctx.stroke();
+          }
+        }
+
+        // Cut preview
+        if (cutting && cutPreview !== null) {
+          ctx.setLineDash([8, 4]);
+          ctx.strokeStyle = "rgba(100,80,40,0.5)"; ctx.lineWidth = 2;
+          if (isHorizontal) {
+            ctx.beginPath(); ctx.moveTo(TOFU_X, cutPreview); ctx.lineTo(TOFU_X + TOFU_W, cutPreview); ctx.stroke();
+          } else {
+            ctx.beginPath(); ctx.moveTo(cutPreview, TOFU_Y); ctx.lineTo(cutPreview, TOFU_Y + TOFU_H); ctx.stroke();
+          }
+          ctx.setLineDash([]);
+        }
+
+        // Guide lines (target)
+        if (mode === "running") {
+          ctx.setLineDash([3, 6]);
+          ctx.strokeStyle = "rgba(120,170,90,0.35)"; ctx.lineWidth = 1;
+          const neededCuts = targetPieces - 1;
+          for (let i = 1; i <= neededCuts; i++) {
+            const frac = i / targetPieces;
+            if (isHorizontal) {
+              const y = TOFU_Y + frac * TOFU_H;
+              ctx.beginPath(); ctx.moveTo(TOFU_X - 15, y); ctx.lineTo(TOFU_X, y); ctx.stroke();
+              ctx.beginPath(); ctx.moveTo(TOFU_X + TOFU_W, y); ctx.lineTo(TOFU_X + TOFU_W + 15, y); ctx.stroke();
+            } else {
+              const x = TOFU_X + frac * TOFU_W;
+              ctx.beginPath(); ctx.moveTo(x, TOFU_Y - 15); ctx.lineTo(x, TOFU_Y); ctx.stroke();
+              ctx.beginPath(); ctx.moveTo(x, TOFU_Y + TOFU_H); ctx.lineTo(x, TOFU_Y + TOFU_H + 15); ctx.stroke();
+            }
+          }
+          ctx.setLineDash([]);
+        }
+
+        // Particles
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * clamp(p.life, 0, 1), 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fill(); ctx.globalAlpha = 1;
+        }
+
+        // Result flash
+        if (resultFlash > 0.05) {
+          const color = resultGood ? "rgba(122,170,90," : "rgba(192,80,64,";
+          ctx.fillStyle = color + (resultFlash * 0.15) + ")";
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawHUD() {
+        // Order info - top center
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 20px Trebuchet MS, sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(`${targetPieces}등분으로 잘라주세요!`, CX, 16);
+
+        // Direction hint
+        ctx.font = "14px Trebuchet MS, sans-serif";
+        ctx.fillStyle = COL.textLight;
+        ctx.fillText(isHorizontal ? "↕ 가로로 자르기" : "↔ 세로로 자르기", CX, 44);
+
+        // Current pieces
+        ctx.font = "bold 16px Trebuchet MS, sans-serif";
+        ctx.fillStyle = COL.green;
+        ctx.fillText(`현재: ${getCurrentPieces()}조각`, CX, 68);
+
+        // Orders completed (top-left)
+        ctx.textAlign = "left";
+        ctx.font = "bold 15px Trebuchet MS, sans-serif";
+        ctx.fillStyle = COL.text;
+        ctx.fillText(`주문: ${orders}/${TOTAL_ORDERS}`, 20, 16);
+
+        // Misses (top-right)
+        ctx.textAlign = "right";
+        ctx.fillStyle = misses > 0 ? COL.fail : COL.textLight;
+        ctx.fillText(`실수: ${misses}/${MAX_MISSES}`, W - 20, 16);
+
+        // Submit hint
+        if (cutLines.length > 0) {
+          ctx.textAlign = "center";
+          ctx.font = "bold 15px Trebuchet MS, sans-serif";
+          ctx.fillStyle = COL.accent;
+          const btnY = TOFU_Y + TOFU_H + 40;
+          ctx.beginPath(); roundRect(ctx, CX - 70, btnY - 4, 140, 32, 8);
+          ctx.fillStyle = "rgba(212,130,90,0.15)"; ctx.fill();
+          ctx.fillStyle = COL.accent;
+          ctx.fillText("두 번 탭하여 제출", CX, btnY + 8);
+        }
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.moveTo(x + r, y); c.lineTo(x + w - r, y); c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r); c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h); c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40), lineH = 26;
+        const cardH = 48 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(245,239,230,0.96)"; ctx.beginPath(); roundRect(ctx, cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 14, cardY, cardW - 28, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 24px Trebuchet MS, sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cardY + 18);
+        ctx.font = "400 14px Trebuchet MS, sans-serif"; ctx.fillStyle = COL.textLight;
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        ctx.fillStyle = "rgba(74,58,32,0.35)"; ctx.font = "400 13px Trebuchet MS, sans-serif";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(245,239,230,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("두부 장인", [
+          "드래그로 두부를 정확히 잘라주세요",
+          "",
+          "조작: 터치 드래그로 절단선 긋기",
+          "클리어: 주문 5개 완료",
+          "실패: 3번 틀리면 실패",
+        ], COL.accent);
+      }
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(245,239,230,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, `주문 ${orders}개 달성`], COL.green);
+      }
+      function drawFailed() {
+        ctx.fillStyle = "rgba(120,60,40,0.25)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["너무 많이 틀렸습니다", `완료: ${orders} / ${TOTAL_ORDERS}`], COL.fail);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function isInTofu(x, y) {
+        return x >= TOFU_X && x <= TOFU_X + TOFU_W && y >= TOFU_Y && y <= TOFU_Y + TOFU_H;
+      }
+
+      let lastTapTime = 0;
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+
+        // Double tap to submit
+        const now = Date.now();
+        if (now - lastTapTime < 400 && cutLines.length > 0) {
+          submitCut();
+          lastTapTime = 0;
+          return;
+        }
+        lastTapTime = now;
+
+        if (isInTofu(p.x, p.y)) {
+          cutting = true;
+          cutStart = p;
+          cutPreview = isHorizontal ? p.y : p.x;
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!cutting || mode !== "running") return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        cutPreview = isHorizontal ? p.y : p.x;
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (!cutting || mode !== "running") { cutting = false; return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        cutting = false; cutPreview = null;
+
+        if (isHorizontal) {
+          const dragDist = cutStart ? Math.abs(p.x - cutStart.x) : 0;
+          if (dragDist > 30 || isInTofu(p.x, p.y)) {
+            addCutLine(p.y);
+          }
+        } else {
+          const dragDist = cutStart ? Math.abs(p.y - cutStart.y) : 0;
+          if (dragDist > 30 || isInTofu(p.x, p.y)) {
+            addCutLine(p.x);
+          }
+        }
+        cutStart = null;
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") { handleStart(); return; }
+          if (cutLines.length > 0) submitCut();
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), orders, misses, targetPieces, currentPieces: getCurrentPieces(), result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; orders = TOTAL_ORDERS; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; misses = MAX_MISSES; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      initSteam(); reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
