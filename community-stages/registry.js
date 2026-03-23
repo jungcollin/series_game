@@ -952,5 +952,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "주문 5개를 정확히 잘라 완료",
     thumbnail: "./tofu-master/thumbnail.png",
     path: "./tofu-master/index.html",
+  },
+  {
+    id: "frozen-lake",
+    title: "얼음 호수",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Ice path puzzle",
+    clearCondition: "호수 반대편에 도달하면 클리어",
+    thumbnail: "./frozen-lake/thumbnail.png",
+    path: "./frozen-lake/index.html",
   }
 ];
