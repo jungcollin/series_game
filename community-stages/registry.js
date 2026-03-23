@@ -781,5 +781,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "풍선껌 5개를 목표 크기로 완성",
     thumbnail: "./bubblegum-pop/thumbnail.png",
     path: "./bubblegum-pop/index.html",
+  },
+  {
+    id: "path-racer",
+    title: "길 만들기 레이서",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Puzzle racing",
+    clearCondition: "결승선까지 길을 완성하면 클리어",
+    thumbnail: "./path-racer/thumbnail.png",
+    path: "./path-racer/index.html",
   }
 ];
