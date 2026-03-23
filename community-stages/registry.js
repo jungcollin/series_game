@@ -709,5 +709,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "마을 5개를 보호하면 클리어",
     thumbnail: "./wildfire-line/thumbnail.png",
     path: "./wildfire-line/index.html",
+  },
+  {
+    id: "color-alchemist",
+    title: "색 연금술사",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Color mixing puzzle",
+    clearCondition: "목표 색 5개를 만들면 클리어",
+    thumbnail: "./color-alchemist/thumbnail.png",
+    path: "./color-alchemist/index.html",
   }
 ];
