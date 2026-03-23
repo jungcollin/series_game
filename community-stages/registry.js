@@ -664,5 +664,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "정상에 도달하면 클리어",
     thumbnail: "./summit-climber/thumbnail.png",
     path: "./summit-climber/index.html",
+  },
+  {
+    id: "light-mirror",
+    title: "빛의 거울",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Reflection puzzle",
+    clearCondition: "퍼즐 5개를 풀면 클리어",
+    thumbnail: "./light-mirror/thumbnail.png",
+    path: "./light-mirror/index.html",
   }
 ];
