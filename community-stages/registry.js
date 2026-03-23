@@ -880,5 +880,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "꽃 8송이를 피우면 클리어",
     thumbnail: "./spring-thaw/thumbnail.png",
     path: "./spring-thaw/index.html",
+  },
+  {
+    id: "light-reveal",
+    title: "빛의 탐험",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Light discovery",
+    clearCondition: "숨겨진 별 10개를 찾으면 클리어",
+    thumbnail: "./light-reveal/thumbnail.png",
+    path: "./light-reveal/index.html",
   }
 ];
