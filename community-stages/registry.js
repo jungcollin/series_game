@@ -754,5 +754,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "옷 5벌을 다리면 클리어",
     thumbnail: "./iron-master/thumbnail.png",
     path: "./iron-master/index.html",
+  },
+  {
+    id: "salt-bloom",
+    title: "소금꽃",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Evaporation puzzle",
+    clearCondition: "소금 결정 5개를 피우면 클리어",
+    thumbnail: "./salt-bloom/thumbnail.png",
+    path: "./salt-bloom/index.html",
   }
 ];
