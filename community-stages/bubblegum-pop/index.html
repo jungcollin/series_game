@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>풍선껌 대회</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #FFF8E8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(240,128,160,0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0,0,0,0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(200,80,120,0.92);
+        color: #fff8f0; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #FFF8E8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(240,128,160,0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">풍선껌 대회. 화면 터치를 꾹 눌러 풍선껌을 부세요. 목표 크기 범위에서 손을 떼면 성공. 풍선껌 5개를 목표 크기로 완성하면 클리어. 풍선껌 3개가 터지면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="풍선껌 대회" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "bubblegum-pop",
+        title: "풍선껌 대회",
+        description: "풍선껌을 목표 크기에 맞춰 부는 대회",
+        creator: "jungcollin",
+        genre: "Pressure control",
+        clearCondition: "풍선껌 5개를 목표 크기로 완성",
+        failCondition: "풍선껌 3개가 터지면 실패",
+        controls: "화면 터치를 꾹 눌러 풍선껌을 부세요",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        gum: "#F080A0", gumLight: "#F8A0C0", gumDark: "#D06080",
+        gumShine: "rgba(255,255,255,0.4)",
+        mint: "#A0E8D0", mintDark: "#70C0A8",
+        yellow: "#FFE8A0", yellowDark: "#E8C870",
+        bg1: "#FFF8E8", bg2: "#FFF0D8",
+        target: "rgba(100,200,160,0.3)", targetLine: "#70C0A8",
+        pop: "#FF6090", popLight: "#FFA0C0",
+        hud: "#A06080", fail: "#D05060", success: "#60A070",
+        cardBg: "rgba(255,255,255,0.95)", card: "#A06080",
+      };
+
+      const TARGET_COUNT = 5;
+      const MAX_POP = 3;
+      const GROW_SPEED = 80;
+      const MAX_RADIUS = 160;
+      const POP_RADIUS = 170;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let flashAlpha = 0;
+      let clearAnim = 0;
+
+      let successes = 0;
+      let pops = 0;
+      let round = 0;
+      let gumRadius = 0;
+      let targetMin = 0;
+      let targetMax = 0;
+      let isBlowing = false;
+      let gumState = "idle"; // idle, blowing, success, popped
+      let stateTimer = 0;
+      let particles = [];
+      let wobble = 0;
+      let faceY = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color, sizeR, speedR) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2);
+          const spd = rand(speedR[0], speedR[1]);
+          particles.push({
+            x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd,
+            life: 1, decay: rand(0.8, 1.5), color, size: rand(sizeR[0], sizeR[1]),
+          });
+        }
+      }
+
+      const targetRanges = [
+        [60, 80], [80, 110], [50, 70], [100, 130], [70, 95],
+        [90, 120], [55, 75], [110, 140], [65, 85], [85, 110],
+      ];
+
+      function nextRound() {
+        const tr = targetRanges[round % targetRanges.length];
+        targetMin = tr[0];
+        targetMax = tr[1];
+        gumRadius = 10;
+        gumState = "idle";
+        stateTimer = 0;
+        wobble = 0;
+      }
+
+      function startGame() {
+        mode = "running"; elapsed = 0;
+        successes = 0; pops = 0; round = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        nextRound();
+      }
+
+      function doFail(reason) {
+        mode = "failed";
+        window.relayStageResult.status = "failed";
+        reportFailed(reason);
+      }
+
+      function doClear() {
+        mode = "cleared"; clearAnim = 0;
+        window.relayStageResult.status = "cleared";
+        reportCleared();
+      }
+
+      // Input
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { startGame(); return; }
+        if (gumState === "idle" || gumState === "blowing") {
+          isBlowing = true;
+          gumState = "blowing";
+        }
+      });
+      canvas.addEventListener("pointerup", () => {
+        if (mode !== "running" || !isBlowing) return;
+        isBlowing = false;
+        if (gumState === "blowing") {
+          if (gumRadius >= targetMin && gumRadius <= targetMax) {
+            gumState = "success";
+            stateTimer = 0;
+            successes++;
+            flashAlpha = 0.2;
+            spawnParticles(CX, CY - 40, 10, COL.mint, [3, 8], [30, 80]);
+            if (successes >= TARGET_COUNT) { doClear(); return; }
+          } else if (gumRadius < targetMin) {
+            // Too small - deflate, try again
+            gumState = "idle";
+            gumRadius = 10;
+          }
+        }
+      });
+      canvas.addEventListener("pointercancel", () => { isBlowing = false; });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && mode !== "running") startGame();
+        if (e.key === " " && mode === "running") {
+          isBlowing = true; gumState = "blowing";
+        }
+      });
+      window.addEventListener("keyup", (e) => {
+        if (e.key === " " && mode === "running") {
+          isBlowing = false;
+          if (gumState === "blowing") {
+            if (gumRadius >= targetMin && gumRadius <= targetMax) {
+              gumState = "success"; stateTimer = 0; successes++;
+              flashAlpha = 0.2;
+              spawnParticles(CX, CY - 40, 10, COL.mint, [3, 8], [30, 80]);
+              if (successes >= TARGET_COUNT) { doClear(); return; }
+            } else if (gumRadius < targetMin) {
+              gumState = "idle"; gumRadius = 10;
+            }
+          }
+        }
+      });
+
+      function update(dt) {
+        if (mode !== "running") { if (mode === "cleared") clearAnim += dt; return; }
+        elapsed += dt;
+        wobble += dt * 5;
+        faceY = Math.sin(elapsed * 3) * 2;
+
+        if (gumState === "blowing" && isBlowing) {
+          const speed = GROW_SPEED * (1 + gumRadius / MAX_RADIUS * 0.5);
+          gumRadius += speed * dt;
+          if (gumRadius >= POP_RADIUS) {
+            gumState = "popped"; stateTimer = 0; pops++;
+            shake = 0.5;
+            spawnParticles(CX, CY - 40, 20, COL.pop, [4, 12], [60, 180]);
+            spawnParticles(CX, CY - 40, 10, COL.popLight, [2, 6], [40, 120]);
+            if (pops >= MAX_POP) { doFail("풍선껌 3개 터짐"); return; }
+          }
+        }
+
+        if (gumState === "success" || gumState === "popped") {
+          stateTimer += dt;
+          if (stateTimer > 1) {
+            round++;
+            nextRound();
+          }
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 80 * dt; p.vx *= 0.98;
+          p.life -= p.decay * dt;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+        if (shake > 0) shake = Math.max(0, shake - dt * 3);
+        if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt);
+      }
+
+      function drawBackground() {
+        const grd = ctx.createLinearGradient(0, 0, 0, H);
+        grd.addColorStop(0, COL.bg1);
+        grd.addColorStop(1, COL.bg2);
+        ctx.fillStyle = grd;
+        ctx.fillRect(0, 0, W, H);
+
+        // Decorative dots
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.06;
+          for (let i = 0; i < 30; i++) {
+            const dx = (i * 97.3) % W, dy = (i * 67.1) % H;
+            ctx.beginPath();
+            ctx.arc(dx, dy, 4 + (i % 4) * 2, 0, Math.PI * 2);
+            ctx.fillStyle = i % 2 === 0 ? COL.gum : COL.mint;
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawFace() {
+        const fY = CY + 80 + faceY;
+        // Head
+        ctx.beginPath();
+        ctx.arc(CX, fY, 35, 0, Math.PI * 2);
+        ctx.fillStyle = "#FFE0C0";
+        ctx.fill();
+        ctx.strokeStyle = "#E0B890";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Eyes
+        const eyeY = fY - 8;
+        const blink = Math.sin(elapsed * 4) > 0.95;
+        if (blink) {
+          ctx.beginPath();
+          ctx.moveTo(CX - 12, eyeY); ctx.lineTo(CX - 6, eyeY);
+          ctx.moveTo(CX + 6, eyeY); ctx.lineTo(CX + 12, eyeY);
+          ctx.strokeStyle = "#6A4A3A"; ctx.lineWidth = 2; ctx.stroke();
+        } else {
+          ctx.fillStyle = "#6A4A3A";
+          ctx.beginPath(); ctx.arc(CX - 9, eyeY, 3, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.arc(CX + 9, eyeY, 3, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // Cheeks
+        ctx.beginPath(); ctx.arc(CX - 20, fY, 6, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(240,128,160,0.3)"; ctx.fill();
+        ctx.beginPath(); ctx.arc(CX + 20, fY, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Mouth/gum connection
+        if (gumState === "blowing" || gumState === "success") {
+          ctx.beginPath();
+          ctx.moveTo(CX - 4, fY + 10);
+          ctx.quadraticCurveTo(CX, fY + 16, CX + 4, fY + 10);
+          ctx.strokeStyle = COL.gumDark; ctx.lineWidth = 2; ctx.stroke();
+        } else {
+          ctx.beginPath();
+          ctx.arc(CX, fY + 8, 4, 0, Math.PI);
+          ctx.strokeStyle = "#C08060"; ctx.lineWidth = 1.5; ctx.stroke();
+        }
+
+        // Hair
+        ctx.fillStyle = "#8B6040";
+        ctx.beginPath();
+        ctx.ellipse(CX, fY - 32, 30, 12, 0, Math.PI, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawGum() {
+        if (gumState === "idle") return;
+        if (gumState === "popped") return;
+
+        const gY = CY - 10;
+        const w = Math.sin(wobble) * 3 * (gumRadius / MAX_RADIUS);
+        const r = gumRadius + w;
+
+        // Gum shadow
+        ctx.beginPath();
+        ctx.ellipse(CX, gY + r * 0.8, r * 0.5, r * 0.15, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(200,80,120,0.1)";
+        ctx.fill();
+
+        // Gum body
+        const grd = ctx.createRadialGradient(CX - r * 0.2, gY - r * 0.2, 0, CX, gY, r);
+        grd.addColorStop(0, COL.gumLight);
+        grd.addColorStop(0.7, COL.gum);
+        grd.addColorStop(1, COL.gumDark);
+        ctx.beginPath();
+        ctx.arc(CX, gY, r, 0, Math.PI * 2);
+        ctx.fillStyle = grd;
+        ctx.fill();
+
+        // Shine
+        ctx.beginPath();
+        ctx.ellipse(CX - r * 0.25, gY - r * 0.25, r * 0.15, r * 0.1, -0.5, 0, Math.PI * 2);
+        ctx.fillStyle = COL.gumShine;
+        ctx.fill();
+
+        // Success check
+        if (gumState === "success") {
+          ctx.font = `bold ${Math.min(40, r * 0.4)}px Trebuchet MS`;
+          ctx.textAlign = "center";
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText("✓", CX, gY + r * 0.15);
+          ctx.textAlign = "left";
+        }
+
+        // Stem to mouth
+        ctx.beginPath();
+        ctx.moveTo(CX - 5, CY + 80 + faceY + 10);
+        ctx.quadraticCurveTo(CX, CY + 40, CX, gY + r);
+        ctx.strokeStyle = COL.gumDark;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+      }
+
+      function drawTargetRing() {
+        if (gumState !== "idle" && gumState !== "blowing") return;
+        const gY = CY - 10;
+
+        // Target zone ring
+        ctx.beginPath();
+        ctx.arc(CX, gY, targetMin, 0, Math.PI * 2);
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = COL.targetLine;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(CX, gY, targetMax, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Fill zone
+        ctx.beginPath();
+        ctx.arc(CX, gY, targetMax, 0, Math.PI * 2);
+        ctx.arc(CX, gY, targetMin, 0, Math.PI * 2, true);
+        ctx.fillStyle = COL.target;
+        ctx.fill();
+
+        // Label
+        ctx.font = "500 14px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillStyle = COL.mintDark;
+        ctx.fillText("목표 범위", CX, gY - targetMax - 8);
+        ctx.textAlign = "left";
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.globalAlpha = p.life;
+          ctx.fillStyle = p.color;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHUD() {
+        ctx.font = "bold 20px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillStyle = COL.hud;
+        ctx.fillText(`✓ ${successes}/${TARGET_COUNT}`, 20, 32);
+
+        ctx.textAlign = "right";
+        ctx.fillStyle = pops > 0 ? COL.fail : COL.hud;
+        ctx.fillText(`💥 ${pops}/${MAX_POP}`, W - 20, 32);
+
+        ctx.textAlign = "center";
+        ctx.font = "600 16px Trebuchet MS";
+        ctx.fillStyle = COL.hud;
+        ctx.fillText(`라운드 ${round + 1}`, W / 2, 32);
+
+        // Blowing indicator
+        if (gumState === "blowing") {
+          const inZone = gumRadius >= targetMin && gumRadius <= targetMax;
+          const danger = gumRadius > targetMax;
+          ctx.font = "bold 18px Trebuchet MS";
+          ctx.fillStyle = inZone ? COL.success : (danger ? COL.fail : COL.hud);
+          ctx.fillText(
+            inZone ? "지금 놓으세요!" : (danger ? "위험! 터진다!" : "더 부세요..."),
+            W / 2, H - 30
+          );
+        }
+        ctx.textAlign = "left";
+      }
+
+      function drawCard(title, lines, accent, sub) {
+        ctx.fillStyle = "rgba(255,248,232,0.92)";
+        ctx.fillRect(0, 0, W, H);
+        const cardW = Math.min(600, W - 40), cardH = Math.min(360, H - 40);
+        const cardX = (W - cardW) / 2, cardY = (H - cardH) / 2;
+        ctx.fillStyle = "rgba(240,180,200,0.12)";
+        ctx.beginPath(); ctx.roundRect(cardX + 4, cardY + 4, cardW, cardH, 18); ctx.fill();
+        ctx.fillStyle = COL.cardBg;
+        ctx.beginPath(); ctx.roundRect(cardX, cardY, cardW, cardH, 18); ctx.fill();
+        ctx.fillStyle = accent;
+        ctx.beginPath(); ctx.roundRect(cardX, cardY, cardW, 6, [18, 18, 0, 0]); ctx.fill();
+        ctx.fillStyle = accent; ctx.font = "bold 32px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText(title, W / 2, cardY + 56);
+        ctx.fillStyle = "#6A4A5A"; ctx.font = "500 18px Trebuchet MS";
+        lines.forEach((line, i) => { ctx.fillText(line, W / 2, cardY + 100 + i * 36); });
+        if (sub) { ctx.fillStyle = "rgba(106,74,90,0.5)"; ctx.font = "400 15px Trebuchet MS"; ctx.fillText(sub, W / 2, cardY + cardH - 24); }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        ctx.save();
+        if (shake > 0) ctx.translate((Math.random() - 0.5) * shake * 16, (Math.random() - 0.5) * shake * 16);
+
+        if (mode === "menu") {
+          drawCard("풍선껌 대회", [
+            "풍선껌을 목표 크기에 맞춰 부세요!",
+            "🎈 화면 터치를 꾹 눌러 풍선껌을 부세요",
+            "✓ 목표 범위에서 손을 떼면 성공",
+            "💥 너무 크면 터져요! 3번 터지면 실패",
+            "🏆 5개 성공하면 클리어",
+          ], COL.card, "화면 터치 또는 Enter로 시작");
+          ctx.restore(); return;
+        }
+
+        if (mode === "running") {
+          drawBackground();
+          drawTargetRing();
+          drawFace();
+          drawGum();
+          drawParticles();
+          drawHUD();
+          if (flashAlpha > 0) { ctx.fillStyle = `rgba(160,232,208,${flashAlpha})`; ctx.fillRect(0, 0, W, H); }
+          ctx.restore(); return;
+        }
+
+        if (mode === "cleared") {
+          drawBackground();
+          drawParticles();
+          ctx.globalAlpha = Math.min(1, clearAnim * 2);
+          drawCard("클리어!", [`풍선껌 ${successes}개 완성!`, `소요 시간: ${elapsed.toFixed(1)}초`], COL.success, "탭으로 다시 시작");
+          ctx.globalAlpha = 1; ctx.restore(); return;
+        }
+
+        if (mode === "failed") {
+          drawBackground();
+          drawCard("실패", ["풍선껌이 3번 터졌습니다!", `성공: ${successes}/${TARGET_COUNT}`], COL.fail, "탭으로 다시 시작");
+          ctx.restore(); return;
+        }
+        ctx.restore();
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt); render();
+        animFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = function() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1), successes, pops, round,
+          gumRadius: +gumRadius.toFixed(0), gumState,
+          target: { min: targetMin, max: targetMax },
+          result: window.relayStageResult.status,
+        });
+      };
+      window.advanceTime = function(ms) {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        render(); return window.render_game_to_text();
+      };
+      window.relayStageDebug = {
+        forceClear() { startGame(); doClear(); render(); },
+        forceFail() { startGame(); doFail("debug_force_fail"); render(); },
+      };
+
+      reportReady(); render(); canvas.focus();
+      animFrame = requestAnimationFrame(frame);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    </script>
+  </body>
+</html>

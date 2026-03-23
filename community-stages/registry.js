@@ -754,5 +754,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "옷 5벌을 다리면 클리어",
     thumbnail: "./iron-master/thumbnail.png",
     path: "./iron-master/index.html",
+  },
+  {
+    id: "bubblegum-pop",
+    title: "풍선껌 대회",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pressure control",
+    clearCondition: "풍선껌 5개를 목표 크기로 완성",
+    thumbnail: "./bubblegum-pop/thumbnail.png",
+    path: "./bubblegum-pop/index.html",
   }
 ];
