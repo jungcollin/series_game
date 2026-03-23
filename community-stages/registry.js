@@ -1042,5 +1042,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "서리 패턴 5개 완성 시 클리어",
     thumbnail: "./frost-bloom/thumbnail.png",
     path: "./frost-bloom/index.html",
+  },
+  {
+    id: "sound-garden",
+    title: "소리 정원",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Meditative placement",
+    clearCondition: "조화로운 소리 풍경 완성",
+    thumbnail: "./sound-garden/thumbnail.png",
+    path: "./sound-garden/index.html",
   }
 ];
