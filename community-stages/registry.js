@@ -808,5 +808,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "폭탄 5개를 해제하면 클리어",
     thumbnail: "./bomb-defusal/thumbnail.png",
     path: "./bomb-defusal/index.html",
+  },
+  {
+    id: "paper-plane",
+    title: "종이비행기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Flick launch",
+    clearCondition: "링 8개를 통과하면 클리어",
+    thumbnail: "./paper-plane/thumbnail.png",
+    path: "./paper-plane/index.html",
   }
 ];
