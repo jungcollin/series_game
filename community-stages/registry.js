@@ -1051,5 +1051,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "조화로운 소리 풍경 완성",
     thumbnail: "./sound-garden/thumbnail.png",
     path: "./sound-garden/index.html",
+  },
+  {
+    id: "balloon-twist",
+    title: "풍선 동물",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Shape matching",
+    clearCondition: "풍선 동물 5개 완성 시 클리어",
+    thumbnail: "./balloon-twist/thumbnail.png",
+    path: "./balloon-twist/index.html",
   }
 ];
