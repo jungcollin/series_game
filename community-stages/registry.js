@@ -1114,5 +1114,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "별 15개를 모으면 클리어",
     thumbnail: "./trampoline-star/thumbnail.png",
     path: "./trampoline-star/index.html",
+  },
+  {
+    id: "bibimbap-mix",
+    title: "비빔밥 비비기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Mixing action",
+    clearCondition: "모든 재료를 골고루 비비면 클리어",
+    thumbnail: "./bibimbap-mix/thumbnail.png",
+    path: "./bibimbap-mix/index.html",
   }
 ];
