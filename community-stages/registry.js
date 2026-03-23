@@ -1069,5 +1069,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "풍선 동물 5개 완성 시 클리어",
     thumbnail: "./balloon-twist/thumbnail.png",
     path: "./balloon-twist/index.html",
+  },
+  {
+    id: "domino-chain",
+    title: "도미노 연쇄",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Chain reaction puzzle",
+    clearCondition: "도미노 5줄을 모두 쓰러뜨리면 클리어",
+    thumbnail: "./domino-chain/thumbnail.png",
+    path: "./domino-chain/index.html",
   }
 ];
