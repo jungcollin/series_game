@@ -709,5 +709,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "마을 5개를 보호하면 클리어",
     thumbnail: "./wildfire-line/thumbnail.png",
     path: "./wildfire-line/index.html",
+  },
+  {
+    id: "moon-tide",
+    title: "달과 바다",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tidal control",
+    clearCondition: "배 5척을 입항시키면 클리어",
+    thumbnail: "./moon-tide/thumbnail.png",
+    path: "./moon-tide/index.html",
   }
 ];

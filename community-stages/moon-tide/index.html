@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>달과 바다</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #d4e6f1; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(60, 80, 120, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(30, 50, 80, 0.92);
+        color: #e8f0f8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px; overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #d4e6f1; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(60, 80, 120, 0.5); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">달과 바다. 달의 위치를 조절하여 조석을 만들고 배를 항구로 안내하세요. 모바일에서는 화면 위쪽의 달을 터치하여 좌우로 드래그합니다. PC에서는 마우스 드래그로 조작합니다. 배 5척을 입항시키면 클리어. 배 3척이 좌초하면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="달과 바다" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60, MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "moon-tide", title: "달과 바다",
+        description: "달의 위치를 조절하여 조석을 만들고 배를 항구로 안내하세요.",
+        creator: "jungcollin", genre: "Tidal control",
+        clearCondition: "배 5척을 입항시키면 클리어",
+        failCondition: "배 3척이 좌초하면 실패",
+        controls: "터치 드래그로 달의 위치를 이동",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0, previousStageId: null };
+      window.relayStageMeta = { id: META.id, title: META.title, description: META.description, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition, failCondition: META.failCondition, controls: META.controls };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        sky: "#b8d4e8", skyTop: "#8ab4d4", sea: "#4a8ab0", seaDeep: "#2a6a90",
+        sand: "#e8d8b0", sandDark: "#c8b890", moon: "#f0e8d0", moonGlow: "rgba(240,232,208,0.3)",
+        boat: "#8b6040", boatSail: "#f0ece4", harbor: "#6a5a4a",
+        text: "#2a4060", accent: "#5a8ab0", fail: "#b04040",
+      };
+
+      const BOATS_TO_WIN = 5, MAX_STRAND = 3;
+      const SEA_BASE_Y = 340, HARBOR_X = W - 100, HARBOR_W = 60;
+      const HARBOR_MIN_Y = SEA_BASE_Y - 30, HARBOR_MAX_Y = SEA_BASE_Y + 10;
+
+      let mode = "menu", elapsed = 0, docked = 0, stranded = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, flashAlpha = 0, clearAnim = 0;
+
+      let moonX = CX, moonTargetX = CX;
+      let draggingMoon = false;
+      let tideOffset = 0;
+      let boats = [];
+      let spawnTimer = 2;
+      let particles = [];
+      let wavePhase = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) }); }
+      function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) }); }
+
+      function getTideAt(x) {
+        const moonDist = Math.abs(x - moonX) / W;
+        const pull = Math.max(0, 1 - moonDist * 2.5);
+        return -pull * 50 + tideOffset;
+      }
+
+      function getSeaY(x) { return SEA_BASE_Y + getTideAt(x) + Math.sin(wavePhase + x * 0.015) * 4; }
+
+      function spawnBoat() {
+        boats.push({
+          x: -40, y: 0, speed: rand(40, 65), size: rand(18, 26),
+          alive: true, docking: false, dockTimer: 0,
+        });
+      }
+
+      function spawnParticle(x, y, color) {
+        if (reducedMotion && particles.length > 10) return;
+        particles.push({ x, y, vx: rand(-30, 30), vy: rand(-50, -20), life: 1, size: rand(2, 5), color });
+      }
+
+      function reset() {
+        elapsed = 0; docked = 0; stranded = 0;
+        shake = 0; flashAlpha = 0; clearAnim = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        moonX = CX; moonTargetX = CX;
+        boats = []; particles = []; spawnTimer = 1.5; wavePhase = 0; tideOffset = 0;
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        wavePhase += dt * 2;
+
+        // Tide follows moon with lerp
+        tideOffset = lerp(tideOffset, 0, dt * 0.5);
+        moonX = lerp(moonX, moonTargetX, clamp(6 * dt, 0, 1));
+
+        // Spawn boats
+        spawnTimer -= dt;
+        if (spawnTimer <= 0) { spawnBoat(); spawnTimer = rand(2.5, 4.5); }
+
+        // Update boats
+        for (let i = boats.length - 1; i >= 0; i--) {
+          const b = boats[i];
+          if (!b.alive) continue;
+
+          const seaY = getSeaY(b.x);
+          b.y = seaY - b.size * 0.5;
+
+          if (!b.docking) {
+            b.x += b.speed * dt;
+
+            // Check harbor entry
+            if (b.x > HARBOR_X - HARBOR_W / 2 && b.x < HARBOR_X + HARBOR_W / 2) {
+              const harborSeaY = getSeaY(HARBOR_X);
+              if (harborSeaY > HARBOR_MIN_Y && harborSeaY < HARBOR_MAX_Y) {
+                b.docking = true; b.dockTimer = 0.8;
+                docked++;
+                for (let j = 0; j < 8; j++) spawnParticle(b.x, b.y, COL.accent);
+              }
+            }
+
+            // Check if stranded (sea too low at boat position)
+            if (b.x > 100 && seaY > SEA_BASE_Y + 25) {
+              stranded++; b.alive = false;
+              shake = 5; flashAlpha = 0.2;
+              for (let j = 0; j < 6; j++) spawnParticle(b.x, b.y, COL.fail);
+            }
+
+            // Off screen right
+            if (b.x > W + 50 && !b.docking) {
+              stranded++; b.alive = false;
+              shake = 4; flashAlpha = 0.15;
+            }
+          } else {
+            b.dockTimer -= dt;
+            if (b.dockTimer <= 0) { b.alive = false; }
+          }
+        }
+
+        boats = boats.filter(b => b.alive || b.docking);
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 60 * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        flashAlpha *= 0.92;
+
+        // Win/lose
+        if (docked >= BOATS_TO_WIN) {
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared"; reportCleared();
+        } else if (stranded >= MAX_STRAND) {
+          mode = "failed"; window.relayStageResult.status = "failed";
+          reportFailed("좌초 초과");
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Sky gradient
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, SEA_BASE_Y);
+        skyGrad.addColorStop(0, COL.skyTop); skyGrad.addColorStop(1, COL.sky);
+        ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, SEA_BASE_Y + 50);
+
+        if (mode === "running") {
+          drawMoon();
+          drawSea();
+          drawHarbor();
+          drawBoats();
+          drawParticles();
+          drawHUD();
+        }
+
+        if (flashAlpha > 0.01) { ctx.fillStyle = `rgba(176,64,64,${flashAlpha})`; ctx.fillRect(0, 0, W, H); }
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawMoon() {
+        const my = 70;
+        // Glow
+        ctx.beginPath(); ctx.arc(moonX, my, 40, 0, Math.PI * 2);
+        ctx.fillStyle = COL.moonGlow; ctx.fill();
+        // Moon body
+        ctx.beginPath(); ctx.arc(moonX, my, 24, 0, Math.PI * 2);
+        ctx.fillStyle = COL.moon; ctx.fill();
+        ctx.strokeStyle = "rgba(200,190,160,0.4)"; ctx.lineWidth = 1.5; ctx.stroke();
+        // Craters
+        ctx.beginPath(); ctx.arc(moonX - 6, my - 5, 4, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(180,170,140,0.3)"; ctx.fill();
+        ctx.beginPath(); ctx.arc(moonX + 8, my + 3, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Pull indicator lines
+        ctx.strokeStyle = "rgba(200,190,160,0.15)"; ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(moonX, my + 24); ctx.lineTo(moonX, SEA_BASE_Y - 20);
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+
+      function drawSea() {
+        // Sea surface wave
+        ctx.beginPath(); ctx.moveTo(0, H);
+        for (let x = 0; x <= W; x += 4) { ctx.lineTo(x, getSeaY(x)); }
+        ctx.lineTo(W, H); ctx.closePath();
+        const seaGrad = ctx.createLinearGradient(0, SEA_BASE_Y - 50, 0, H);
+        seaGrad.addColorStop(0, COL.sea); seaGrad.addColorStop(1, COL.seaDeep);
+        ctx.fillStyle = seaGrad; ctx.fill();
+
+        // Sea foam
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.3;
+          for (let x = 20; x < W; x += 60) {
+            const sy = getSeaY(x);
+            ctx.beginPath(); ctx.arc(x + Math.sin(wavePhase + x * 0.02) * 8, sy + 2, 3, 0, Math.PI * 2);
+            ctx.fillStyle = "#c8dce8"; ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        // Sand bottom
+        ctx.fillStyle = COL.sand;
+        ctx.fillRect(0, H - 40, W, 40);
+        ctx.fillStyle = COL.sandDark;
+        ctx.fillRect(0, H - 40, W, 2);
+      }
+
+      function drawHarbor() {
+        // Harbor dock
+        const hx = HARBOR_X - HARBOR_W / 2, hy = SEA_BASE_Y - 35;
+        ctx.fillStyle = COL.harbor;
+        ctx.fillRect(hx, hy, HARBOR_W, 70);
+        ctx.fillStyle = "rgba(106,90,74,0.6)";
+        ctx.fillRect(hx, hy, HARBOR_W, 4);
+        // Posts
+        ctx.fillStyle = COL.harbor;
+        ctx.fillRect(hx - 4, hy - 15, 8, 25);
+        ctx.fillRect(hx + HARBOR_W - 4, hy - 15, 8, 25);
+        // Label
+        ctx.fillStyle = COL.text; ctx.font = '400 11px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText("항구", HARBOR_X, hy - 28);
+        // Water level indicator
+        const harborSeaY = getSeaY(HARBOR_X);
+        const ok = harborSeaY > HARBOR_MIN_Y && harborSeaY < HARBOR_MAX_Y;
+        ctx.fillStyle = ok ? "rgba(60,160,80,0.6)" : "rgba(180,80,60,0.4)";
+        ctx.fillRect(hx + 4, harborSeaY - 2, HARBOR_W - 8, 4);
+      }
+
+      function drawBoats() {
+        for (const b of boats) {
+          if (!b.alive && !b.docking) continue;
+          const alpha = b.docking ? Math.max(0, b.dockTimer / 0.8) : 1;
+          ctx.globalAlpha = alpha;
+          // Hull
+          ctx.beginPath();
+          ctx.moveTo(b.x - b.size, b.y);
+          ctx.lineTo(b.x + b.size, b.y);
+          ctx.lineTo(b.x + b.size * 0.7, b.y + b.size * 0.5);
+          ctx.lineTo(b.x - b.size * 0.7, b.y + b.size * 0.5);
+          ctx.closePath();
+          ctx.fillStyle = COL.boat; ctx.fill();
+          // Sail
+          ctx.beginPath();
+          ctx.moveTo(b.x, b.y);
+          ctx.lineTo(b.x, b.y - b.size * 1.2);
+          ctx.lineTo(b.x + b.size * 0.7, b.y - b.size * 0.3);
+          ctx.closePath();
+          ctx.fillStyle = COL.boatSail; ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = p.life;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = '500 15px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`입항: ${docked} / ${BOATS_TO_WIN}`, 24, 20);
+        ctx.textAlign = "right";
+        let ft = ""; for (let i = 0; i < MAX_STRAND; i++) ft += i < stranded ? "✕ " : "○ ";
+        ctx.fillText(ft.trim(), W - 24, 20);
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath(); c.moveTo(x + r, y); c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r); c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r); c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r); c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cW = Math.min(320, W - 40), lH = 26;
+        const cH = 42 + lines.length * lH + 40;
+        const cX = CX - cW / 2, cY = CY - cH / 2;
+        ctx.fillStyle = "rgba(212,230,241,0.95)"; roundRect(ctx, cX, cY, cW, cH, 8); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cX + 12, cY, cW - 24, 3);
+        ctx.fillStyle = COL.text; ctx.font = 'bold 22px "Trebuchet MS",sans-serif';
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cY + 16);
+        ctx.font = '400 14px "Trebuchet MS",sans-serif'; ctx.fillStyle = "rgba(42,64,96,0.7)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cY + 48 + i * lH);
+        ctx.fillStyle = "rgba(42,64,96,0.35)"; ctx.font = '400 13px "Trebuchet MS",sans-serif';
+        ctx.fillText("TAP or ENTER", CX, cY + cH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(212,230,241,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("달과 바다", [
+          "달의 위치를 조절하여 조석을 만들고",
+          "배를 항구로 안내하세요",
+          "", "조작: 터치 드래그로 달 이동",
+          "클리어: 배 5척 입항", "실패: 배 3척 좌초",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(212,230,241,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("항해 완료!", [`${Math.ceil(elapsed)}초 만에 완료`, `입항: ${docked}척`], COL.accent);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80,40,40,0.3)"; ctx.fillRect(0, 0, W, H);
+        drawCard("좌초!", ["배가 너무 많이 좌초했습니다", `입항: ${docked} / ${BOATS_TO_WIN}`], COL.fail);
+      }
+
+      function getCanvasPos(cx, cy) {
+        const r = canvas.getBoundingClientRect();
+        return { x: (cx - r.left) * (W / r.width), y: (cy - r.top) * (H / r.height) };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        // Check moon hit (generous area)
+        if (p.y < 160) { draggingMoon = true; moonTargetX = clamp(p.x, 60, W - 60); }
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (!draggingMoon) return;
+        const p = getCanvasPos(e.clientX, e.clientY);
+        moonTargetX = clamp(p.x, 60, W - 60);
+      });
+      canvas.addEventListener("pointerup", () => { draggingMoon = false; });
+      canvas.addEventListener("pointercancel", () => { draggingMoon = false; });
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); }
+      });
+
+      function gameLoop(ts) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = ts; return; }
+        let dt = Math.min((ts - lastTimestamp) / 1000, MAX_DT); lastTimestamp = ts;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), docked, stranded, moonX: Math.round(moonX), result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const s = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < s; i++) update(FIXED_DT); draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; docked = BOATS_TO_WIN; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; stranded = MAX_STRAND; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
