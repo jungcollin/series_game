@@ -862,5 +862,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "물고기 5마리를 낚으면 클리어",
     thumbnail: "./fish-tug/thumbnail.png",
     path: "./fish-tug/index.html",
+  },
+  {
+    id: "magnet-maze",
+    title: "자석 미로",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic puzzle",
+    clearCondition: "구슬 5개를 목표에 넣으면 클리어",
+    thumbnail: "./magnet-maze/thumbnail.png",
+    path: "./magnet-maze/index.html",
   }
 ];
