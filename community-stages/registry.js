@@ -754,5 +754,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "옷 5벌을 다리면 클리어",
     thumbnail: "./iron-master/thumbnail.png",
     path: "./iron-master/index.html",
+  },
+  {
+    id: "ripple-guide",
+    title: "잔물결 길잡이",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Ripple physics",
+    clearCondition: "나뭇잎 5장을 연꽃에 안착",
+    thumbnail: "./ripple-guide/thumbnail.png",
+    path: "./ripple-guide/index.html",
   }
 ];
