@@ -979,5 +979,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "도시락 5개 완성 시 클리어",
     thumbnail: "./bento-box/thumbnail.png",
     path: "./bento-box/index.html",
+  },
+  {
+    id: "magma-forge",
+    title: "용암 대장간",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Pour physics",
+    clearCondition: "무기 5개 주조 완료",
+    thumbnail: "./magma-forge/thumbnail.png",
+    path: "./magma-forge/index.html",
   }
 ];
