@@ -844,5 +844,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "자물쇠 5개를 열면 클리어",
     thumbnail: "./lock-picker/thumbnail.png",
     path: "./lock-picker/index.html",
+  },
+  {
+    id: "magnet-maze",
+    title: "자석 미로",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Magnetic puzzle",
+    clearCondition: "구슬 5개를 목표에 넣으면 클리어",
+    thumbnail: "./magnet-maze/thumbnail.png",
+    path: "./magnet-maze/index.html",
   }
 ];
