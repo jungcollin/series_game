@@ -925,5 +925,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "잠금 5개를 해제하면 클리어",
     thumbnail: "./music-key/thumbnail.png",
     path: "./music-key/index.html",
+  },
+  {
+    id: "web-builder",
+    title: "거미줄 건축가",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Network building",
+    clearCondition: "먹이 10마리를 포획하면 클리어",
+    thumbnail: "./web-builder/thumbnail.png",
+    path: "./web-builder/index.html",
   }
 ];
