@@ -700,5 +700,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "화석 5개를 발굴하면 클리어",
     thumbnail: "./fossil-dig/thumbnail.png",
     path: "./fossil-dig/index.html",
+  },
+  {
+    id: "wildfire-line",
+    title: "들불 진화",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Strategic placement",
+    clearCondition: "마을 5개를 보호하면 클리어",
+    thumbnail: "./wildfire-line/thumbnail.png",
+    path: "./wildfire-line/index.html",
   }
 ];
