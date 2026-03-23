@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>얼음 호수</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #e0f0f8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 160, 200, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(30, 60, 80, 0.92);
+        color: #e0f0f8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #e0f0f8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(60, 120, 160, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">얼음 호수. 화면을 터치하여 얼음 타일을 밟고 호수를 건너세요. 모바일에서는 터치로 인접 타일을 탭하여 이동합니다. 호수 반대편에 도달하면 클리어. 깨진 얼음에 빠지면 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="얼음 호수" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "frozen-lake",
+        title: "얼음 호수",
+        description: "얇은 얼음 위를 안전한 경로로 건너세요",
+        creator: "jungcollin",
+        genre: "Ice path puzzle",
+        clearCondition: "호수 반대편에 도달하면 클리어",
+        failCondition: "깨진 얼음에 빠지면 실패",
+        controls: "터치로 얼음 타일 밟기",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#daeef8", water: "#88c8e8", waterDark: "#68a8d0",
+        iceThick: "#e8f4fc", iceMid: "#c8e0f0", iceThin: "#a0c8e0",
+        iceCrack: "#78a0b8", iceEdge: "#b0d0e4",
+        snow: "#f0f8ff", snowDark: "#d8e8f0",
+        player: "#e89060", playerDark: "#c07040",
+        accent: "#50a0d0", gold: "#f0c840",
+        text: "#2a4a5a", textLight: "rgba(42,74,90,0.6)",
+        fail: "#c05050", goal: "#70c070",
+      };
+
+      const COLS = 10, ROWS = 6;
+      const TILE_W = 72, TILE_H = 60;
+      const GRID_X = (W - COLS * TILE_W) / 2;
+      const GRID_Y = 90;
+      const DURATION = 40;
+
+      let mode = "menu";
+      let elapsed = 0, level = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let shake = 0, clearAnim = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+
+      let grid = []; // 2D array: 0=water, 1=thick, 2=mid(cracks on step), 3=thin(breaks)
+      let stepped = []; // 2D: times stepped
+      let playerR = 0, playerC = 0;
+      let playerDrawX = 0, playerDrawY = 0;
+      let sinkAnim = 0;
+      let particles = [];
+      let snowflakes = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function spawnParticles(x, y, count, color, sizeRange) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), speed = rand(30, 100);
+          particles.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed - 30, life: 1, color, size: rand(sizeRange[0], sizeRange[1]) });
+        }
+      }
+
+      function initSnowflakes() {
+        snowflakes = [];
+        if (reducedMotion) return;
+        for (let i = 0; i < 15; i++) {
+          snowflakes.push({ x: rand(0, W), y: rand(0, H), vy: rand(10, 25), vx: rand(-8, 8), size: rand(2, 5), wobble: rand(0, Math.PI * 2) });
+        }
+      }
+
+      function generateLevel() {
+        grid = [];
+        stepped = [];
+        // Ensure at least one safe path from left to right
+        // First fill with random ice
+        for (let r = 0; r < ROWS; r++) {
+          grid[r] = [];
+          stepped[r] = [];
+          for (let c = 0; c < COLS; c++) {
+            stepped[r][c] = 0;
+            const rng = Math.random();
+            if (c === 0 || c === COLS - 1) {
+              grid[r][c] = 1; // safe edges
+            } else if (rng < 0.45) {
+              grid[r][c] = 1; // thick
+            } else if (rng < 0.75) {
+              grid[r][c] = 2; // mid - cracks after 1 step
+            } else {
+              grid[r][c] = 3; // thin - breaks immediately on second step
+            }
+          }
+        }
+
+        // Guarantee safe path using BFS
+        const startR = Math.floor(ROWS / 2);
+        grid[startR][0] = 1;
+        // Create a guaranteed path
+        let cr = startR, cc = 0;
+        while (cc < COLS - 1) {
+          cc++;
+          const moves = [cr - 1, cr, cr + 1].filter(r => r >= 0 && r < ROWS);
+          cr = moves[Math.floor(rand(0, moves.length))];
+          if (grid[cr][cc] === 3) grid[cr][cc] = 2;
+          if (grid[cr][cc] === 0) grid[cr][cc] = 1;
+        }
+        grid[cr][COLS - 1] = 1;
+
+        playerR = startR; playerC = 0;
+        const pos = tileCenter(startR, 0);
+        playerDrawX = pos.x; playerDrawY = pos.y;
+        sinkAnim = 0;
+      }
+
+      function tileCenter(r, c) {
+        return { x: GRID_X + c * TILE_W + TILE_W / 2, y: GRID_Y + r * TILE_H + TILE_H / 2 };
+      }
+
+      function reset() {
+        elapsed = 0; shake = 0; clearAnim = 0;
+        particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateLevel(); initSnowflakes();
+      }
+
+      function tryMove(r, c) {
+        if (mode !== "running") return;
+        if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
+        // Must be adjacent to player
+        const dr = Math.abs(r - playerR), dc = Math.abs(c - playerC);
+        if (dr + dc !== 1) return;
+
+        const tile = grid[r][c];
+        if (tile === 0) return; // water, can't step
+
+        // Step on tile
+        stepped[r][c]++;
+        playerR = r; playerC = c;
+        const pos = tileCenter(r, c);
+
+        // Check tile reaction
+        if (tile === 3) {
+          // Thin ice - breaks on first step!
+          if (stepped[r][c] >= 1) {
+            grid[r][c] = 0;
+            shake = 8; sinkAnim = 1;
+            spawnParticles(pos.x, pos.y, reducedMotion ? 4 : 10, COL.water, [3, 6]);
+            mode = "failed";
+            window.relayStageResult.status = "failed";
+            reportFailed("얼음 파괴");
+            return;
+          }
+        } else if (tile === 2) {
+          // Mid ice - cracks on first step, breaks on second
+          if (stepped[r][c] >= 2) {
+            grid[r][c] = 0;
+            shake = 8; sinkAnim = 1;
+            spawnParticles(pos.x, pos.y, reducedMotion ? 4 : 10, COL.water, [3, 6]);
+            mode = "failed";
+            window.relayStageResult.status = "failed";
+            reportFailed("얼음 파괴");
+            return;
+          }
+          spawnParticles(pos.x, pos.y, reducedMotion ? 2 : 5, COL.iceEdge, [1, 3]);
+        }
+
+        // Step particles
+        spawnParticles(pos.x, pos.y, reducedMotion ? 1 : 3, COL.snow, [2, 4]);
+
+        // Check win
+        if (c === COLS - 1) {
+          mode = "clear"; clearAnim = 0;
+          spawnParticles(pos.x, pos.y, reducedMotion ? 5 : 15, COL.gold, [3, 7]);
+          window.relayStageResult.status = "cleared";
+          reportCleared();
+        }
+      }
+
+      function update(dt) {
+        if (mode === "running") elapsed += dt;
+
+        // Animate player position
+        const target = tileCenter(playerR, playerC);
+        playerDrawX = lerp(playerDrawX, target.x, clamp(12 * dt, 0, 1));
+        playerDrawY = lerp(playerDrawY, target.y, clamp(12 * dt, 0, 1));
+
+        // Sink animation
+        if (sinkAnim > 0) sinkAnim = clamp(sinkAnim - dt * 1.5, 0, 1);
+
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * dt; p.life -= dt * 2.5;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        if (!reducedMotion) {
+          for (const s of snowflakes) {
+            s.y += s.vy * dt; s.x += s.vx * dt + Math.sin(s.wobble) * 0.5;
+            s.wobble += dt * 2;
+            if (s.y > H + 10) { s.y = -10; s.x = rand(0, W); }
+          }
+        }
+
+        if (mode === "running" && elapsed >= DURATION) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("시간 초과");
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Background gradient
+        const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+        bgGrad.addColorStop(0, "#c8e4f4"); bgGrad.addColorStop(1, "#e8f4fc");
+        ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
+
+        // Snowflakes
+        if (!reducedMotion) {
+          for (const s of snowflakes) {
+            ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255,255,255,0.6)`; ctx.fill();
+          }
+        }
+
+        // Snow banks (top/bottom)
+        ctx.fillStyle = COL.snow;
+        ctx.fillRect(0, 0, W, GRID_Y - 15);
+        ctx.fillStyle = COL.snowDark;
+        ctx.beginPath();
+        for (let x = 0; x <= W; x += 40) {
+          ctx.lineTo(x, GRID_Y - 15 + Math.sin(x * 0.03) * 5);
+        }
+        ctx.lineTo(W, GRID_Y - 15); ctx.lineTo(0, GRID_Y - 15); ctx.fill();
+
+        const bottomY = GRID_Y + ROWS * TILE_H + 15;
+        ctx.fillStyle = COL.snow;
+        ctx.fillRect(0, bottomY, W, H - bottomY);
+        ctx.fillStyle = COL.snowDark;
+        ctx.beginPath();
+        ctx.moveTo(0, bottomY);
+        for (let x = 0; x <= W; x += 40) {
+          ctx.lineTo(x, bottomY + Math.sin(x * 0.04 + 1) * 4);
+        }
+        ctx.lineTo(W, bottomY); ctx.fill();
+
+        // Water underneath
+        ctx.fillStyle = COL.water;
+        ctx.fillRect(GRID_X - 5, GRID_Y - 5, COLS * TILE_W + 10, ROWS * TILE_H + 10);
+
+        // Grid tiles
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const tx = GRID_X + c * TILE_W;
+            const ty = GRID_Y + r * TILE_H;
+            const tile = grid[r][c];
+            const steps = stepped[r][c];
+
+            if (tile === 0) {
+              // Water - small ripple
+              ctx.fillStyle = COL.waterDark;
+              ctx.fillRect(tx + 2, ty + 2, TILE_W - 4, TILE_H - 4);
+              continue;
+            }
+
+            // Ice tile
+            let iceColor = COL.iceThick;
+            if (tile === 2) iceColor = steps > 0 ? COL.iceThin : COL.iceMid;
+            if (tile === 3) iceColor = COL.iceThin;
+
+            ctx.fillStyle = iceColor;
+            ctx.fillRect(tx + 1, ty + 1, TILE_W - 2, TILE_H - 2);
+
+            // Edge highlight
+            ctx.strokeStyle = COL.iceEdge;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(tx + 1, ty + 1, TILE_W - 2, TILE_H - 2);
+
+            // Cracks for mid-ice that's been stepped
+            if (tile === 2 && steps > 0) {
+              ctx.strokeStyle = COL.iceCrack; ctx.lineWidth = 1.5;
+              const cx = tx + TILE_W / 2, cy = ty + TILE_H / 2;
+              for (let i = 0; i < 3; i++) {
+                const a = (i / 3) * Math.PI * 2 + r * 0.5;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + Math.cos(a) * 18, cy + Math.sin(a) * 14);
+                ctx.stroke();
+              }
+            }
+
+            // Thin ice warning pattern
+            if (tile === 3) {
+              ctx.fillStyle = "rgba(120,160,184,0.2)";
+              ctx.beginPath();
+              ctx.moveTo(tx + TILE_W / 2, ty + 8);
+              ctx.lineTo(tx + TILE_W / 2 + 8, ty + TILE_H - 8);
+              ctx.lineTo(tx + TILE_W / 2 - 8, ty + TILE_H - 8);
+              ctx.closePath(); ctx.fill();
+            }
+
+            // Goal column glow
+            if (c === COLS - 1) {
+              ctx.fillStyle = `rgba(112,192,112,${0.1 + Math.sin(elapsed * 3) * 0.05})`;
+              ctx.fillRect(tx + 1, ty + 1, TILE_W - 2, TILE_H - 2);
+            }
+          }
+        }
+
+        // Start indicator
+        ctx.fillStyle = COL.accent; ctx.font = "bold 12px Trebuchet MS";
+        ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+        ctx.fillText("시작", GRID_X + TILE_W / 2, GRID_Y - 8);
+
+        // Goal indicator
+        ctx.fillStyle = COL.goal;
+        ctx.fillText("도착", GRID_X + (COLS - 0.5) * TILE_W, GRID_Y - 8);
+
+        // Player
+        if (mode !== "failed" || sinkAnim > 0.1) {
+          const py = playerDrawY + (mode === "failed" ? (1 - sinkAnim) * 20 : 0);
+          const pScale = mode === "failed" ? sinkAnim : 1;
+          ctx.save(); ctx.translate(playerDrawX, py); ctx.scale(pScale, pScale);
+          // Body
+          ctx.fillStyle = COL.player;
+          ctx.beginPath(); ctx.arc(0, -8, 12, 0, Math.PI * 2); ctx.fill();
+          // Head
+          ctx.fillStyle = "#f0c8a0";
+          ctx.beginPath(); ctx.arc(0, -24, 8, 0, Math.PI * 2); ctx.fill();
+          // Hat
+          ctx.fillStyle = COL.accent;
+          ctx.beginPath(); ctx.arc(0, -28, 8, Math.PI, Math.PI * 2); ctx.fill();
+          ctx.fillRect(-10, -28, 20, 3);
+          // Eyes
+          ctx.fillStyle = "#2a4a5a";
+          ctx.fillRect(-3, -25, 2, 2); ctx.fillRect(2, -25, 2, 2);
+          ctx.restore();
+        }
+
+        // Particles
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * clamp(p.life, 0, 1), 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fill(); ctx.globalAlpha = 1;
+        }
+
+        if (mode === "running") drawHUD();
+        ctx.restore();
+
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawHUD() {
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.textAlign = "right"; ctx.textBaseline = "top";
+        ctx.fillStyle = timeLeft < 10 ? COL.fail : COL.text;
+        ctx.font = "bold 16px Trebuchet MS, sans-serif";
+        ctx.fillText(`${Math.ceil(timeLeft)}s`, W - 20, 16);
+
+        ctx.textAlign = "left";
+        ctx.fillStyle = COL.text; ctx.font = "14px Trebuchet MS, sans-serif";
+        ctx.fillText("두꺼운 = 안전  |  반투명 = 위험", 20, 16);
+
+        // Progress bar
+        const prog = playerC / (COLS - 1);
+        const barW = 160, barH = 6;
+        const barX = CX - barW / 2, barY = H - 30;
+        ctx.fillStyle = "rgba(200,220,230,0.5)"; ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = COL.accent; ctx.fillRect(barX, barY, barW * prog, barH);
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.moveTo(x + r, y); c.lineTo(x + w - r, y); c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r); c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h); c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+      }
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40), lineH = 26;
+        const cardH = 48 + lines.length * lineH + 36;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(232,244,252,0.96)"; ctx.beginPath(); roundRect(ctx, cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 14, cardY, cardW - 28, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 24px Trebuchet MS, sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText(title, CX, cardY + 18);
+        ctx.font = "400 14px Trebuchet MS, sans-serif"; ctx.fillStyle = COL.textLight;
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        ctx.fillStyle = "rgba(42,74,90,0.35)"; ctx.font = "400 13px Trebuchet MS, sans-serif";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(224,240,248,0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("얼음 호수", [
+          "얇은 얼음 위를 안전하게 건너세요",
+          "",
+          "조작: 터치로 인접 타일 이동",
+          "클리어: 호수 반대편 도달",
+          "실패: 깨진 얼음에 빠지면 실패",
+        ], COL.accent);
+      }
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(224,240,248,${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 횡단 성공`], COL.goal);
+      }
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80,40,40,0.2)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", [elapsed >= DURATION ? "시간이 다했습니다" : "얼음이 깨져 빠졌습니다"], COL.fail);
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() {
+        if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; }
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        // Find clicked tile
+        const c = Math.floor((p.x - GRID_X) / TILE_W);
+        const r = Math.floor((p.y - GRID_Y) / TILE_H);
+        if (c >= 0 && c < COLS && r >= 0 && r < ROWS) {
+          tryMove(r, c);
+        }
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (mode !== "running") {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); }
+          return;
+        }
+        e.preventDefault();
+        if (e.key === "ArrowRight") tryMove(playerR, playerC + 1);
+        else if (e.key === "ArrowLeft") tryMove(playerR, playerC - 1);
+        else if (e.key === "ArrowUp") tryMove(playerR - 1, playerC);
+        else if (e.key === "ArrowDown") tryMove(playerR + 1, playerC);
+      });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), playerR, playerC, result: window.relayStageResult.status });
+      }
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; playerC = COLS - 1; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      generateLevel(); initSnowflakes(); reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
