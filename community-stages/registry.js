@@ -846,6 +846,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./lock-picker/index.html",
   },
   {
+    id: "dough-master",
+    title: "반죽 장인",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Kneading simulation",
+    clearCondition: "반죽 5개를 완성하면 클리어",
+    thumbnail: "./dough-master/thumbnail.png",
+    path: "./dough-master/index.html",
+  },
+  {
     id: "fish-tug",
     title: "물고기 줄다리기",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
