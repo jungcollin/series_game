@@ -790,5 +790,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "결승선까지 길을 완성하면 클리어",
     thumbnail: "./path-racer/thumbnail.png",
     path: "./path-racer/index.html",
+  },
+  {
+    id: "canyon-carver",
+    title: "협곡 조각가",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Erosion puzzle",
+    clearCondition: "목표 지형 5개를 완성하면 클리어",
+    thumbnail: "./canyon-carver/thumbnail.png",
+    path: "./canyon-carver/index.html",
   }
 ];
