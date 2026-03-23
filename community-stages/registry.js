@@ -1114,5 +1114,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "별 15개를 모으면 클리어",
     thumbnail: "./trampoline-star/thumbnail.png",
     path: "./trampoline-star/index.html",
+  },
+  {
+    id: "fuse-connect",
+    title: "도화선 잇기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Path puzzle",
+    clearCondition: "모든 폭죽에 불이 도달하면 클리어",
+    thumbnail: "./fuse-connect/thumbnail.png",
+    path: "./fuse-connect/index.html",
   }
 ];
