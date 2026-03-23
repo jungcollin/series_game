@@ -727,5 +727,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "목표 색 5개를 만들면 클리어",
     thumbnail: "./color-alchemist/thumbnail.png",
     path: "./color-alchemist/index.html",
+  },
+  {
+    id: "moon-tide",
+    title: "달과 바다",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tidal control",
+    clearCondition: "배 5척을 입항시키면 클리어",
+    thumbnail: "./moon-tide/thumbnail.png",
+    path: "./moon-tide/index.html",
   }
 ];
