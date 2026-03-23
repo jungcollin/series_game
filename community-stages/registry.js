@@ -673,5 +673,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "퍼즐 5개를 풀면 클리어",
     thumbnail: "./light-mirror/thumbnail.png",
     path: "./light-mirror/index.html",
+  },
+  {
+    id: "mochi-pound",
+    title: "떡방아",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Dual-action rhythm",
+    clearCondition: "떡 8개를 완성하면 클리어",
+    thumbnail: "./mochi-pound/thumbnail.png",
+    path: "./mochi-pound/index.html",
   }
 ];

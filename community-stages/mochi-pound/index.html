@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>떡방아</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+        background: #faf0e6; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(180, 140, 100, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(90, 60, 30, 0.92);
+        color: #faf0e6; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #faf0e6; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(180, 100, 60, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">떡방아. 화면 왼쪽을 터치하면 떡을 치고, 오른쪽을 터치하면 뒤집습니다. 모바일에서는 화면 터치로 치기와 뒤집기를 번갈아 수행합니다. 떡 8개를 완성하면 클리어.</p>
+    <canvas id="game" width="960" height="540" aria-label="떡방아" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "mochi-pound",
+        title: "떡방아",
+        description: "떡을 치고 뒤집는 타이밍 게임",
+        creator: "jungcollin",
+        genre: "Dual-action rhythm",
+        clearCondition: "떡 8개를 완성하면 클리어",
+        failCondition: "3번 실수하면 실패",
+        controls: "화면 터치로 치기와 뒤집기 번갈아 수행",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      // Colors: warm cream / pink / brown
+      const COL = {
+        bg: "#faf0e6", bgDark: "#eedcc8",
+        mochi: "#f5e6d3", mochiShadow: "#d4b896",
+        mortar: "#8b6914", mortarDark: "#5c4a0e",
+        hammer: "#6b4226", hammerHead: "#8b6840",
+        accent: "#c06040", accentLight: "rgba(192, 96, 64, 0.3)",
+        text: "#4a3520", success: "#2e8b57", fail: "#b03030",
+        hand: "#d4a574",
+      };
+
+      const TARGET_MOCHI = 8;
+      const MAX_MISSES = 3;
+      let mode = "menu", elapsed = 0, mochiDone = 0, misses = 0;
+      let lastTimestamp = 0, animFrame = 0;
+      let hostFailedReported = false, hostClearedReported = false;
+      let shake = 0, clearAnim = 0;
+
+      // Rhythm state
+      let beatInterval = 0.8; // seconds per beat
+      let beatTimer = 0;
+      let currentAction = "pound"; // "pound" or "flip"
+      let ringProgress = 0; // 0-1, ring shrinks to target
+      let hitWindow = false;
+      let poundCount = 0; // pounds per mochi (need 4 to complete)
+      let hammerY = 0; // animation
+      let mochiSquash = 0; // squash animation
+      let flipAngle = 0; // flip animation
+      let successFlash = 0;
+      let particles = [];
+      let actionLocked = false;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const a = rand(0, Math.PI * 2), spd = rand(40, 120);
+          particles.push({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 30, life: 1, color, size: rand(3, 7) });
+        }
+      }
+
+      function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch { return false; } }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function reset() {
+        elapsed = 0; mochiDone = 0; misses = 0; poundCount = 0;
+        beatTimer = 0; currentAction = "pound"; ringProgress = 0;
+        hammerY = 0; mochiSquash = 0; flipAngle = 0; successFlash = 0;
+        beatInterval = 0.8; actionLocked = false;
+        shake = 0; clearAnim = 0; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+      }
+
+      function nextBeat() {
+        beatTimer = 0; ringProgress = 0; actionLocked = false;
+        // Alternate: 3 pounds then 1 flip
+        if (currentAction === "pound") {
+          poundCount++;
+          if (poundCount >= 3) {
+            currentAction = "flip";
+            poundCount = 0;
+          }
+        } else {
+          currentAction = "pound";
+          mochiDone++;
+          successFlash = 1;
+          if (mochiDone >= TARGET_MOCHI) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared"; reportCleared();
+          }
+          // Speed up slightly
+          beatInterval = Math.max(0.5, beatInterval - 0.02);
+        }
+      }
+
+      function onMiss() {
+        misses++;
+        shake = 10;
+        spawnParticles(CX, CY + 60, reducedMotion ? 3 : 8, COL.fail);
+        if (misses >= MAX_MISSES) {
+          mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("실수 3회");
+        }
+      }
+
+      function handleAction(side) {
+        if (mode !== "running" || actionLocked) return;
+        const inWindow = ringProgress > 0.65 && ringProgress < 0.95;
+        if (side === "left" && currentAction === "pound" && inWindow) {
+          actionLocked = true;
+          hammerY = 1; mochiSquash = 1;
+          spawnParticles(CX - 40, CY + 80, reducedMotion ? 4 : 10, COL.mochiShadow);
+          nextBeat();
+        } else if (side === "right" && currentAction === "flip" && inWindow) {
+          actionLocked = true;
+          flipAngle = 1;
+          spawnParticles(CX + 40, CY + 60, reducedMotion ? 4 : 8, COL.accent);
+          nextBeat();
+        } else {
+          actionLocked = true;
+          onMiss();
+          setTimeout(() => { if (mode === "running") { actionLocked = false; } }, 300);
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+        beatTimer += dt;
+        ringProgress = clamp(beatTimer / beatInterval, 0, 1);
+
+        // Auto-miss if beat passes
+        if (ringProgress >= 1 && !actionLocked) {
+          actionLocked = true;
+          onMiss();
+          setTimeout(() => {
+            if (mode === "running") {
+              beatTimer = 0; ringProgress = 0; actionLocked = false;
+            }
+          }, 300);
+        }
+
+        // Animations
+        hammerY *= 0.85; mochiSquash *= 0.88; flipAngle *= 0.9;
+        shake *= 0.88; if (shake < 0.3) shake = 0;
+        successFlash *= 0.92;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 200 * dt; // gravity
+          p.vx *= 0.96;
+          p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+
+        // Wooden floor
+        ctx.fillStyle = "#d4b08c";
+        ctx.fillRect(0, H * 0.7, W, H * 0.3);
+        ctx.fillStyle = "#c4a07c";
+        for (let i = 0; i < 8; i++) {
+          ctx.fillRect(0, H * 0.7 + i * 20, W, 1);
+        }
+
+        if (mode === "running" || mode === "clear" || mode === "failed") {
+          drawMortar();
+          drawMochi();
+          drawHammer();
+          drawActionIndicator();
+          drawRing();
+          drawParticles();
+          if (mode === "running") drawHUD();
+        }
+
+        if (successFlash > 0.01) {
+          ctx.fillStyle = `rgba(46, 139, 87, ${successFlash * 0.12})`;
+          ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.restore();
+        if (mode === "menu") drawMenu();
+        else if (mode === "clear") drawClear();
+        else if (mode === "failed") drawFailed();
+      }
+
+      function drawMortar() {
+        // Stone mortar (usu)
+        const mx = CX, my = CY + 100;
+        ctx.fillStyle = COL.mortarDark;
+        ctx.beginPath();
+        ctx.ellipse(mx, my + 10, 90, 30, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = COL.mortar;
+        ctx.beginPath();
+        ctx.ellipse(mx, my, 85, 28, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Inner bowl
+        ctx.fillStyle = "#7a5a10";
+        ctx.beginPath();
+        ctx.ellipse(mx, my - 5, 60, 20, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawMochi() {
+        const mx = CX, my = CY + 85;
+        const squashX = 1 + mochiSquash * 0.3;
+        const squashY = 1 - mochiSquash * 0.2;
+        ctx.save();
+        ctx.translate(mx, my);
+        ctx.scale(squashX, squashY);
+        if (flipAngle > 0.01) ctx.rotate(flipAngle * Math.PI * 0.3);
+
+        // Mochi ball
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 45, 30, 0, 0, Math.PI * 2);
+        ctx.fillStyle = COL.mochi;
+        ctx.fill();
+        ctx.strokeStyle = COL.mochiShadow;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Shine
+        ctx.beginPath();
+        ctx.ellipse(-12, -10, 15, 8, -0.3, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      function drawHammer() {
+        const hx = CX - 120, hy = CY - 40 - hammerY * 60;
+        ctx.save();
+        ctx.translate(hx, hy);
+        ctx.rotate(-0.3 + hammerY * 0.5);
+
+        // Handle
+        ctx.fillStyle = COL.hammer;
+        ctx.fillRect(-6, -80, 12, 100);
+
+        // Head
+        ctx.fillStyle = COL.hammerHead;
+        ctx.beginPath();
+        ctx.ellipse(0, -80, 25, 18, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#7a5830";
+        ctx.beginPath();
+        ctx.ellipse(0, -82, 22, 14, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      function drawActionIndicator() {
+        // Left side: pound indicator
+        const lx = CX - 200, ly = CY + 20;
+        const rx = CX + 200, ry = CY + 20;
+
+        // Left button area
+        ctx.beginPath();
+        ctx.arc(lx, ly, 40, 0, Math.PI * 2);
+        ctx.fillStyle = currentAction === "pound" ? "rgba(192, 96, 64, 0.25)" : "rgba(100, 80, 60, 0.1)";
+        ctx.fill();
+        ctx.fillStyle = currentAction === "pound" ? COL.accent : "#999";
+        ctx.font = "bold 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText("치기", lx, ly - 4);
+        ctx.font = "11px 'Segoe UI', sans-serif";
+        ctx.fillText("왼쪽 터치", lx, ly + 14);
+
+        // Right button area
+        ctx.beginPath();
+        ctx.arc(rx, ry, 40, 0, Math.PI * 2);
+        ctx.fillStyle = currentAction === "flip" ? "rgba(192, 96, 64, 0.25)" : "rgba(100, 80, 60, 0.1)";
+        ctx.fill();
+        ctx.fillStyle = currentAction === "flip" ? COL.accent : "#999";
+        ctx.font = "bold 16px 'Segoe UI', sans-serif";
+        ctx.fillText("뒤집기", rx, ry - 4);
+        ctx.font = "11px 'Segoe UI', sans-serif";
+        ctx.fillText("오른쪽 터치", rx, ry + 14);
+      }
+
+      function drawRing() {
+        // Timing ring around mortar
+        const cx = CX, cy = CY + 95;
+        const maxR = 80, minR = 35;
+        const r = lerp(maxR, minR, ringProgress);
+        const inWindow = ringProgress > 0.65 && ringProgress < 0.95;
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = inWindow ? COL.accent : "rgba(180, 140, 100, 0.4)";
+        ctx.lineWidth = inWindow ? 4 : 2;
+        ctx.stroke();
+
+        // Target ring
+        ctx.beginPath();
+        ctx.arc(cx, cy, minR + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(192, 96, 64, 0.3)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color; ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fill(); ctx.globalAlpha = 1;
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text; ctx.font = "600 16px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`떡 ${mochiDone} / ${TARGET_MOCHI}`, 24, 16);
+
+        // Misses as hearts
+        ctx.textAlign = "right";
+        const heartsLeft = MAX_MISSES - misses;
+        let heartStr = "";
+        for (let i = 0; i < MAX_MISSES; i++) heartStr += i < heartsLeft ? "●" : "○";
+        ctx.fillStyle = misses > 0 ? COL.fail : COL.text;
+        ctx.fillText(heartStr, W - 24, 16);
+
+        // Current pound progress
+        if (currentAction === "pound") {
+          ctx.textAlign = "center";
+          ctx.fillStyle = COL.accent;
+          ctx.font = "500 13px 'Segoe UI', sans-serif";
+          ctx.fillText(`${poundCount}/3 치기`, CX, 16);
+        } else {
+          ctx.textAlign = "center";
+          ctx.fillStyle = COL.accent;
+          ctx.font = "500 13px 'Segoe UI', sans-serif";
+          ctx.fillText("뒤집기!", CX, 16);
+        }
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+        ctx.lineTo(x + w, y + h - r); ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+        ctx.lineTo(x + r, y + h); ctx.arcTo(x, y + h, x, y + h - r, r);
+        ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40), cardH = 42 + lines.length * 28 + 44;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+        ctx.fillStyle = "rgba(250, 240, 230, 0.95)"; ctx.beginPath(); roundRect(cardX, cardY, cardW, cardH, 10); ctx.fill();
+        ctx.fillStyle = accent; ctx.fillRect(cardX + 14, cardY, cardW - 28, 3);
+        ctx.fillStyle = COL.text; ctx.font = "bold 22px 'Segoe UI', sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 16);
+        ctx.font = "400 14px 'Segoe UI', sans-serif"; ctx.fillStyle = "rgba(74, 53, 32, 0.75)";
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], CX, cardY + 48 + i * 28);
+        ctx.fillStyle = "rgba(74, 53, 32, 0.4)"; ctx.font = "400 13px 'Segoe UI', sans-serif";
+        ctx.fillText("TAP 또는 ENTER", CX, cardY + cardH - 24);
+      }
+
+      function drawMenu() {
+        ctx.fillStyle = "rgba(250, 240, 230, 0.5)"; ctx.fillRect(0, 0, W, H);
+        drawCard("떡방아", [
+          "떡을 치고 뒤집어 완성하세요",
+          "",
+          "조작: 왼쪽 터치=치기, 오른쪽 터치=뒤집기",
+          "클리어: 떡 8개 완성",
+          "실패: 3번 실수",
+        ], COL.accent);
+      }
+
+      function drawClear() {
+        clearAnim = clamp(clearAnim + 0.02, 0, 1);
+        ctx.fillStyle = `rgba(250, 240, 230, ${clearAnim * 0.5})`; ctx.fillRect(0, 0, W, H);
+        if (clearAnim > 0.3) drawCard("클리어!", [`${Math.ceil(elapsed)}초 만에 완료`, `떡 ${mochiDone}개 완성`], COL.success);
+      }
+
+      function drawFailed() {
+        ctx.fillStyle = "rgba(80, 40, 20, 0.3)"; ctx.fillRect(0, 0, W, H);
+        drawCard("실패", ["실수가 3번 쌓였습니다", `떡 ${mochiDone} / ${TARGET_MOCHI} 완성`], COL.fail);
+      }
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
+      }
+
+      function handleStart() { if (mode === "menu" || mode === "clear" || mode === "failed") { reset(); mode = "running"; } }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") { handleStart(); return; }
+        const p = getCanvasPos(e.clientX, e.clientY);
+        handleAction(p.x < CX ? "left" : "right");
+      });
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleStart(); return; }
+        if (mode !== "running") return;
+        if (e.key === "ArrowLeft" || e.key === "a") handleAction("left");
+        if (e.key === "ArrowRight" || e.key === "d") handleAction("right");
+      });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT); lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({ mode, elapsed: +elapsed.toFixed(1), mochiDone, misses, currentAction, poundCount, result: window.relayStageResult.status });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT); draw(); return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() { reset(); mode = "running"; mochiDone = TARGET_MOCHI; mode = "clear"; clearAnim = 0; window.relayStageResult.status = "cleared"; reportCleared(); draw(); },
+        forceFail() { reset(); mode = "running"; misses = MAX_MISSES; mode = "failed"; window.relayStageResult.status = "failed"; reportFailed("debug_force_fail"); draw(); },
+      };
+
+      reportReady(); animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
