@@ -889,5 +889,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "숨겨진 별 10개를 찾으면 클리어",
     thumbnail: "./light-reveal/thumbnail.png",
     path: "./light-reveal/index.html",
+  },
+  {
+    id: "music-key",
+    title: "음표 열쇠",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Sequence memory puzzle",
+    clearCondition: "잠금 5개를 해제하면 클리어",
+    thumbnail: "./music-key/thumbnail.png",
+    path: "./music-key/index.html",
   }
 ];
