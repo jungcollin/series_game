@@ -1141,5 +1141,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "블록 8개를 뽑아 올리면 클리어",
     thumbnail: "./jenga-pull/thumbnail.png",
     path: "./jenga-pull/index.html",
+  },
+  {
+    id: "bibimbap-mix",
+    title: "비빔밥 비비기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Mixing action",
+    clearCondition: "모든 재료를 골고루 비비면 클리어",
+    thumbnail: "./bibimbap-mix/thumbnail.png",
+    path: "./bibimbap-mix/index.html",
   }
 ];
