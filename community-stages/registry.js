@@ -1132,5 +1132,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "모든 폭죽에 불이 도달하면 클리어",
     thumbnail: "./fuse-connect/thumbnail.png",
     path: "./fuse-connect/index.html",
+  },
+  {
+    id: "jenga-pull",
+    title: "젠가 뽑기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Tension pulling",
+    clearCondition: "블록 8개를 뽑아 올리면 클리어",
+    thumbnail: "./jenga-pull/thumbnail.png",
+    path: "./jenga-pull/index.html",
   }
 ];
