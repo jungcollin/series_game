@@ -1116,6 +1116,15 @@ window.COMMUNITY_STAGE_REGISTRY = [
     path: "./trampoline-star/index.html",
   },
   {
+    id: "cup-stack",
+    title: "종이컵 쌓기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Speed stacking",
+    clearCondition: "피라미드 3단 완성 시 클리어",
+    thumbnail: "./cup-stack/thumbnail.png",
+    path: "./cup-stack/index.html",
+  },
+  {
     id: "fuse-connect",
     title: "도화선 잇기",
     creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
