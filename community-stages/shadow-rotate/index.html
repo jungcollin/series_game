@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>그림자 맞추기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #E8F0F8; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(100, 140, 180, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(50, 60, 80, 0.92);
+        color: #E8F0F8; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #E8F0F8; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(100, 160, 220, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">그림자 맞추기. 물체를 회전시켜 목표 그림자 실루엣에 정확히 맞추는 퍼즐 게임. 드래그로 물체 회전. 모바일에서는 화면 터치 드래그로 플레이합니다. 5개 물체의 그림자를 맞추면 클리어. 시간 초과 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="그림자 맞추기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "shadow-rotate",
+        title: "그림자 맞추기",
+        description: "물체를 회전시켜 목표 그림자 실루엣에 정확히 맞추는 퍼즐 게임.",
+        creator: "jungcollin",
+        genre: "Rotation puzzle",
+        clearCondition: "5개 물체의 그림자를 맞추면 클리어",
+        failCondition: "시간 초과 시 실패",
+        controls: "드래그로 물체 회전",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#E8F0F8",
+        bgWarm: "#F0E8D8",
+        shadow: "rgba(40, 50, 70, 0.25)",
+        shadowTarget: "rgba(40, 50, 70, 0.12)",
+        object: "#5B8CB8",
+        objectDark: "#3A6A96",
+        objectLight: "#8BB8DC",
+        matched: "#68B86C",
+        matchedLight: "#A0D8A4",
+        text: "#3A4A5C",
+        textLight: "rgba(58, 74, 92, 0.5)",
+        success: "#68B86C",
+        fail: "#D45050",
+        accent: "#E8A850",
+        light: "#FFE8A0",
+      };
+
+      const DURATION = 40;
+      const TARGET_MATCHES = 5;
+      const ANGLE_TOLERANCE = 0.12; // radians (~7 degrees)
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let clearAnim = 0;
+
+      // Shapes: array of shape definitions
+      const SHAPES = [
+        { name: "열쇠", draw: drawKey },
+        { name: "별", draw: drawStar },
+        { name: "화살", draw: drawArrow },
+        { name: "하트", draw: drawHeart },
+        { name: "번개", draw: drawLightning },
+        { name: "나무", draw: drawTree },
+        { name: "고양이", draw: drawCat },
+      ];
+
+      let currentShape = 0;
+      let targetAngle = 0;
+      let currentAngle = 0;
+      let matched = 0;
+      let isDragging = false;
+      let lastDragAngle = 0;
+      let matchFlash = 0;
+      let particles = [];
+      let shapeOrder = [];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+
+      // Shape drawing functions (relative to center, size ~80)
+      function drawKey(ctx, size) {
+        const s = size;
+        ctx.beginPath();
+        ctx.arc(0, -s * 0.3, s * 0.25, 0, Math.PI * 2);
+        ctx.rect(-s * 0.06, -s * 0.1, s * 0.12, s * 0.6);
+        ctx.rect(-s * 0.06, s * 0.35, s * 0.2, s * 0.08);
+        ctx.rect(-s * 0.06, s * 0.2, s * 0.15, s * 0.08);
+        ctx.fill();
+      }
+
+      function drawStar(ctx, size) {
+        const s = size;
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const angle = -Math.PI / 2 + (i * Math.PI * 2) / 5;
+          const x = Math.cos(angle) * s * 0.45;
+          const y = Math.sin(angle) * s * 0.45;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          const innerAngle = angle + Math.PI / 5;
+          ctx.lineTo(Math.cos(innerAngle) * s * 0.2, Math.sin(innerAngle) * s * 0.2);
+        }
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawArrow(ctx, size) {
+        const s = size;
+        ctx.beginPath();
+        ctx.moveTo(0, -s * 0.45);
+        ctx.lineTo(s * 0.3, -s * 0.05);
+        ctx.lineTo(s * 0.12, -s * 0.05);
+        ctx.lineTo(s * 0.12, s * 0.45);
+        ctx.lineTo(-s * 0.12, s * 0.45);
+        ctx.lineTo(-s * 0.12, -s * 0.05);
+        ctx.lineTo(-s * 0.3, -s * 0.05);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawHeart(ctx, size) {
+        const s = size * 0.45;
+        ctx.beginPath();
+        ctx.moveTo(0, s * 0.3);
+        ctx.bezierCurveTo(-s, -s * 0.3, -s * 0.5, -s, 0, -s * 0.4);
+        ctx.bezierCurveTo(s * 0.5, -s, s, -s * 0.3, 0, s * 0.3);
+        ctx.fill();
+      }
+
+      function drawLightning(ctx, size) {
+        const s = size;
+        ctx.beginPath();
+        ctx.moveTo(s * 0.1, -s * 0.45);
+        ctx.lineTo(-s * 0.15, -s * 0.05);
+        ctx.lineTo(s * 0.08, -s * 0.05);
+        ctx.lineTo(-s * 0.1, s * 0.45);
+        ctx.lineTo(s * 0.2, s * 0.05);
+        ctx.lineTo(-s * 0.02, s * 0.05);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawTree(ctx, size) {
+        const s = size;
+        // Trunk
+        ctx.fillRect(-s * 0.06, s * 0.1, s * 0.12, s * 0.35);
+        // Crown layers
+        ctx.beginPath();
+        ctx.moveTo(0, -s * 0.45);
+        ctx.lineTo(s * 0.25, -s * 0.1);
+        ctx.lineTo(-s * 0.25, -s * 0.1);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(0, -s * 0.3);
+        ctx.lineTo(s * 0.3, s * 0.1);
+        ctx.lineTo(-s * 0.3, s * 0.1);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      function drawCat(ctx, size) {
+        const s = size * 0.4;
+        // Body
+        ctx.beginPath();
+        ctx.ellipse(0, s * 0.2, s * 0.5, s * 0.35, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Head
+        ctx.beginPath();
+        ctx.arc(0, -s * 0.3, s * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+        // Ears
+        ctx.beginPath();
+        ctx.moveTo(-s * 0.25, -s * 0.55);
+        ctx.lineTo(-s * 0.35, -s * 0.85);
+        ctx.lineTo(-s * 0.05, -s * 0.6);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(s * 0.25, -s * 0.55);
+        ctx.lineTo(s * 0.35, -s * 0.85);
+        ctx.lineTo(s * 0.05, -s * 0.6);
+        ctx.fill();
+        // Tail
+        ctx.beginPath();
+        ctx.moveTo(s * 0.4, s * 0.3);
+        ctx.quadraticCurveTo(s * 0.9, s * 0.1, s * 0.7, -s * 0.3);
+        ctx.lineWidth = s * 0.12;
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+
+      function shuffleShapes() {
+        shapeOrder = [];
+        const indices = Array.from({ length: SHAPES.length }, (_, i) => i);
+        for (let i = indices.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [indices[i], indices[j]] = [indices[j], indices[i]];
+        }
+        shapeOrder = indices.slice(0, TARGET_MATCHES);
+      }
+
+      function nextShape() {
+        currentShape = shapeOrder[matched];
+        targetAngle = rand(0.3, Math.PI * 2 - 0.3);
+        // Start at a different angle
+        currentAngle = targetAngle + rand(0.8, Math.PI * 2 - 0.8);
+        if (currentAngle > Math.PI * 2) currentAngle -= Math.PI * 2;
+      }
+
+      function spawnParticles(x, y, count, color) {
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(50, 150);
+          particles.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 40,
+            life: 1, color, size: rand(2, 5),
+          });
+        }
+      }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function reset() {
+        elapsed = 0; shake = 0; clearAnim = 0; matchFlash = 0;
+        matched = 0; isDragging = false; particles = [];
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        shuffleShapes();
+        nextShape();
+      }
+
+      function checkMatch() {
+        let diff = Math.abs(currentAngle - targetAngle);
+        if (diff > Math.PI) diff = Math.PI * 2 - diff;
+        if (diff < ANGLE_TOLERANCE) {
+          matched++;
+          matchFlash = 1;
+          spawnParticles(CX, CY, reducedMotion ? 5 : 15, COL.matched);
+          if (matched >= TARGET_MATCHES) {
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared";
+            reportCleared();
+            spawnParticles(CX, CY, reducedMotion ? 8 : 25, COL.success);
+          } else {
+            nextShape();
+          }
+        }
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        if (elapsed >= DURATION) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("시간 초과");
+          return;
+        }
+
+        matchFlash *= 0.92;
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 150 * dt; p.life -= dt * 2;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        shake *= 0.9;
+        if (shake < 0.3) shake = 0;
+      }
+
+      // --- Draw ---
+      function drawLightSource() {
+        // Sun/light in top-right
+        const lx = W - 100, ly = 80;
+        if (!reducedMotion) {
+          const glow = ctx.createRadialGradient(lx, ly, 5, lx, ly, 60);
+          glow.addColorStop(0, "rgba(255, 232, 160, 0.6)");
+          glow.addColorStop(1, "rgba(255, 232, 160, 0)");
+          ctx.fillStyle = glow;
+          ctx.fillRect(lx - 60, ly - 60, 120, 120);
+        }
+        ctx.beginPath();
+        ctx.arc(lx, ly, 18, 0, Math.PI * 2);
+        ctx.fillStyle = COL.accent;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(lx, ly, 12, 0, Math.PI * 2);
+        ctx.fillStyle = COL.light;
+        ctx.fill();
+      }
+
+      function drawShapeAt(shapeIdx, cx, cy, angle, size, color) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(angle);
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        SHAPES[shapeIdx].draw(ctx, size);
+        ctx.restore();
+      }
+
+      function drawAngleIndicator() {
+        // Show how close the angles are
+        let diff = Math.abs(currentAngle - targetAngle);
+        if (diff > Math.PI) diff = Math.PI * 2 - diff;
+        const closeness = 1 - clamp(diff / Math.PI, 0, 1);
+        const barW = 120;
+        const barH = 6;
+        const barX = CX - barW / 2;
+        const barY = CY + 140;
+
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.fillRect(barX, barY, barW, barH);
+        const fillColor = closeness > 0.9 ? COL.matched : closeness > 0.5 ? COL.accent : COL.object;
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(barX, barY, barW * closeness, barH);
+
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "500 12px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("일치도", CX, barY + 20);
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 18px Trebuchet MS";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`맞춤: ${matched}/${TARGET_MATCHES}`, 24, 20);
+
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.textAlign = "right";
+        ctx.fillStyle = timeLeft < 10 ? COL.fail : COL.text;
+        ctx.fillText(`${Math.ceil(timeLeft)}초`, W - 24, 20);
+
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.fillRect(24, 46, W - 48, 4);
+        ctx.fillStyle = COL.success;
+        ctx.fillRect(24, 46, (W - 48) * (matched / TARGET_MATCHES), 4);
+
+        // Shape name
+        ctx.fillStyle = COL.textLight;
+        ctx.font = "500 14px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(SHAPES[currentShape].name, CX, 22);
+
+        drawAngleIndicator();
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * Math.max(0, p.life), 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = Math.max(0, p.life);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath();
+        c.moveTo(x + r, y); c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r);
+        c.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 50 + lines.length * lineH + 44;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(232,240,248,0.95)";
+        roundRect(ctx, cardX, cardY, cardW, cardH, 12);
+        ctx.fill();
+
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 24px Trebuchet MS";
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "500 14px Trebuchet MS";
+        ctx.fillStyle = COL.textLight;
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+
+        ctx.fillStyle = "rgba(58,74,92,0.3)";
+        ctx.font = "400 13px Trebuchet MS";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Background with gradient
+        const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+        bgGrad.addColorStop(0, COL.bg);
+        bgGrad.addColorStop(1, COL.bgWarm);
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Floor
+        ctx.fillStyle = "rgba(200, 190, 170, 0.3)";
+        ctx.fillRect(0, H * 0.65, W, H * 0.35);
+
+        drawLightSource();
+
+        if (mode === "running" || mode === "clear") {
+          // Target shadow (on the floor/wall)
+          const shadowCX = CX + 30;
+          const shadowCY = CY + 50;
+          drawShapeAt(currentShape, shadowCX, shadowCY, targetAngle, 100, COL.shadowTarget);
+
+          // Player object
+          const objColor = matchFlash > 0.1 ? COL.matched : COL.object;
+          drawShapeAt(currentShape, CX - 30, CY - 30, currentAngle, 90, objColor);
+
+          // Match flash overlay
+          if (matchFlash > 0.1) {
+            ctx.fillStyle = `rgba(104, 184, 108, ${matchFlash * 0.2})`;
+            ctx.fillRect(0, 0, W, H);
+          }
+        }
+
+        drawParticles();
+        if (mode === "running") drawHUD();
+
+        ctx.restore();
+
+        if (mode === "menu") {
+          ctx.fillStyle = "rgba(232,240,248,0.5)";
+          ctx.fillRect(0, 0, W, H);
+          drawCard("그림자 맞추기", [
+            "물체를 드래그로 회전시켜",
+            "그림자와 똑같이 맞추세요!",
+            "",
+            "조작: 드래그로 물체 회전",
+            "클리어: 5개 그림자 맞추기",
+            "실패: 시간 초과",
+          ], COL.object);
+        } else if (mode === "clear") {
+          clearAnim = clamp(clearAnim + 0.02, 0, 1);
+          ctx.fillStyle = `rgba(232,240,248,${clearAnim * 0.5})`;
+          ctx.fillRect(0, 0, W, H);
+          if (clearAnim > 0.3) {
+            drawCard("완벽한 그림자!", [
+              `${Math.ceil(elapsed)}초 만에 완료`,
+              `${matched}개 모양 일치 성공`,
+            ], COL.success);
+          }
+        } else if (mode === "failed") {
+          ctx.fillStyle = "rgba(60,50,40,0.25)";
+          ctx.fillRect(0, 0, W, H);
+          drawCard("시간 초과!", [
+            "조금 더 빨리 맞춰보세요",
+            `맞춘 그림자: ${matched}/${TARGET_MATCHES}`,
+          ], COL.fail);
+        }
+      }
+
+      // --- Input ---
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") {
+          if (mode === "menu" || mode === "clear" || mode === "failed") {
+            reset(); mode = "running";
+          }
+          return;
+        }
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        isDragging = true;
+        lastDragAngle = Math.atan2(pos.y - CY, pos.x - CX);
+        canvas.setPointerCapture(e.pointerId);
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!isDragging) return;
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        const angle = Math.atan2(pos.y - CY, pos.x - CX);
+        let delta = angle - lastDragAngle;
+        if (delta > Math.PI) delta -= Math.PI * 2;
+        if (delta < -Math.PI) delta += Math.PI * 2;
+        currentAngle += delta;
+        // Normalize
+        while (currentAngle < 0) currentAngle += Math.PI * 2;
+        while (currentAngle > Math.PI * 2) currentAngle -= Math.PI * 2;
+        lastDragAngle = angle;
+      });
+
+      canvas.addEventListener("pointerup", () => {
+        if (!isDragging) return;
+        isDragging = false;
+        checkMatch();
+      });
+      canvas.addEventListener("pointercancel", () => { isDragging = false; });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") { reset(); mode = "running"; }
+        }
+      });
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          matched, currentShape,
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          matched = TARGET_MATCHES;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      shuffleShapes();
+      nextShape();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>

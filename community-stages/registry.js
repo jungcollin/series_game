@@ -1150,5 +1150,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "모든 재료를 골고루 비비면 클리어",
     thumbnail: "./bibimbap-mix/thumbnail.png",
     path: "./bibimbap-mix/index.html",
+  },
+  {
+    id: "shadow-rotate",
+    title: "그림자 맞추기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Rotation puzzle",
+    clearCondition: "5개 물체의 그림자를 맞추면 클리어",
+    thumbnail: "./shadow-rotate/thumbnail.png",
+    path: "./shadow-rotate/index.html",
   }
 ];
