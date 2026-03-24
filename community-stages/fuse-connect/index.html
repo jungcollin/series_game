@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>도화선 잇기</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 100%; height: 100%; overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #2B1B12; display: grid; place-items: center;
+      }
+      a, canvas { -webkit-tap-highlight-color: rgba(255, 180, 60, 0.2); }
+      .skip-link {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        width: 1px; height: 1px; padding: 0; overflow: hidden;
+        clip: rect(0, 0, 0, 0); clip-path: inset(50%);
+        border-radius: 999px; background: rgba(43, 27, 18, 0.92);
+        color: #FFE4B5; font-weight: 800; text-decoration: none; white-space: nowrap;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 12px 16px;
+        overflow: visible; clip: auto; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; background: #2B1B12; touch-action: none;
+      }
+      canvas:focus-visible { outline: 4px solid rgba(255, 180, 60, 0.6); outline-offset: -8px; }
+      .mobile-controls { display: none; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">도화선 잇기. 도화선을 드래그로 연결하여 모든 폭죽에 불을 전파하는 경로 퍼즐 게임. 드래그로 도화선 경로 연결. 모바일에서는 화면 터치 드래그로 플레이합니다. 모든 폭죽에 불이 도달하면 클리어. 불이 꺼지거나 시간 초과 시 실패.</p>
+    <canvas id="game" width="960" height="540" aria-label="도화선 잇기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <div class="mobile-controls"></div>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      const CX = W / 2, CY = H / 2;
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      const META = {
+        id: "fuse-connect",
+        title: "도화선 잇기",
+        description: "도화선을 드래그로 연결하여 모든 폭죽에 불을 전파하는 경로 퍼즐 게임.",
+        creator: "jungcollin",
+        genre: "Path puzzle",
+        clearCondition: "모든 폭죽에 불이 도달하면 클리어",
+        failCondition: "불이 꺼지거나 시간 초과 시 실패",
+        controls: "드래그로 도화선 경로 연결",
+      };
+
+      const relayContext = window.RelayRuntime?.readContext(META.id) || {
+        history: [], clearCount: 0, previousStageId: null,
+      };
+
+      window.relayStageMeta = {
+        id: META.id, title: META.title, description: META.description,
+        creator: META.creator, genre: META.genre,
+        clearCondition: META.clearCondition, failCondition: META.failCondition,
+        controls: META.controls,
+      };
+      window.relayStageResult = { status: "running" };
+
+      const COL = {
+        bg: "#3D2B1F",
+        bgLight: "#4E3A2E",
+        fuse: "#C8A882",
+        fuseBurnt: "#5A4030",
+        fire: "#FF8C00",
+        fireGlow: "#FFD700",
+        firework: "#FF4444",
+        fireworkLit: "#FF6B6B",
+        spark: "#FFEE88",
+        text: "#FFE4B5",
+        textDim: "rgba(255, 228, 181, 0.5)",
+        success: "#7BC47F",
+        fail: "#FF6B6B",
+        node: "#8B6914",
+        nodeActive: "#DAA520",
+      };
+
+      const DURATION = 40;
+      const BURN_SPEED = 120;
+      const NODE_RADIUS = 16;
+      const CONNECT_DIST = 80;
+
+      let mode = "menu";
+      let elapsed = 0;
+      let lastTimestamp = 0;
+      let animFrame = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let shake = 0;
+      let clearAnim = 0;
+
+      // Nodes: {x, y, type: "start"|"node"|"firework", lit: bool, litTime}
+      let nodes = [];
+      // Connections drawn by player: [{from, to}]
+      let connections = [];
+      // Fuse segments being burned: [{fromNode, toNode, progress, burning}]
+      let fuseSegments = [];
+      // Drawing state
+      let drawing = false;
+      let drawStart = -1;
+      let particles = [];
+      let fireworkParticles = [];
+      let burnStarted = false;
+      let allLit = false;
+      let totalFireworks = 0;
+      let litFireworks = 0;
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+      function dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); }
+
+      function generateLevel() {
+        nodes = [];
+        connections = [];
+        fuseSegments = [];
+        particles = [];
+        fireworkParticles = [];
+        burnStarted = false;
+        allLit = false;
+        litFireworks = 0;
+
+        // Start node (candle)
+        nodes.push({ x: 120, y: CY, type: "start", lit: false, litTime: 0 });
+
+        // Junction nodes
+        nodes.push({ x: 280, y: 160, type: "node", lit: false, litTime: 0 });
+        nodes.push({ x: 300, y: 380, type: "node", lit: false, litTime: 0 });
+        nodes.push({ x: 500, y: 270, type: "node", lit: false, litTime: 0 });
+        nodes.push({ x: 650, y: 150, type: "node", lit: false, litTime: 0 });
+        nodes.push({ x: 620, y: 400, type: "node", lit: false, litTime: 0 });
+
+        // Firework nodes
+        nodes.push({ x: 820, y: 120, type: "firework", lit: false, litTime: 0 });
+        nodes.push({ x: 850, y: 300, type: "firework", lit: false, litTime: 0 });
+        nodes.push({ x: 780, y: 440, type: "firework", lit: false, litTime: 0 });
+
+        totalFireworks = nodes.filter(n => n.type === "firework").length;
+      }
+
+      function getNodeAt(x, y) {
+        for (let i = 0; i < nodes.length; i++) {
+          if (dist(x, y, nodes[i].x, nodes[i].y) < NODE_RADIUS + 10) return i;
+        }
+        return -1;
+      }
+
+      function hasConnection(a, b) {
+        return connections.some(c =>
+          (c.from === a && c.to === b) || (c.from === b && c.to === a)
+        );
+      }
+
+      function canConnect(a, b) {
+        if (a === b) return false;
+        if (hasConnection(a, b)) return false;
+        const d = dist(nodes[a].x, nodes[a].y, nodes[b].x, nodes[b].y);
+        return d < 300;
+      }
+
+      function addConnection(a, b) {
+        if (!canConnect(a, b)) return false;
+        connections.push({ from: a, to: b });
+        return true;
+      }
+
+      function startBurn() {
+        if (burnStarted) return;
+        burnStarted = true;
+        nodes[0].lit = true;
+        nodes[0].litTime = elapsed;
+        propagateFire(0);
+      }
+
+      function propagateFire(nodeIdx) {
+        for (const conn of connections) {
+          let neighbor = -1;
+          if (conn.from === nodeIdx) neighbor = conn.to;
+          else if (conn.to === nodeIdx) neighbor = conn.from;
+          if (neighbor < 0) continue;
+
+          const alreadyBurning = fuseSegments.some(s =>
+            (s.fromNode === nodeIdx && s.toNode === neighbor) ||
+            (s.fromNode === neighbor && s.toNode === nodeIdx)
+          );
+          if (alreadyBurning) continue;
+
+          fuseSegments.push({
+            fromNode: nodeIdx,
+            toNode: neighbor,
+            progress: 0,
+            burning: true,
+            length: dist(nodes[nodeIdx].x, nodes[nodeIdx].y, nodes[neighbor].x, nodes[neighbor].y),
+          });
+        }
+      }
+
+      function spawnSpark(x, y) {
+        if (reducedMotion) return;
+        for (let i = 0; i < 3; i++) {
+          particles.push({
+            x, y,
+            vx: rand(-40, 40), vy: rand(-60, -10),
+            life: 1, size: rand(1.5, 3),
+          });
+        }
+      }
+
+      function spawnFirework(x, y) {
+        const colors = [COL.firework, COL.fireGlow, COL.spark, "#FF69B4", "#00CED1"];
+        const count = reducedMotion ? 8 : 30;
+        for (let i = 0; i < count; i++) {
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(80, 250);
+          fireworkParticles.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - rand(20, 60),
+            life: 1,
+            size: rand(2, 5),
+            color: colors[Math.floor(rand(0, colors.length))],
+          });
+        }
+      }
+
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.parent.RelayHost.onStageFailed?.({ stageId: META.id, stageTitle: META.title, reason, durationSec: +elapsed.toFixed(1) });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.parent.RelayHost.onStageCleared?.({ stageId: META.id, stageTitle: META.title, clearCountAfter: relayContext.clearCount + 1, durationSec: +elapsed.toFixed(1) });
+      }
+
+      function reset() {
+        elapsed = 0; shake = 0; clearAnim = 0;
+        hostFailedReported = false; hostClearedReported = false;
+        window.relayStageResult.status = "running";
+        generateLevel();
+      }
+
+      function update(dt) {
+        if (mode !== "running") return;
+        elapsed += dt;
+
+        if (elapsed >= DURATION && !allLit) {
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("시간 초과");
+          return;
+        }
+
+        // Update fuse burning
+        for (const seg of fuseSegments) {
+          if (!seg.burning) continue;
+          seg.progress += (BURN_SPEED / seg.length) * dt;
+
+          // Spark at burn tip
+          const t = clamp(seg.progress, 0, 1);
+          const fx = lerp(nodes[seg.fromNode].x, nodes[seg.toNode].x, t);
+          const fy = lerp(nodes[seg.fromNode].y, nodes[seg.toNode].y, t);
+          spawnSpark(fx, fy);
+
+          if (seg.progress >= 1) {
+            seg.burning = false;
+            seg.progress = 1;
+            const target = nodes[seg.toNode];
+            if (!target.lit) {
+              target.lit = true;
+              target.litTime = elapsed;
+              if (target.type === "firework") {
+                litFireworks++;
+                spawnFirework(target.x, target.y);
+                shake = 6;
+              }
+              propagateFire(seg.toNode);
+            }
+          }
+        }
+
+        // Check win
+        if (burnStarted && !allLit) {
+          const allFireworksLit = nodes.filter(n => n.type === "firework").every(n => n.lit);
+          const anyBurning = fuseSegments.some(s => s.burning);
+          if (allFireworksLit) {
+            allLit = true;
+            mode = "clear"; clearAnim = 0;
+            window.relayStageResult.status = "cleared";
+            reportCleared();
+          } else if (!anyBurning && burnStarted) {
+            // Fire died out without reaching all fireworks
+            mode = "failed";
+            window.relayStageResult.status = "failed";
+            reportFailed("불이 꺼짐");
+            shake = 8;
+          }
+        }
+
+        // Particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 80 * dt; p.life -= dt * 3;
+          if (p.life <= 0) particles.splice(i, 1);
+        }
+        for (let i = fireworkParticles.length - 1; i >= 0; i--) {
+          const p = fireworkParticles[i];
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vy += 150 * dt; p.vx *= 0.98; p.life -= dt * 1.5;
+          if (p.life <= 0) fireworkParticles.splice(i, 1);
+        }
+
+        shake *= 0.9;
+        if (shake < 0.3) shake = 0;
+      }
+
+      // --- Drawing ---
+      function drawNode(n, idx) {
+        const isHover = drawStart === idx;
+        if (n.type === "start") {
+          // Candle
+          ctx.fillStyle = "#E8C86A";
+          ctx.fillRect(n.x - 6, n.y - 20, 12, 30);
+          ctx.fillStyle = "#D4A040";
+          ctx.fillRect(n.x - 8, n.y + 10, 16, 6);
+          if (n.lit || !burnStarted) {
+            // Flame
+            ctx.beginPath();
+            ctx.ellipse(n.x, n.y - 26, 8, 12, 0, 0, Math.PI * 2);
+            ctx.fillStyle = COL.fire;
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(n.x, n.y - 28, 4, 7, 0, 0, Math.PI * 2);
+            ctx.fillStyle = COL.fireGlow;
+            ctx.fill();
+          }
+        } else if (n.type === "firework") {
+          // Firework body
+          const bodyColor = n.lit ? COL.fireworkLit : COL.firework;
+          ctx.fillStyle = bodyColor;
+          ctx.beginPath();
+          ctx.moveTo(n.x, n.y - 22);
+          ctx.lineTo(n.x + 12, n.y + 14);
+          ctx.lineTo(n.x - 12, n.y + 14);
+          ctx.closePath();
+          ctx.fill();
+          // Stick
+          ctx.fillStyle = "#8B7355";
+          ctx.fillRect(n.x - 2, n.y + 14, 4, 16);
+          // Star on top
+          if (n.lit) {
+            ctx.fillStyle = COL.fireGlow;
+            const glow = Math.sin(elapsed * 8) * 3 + 8;
+            ctx.beginPath();
+            ctx.arc(n.x, n.y - 22, glow, 0, Math.PI * 2);
+            ctx.globalAlpha = 0.4;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          }
+          // Fuse stub at bottom
+          ctx.strokeStyle = COL.fuse;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(n.x, n.y + 14);
+          ctx.lineTo(n.x - 8, n.y + 20);
+          ctx.stroke();
+        } else {
+          // Junction node
+          const color = n.lit ? COL.nodeActive : (isHover ? "#BFA050" : COL.node);
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, NODE_RADIUS - 2, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.strokeStyle = "rgba(255,228,181,0.3)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          // Inner dot
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = n.lit ? COL.fireGlow : "rgba(255,228,181,0.4)";
+          ctx.fill();
+        }
+      }
+
+      function drawFuseConnection(conn) {
+        const from = nodes[conn.from];
+        const to = nodes[conn.to];
+        // Find matching fuse segment
+        const seg = fuseSegments.find(s =>
+          (s.fromNode === conn.from && s.toNode === conn.to) ||
+          (s.fromNode === conn.to && s.toNode === conn.from)
+        );
+
+        if (seg && seg.progress > 0) {
+          // Draw burnt portion
+          const p = clamp(seg.progress, 0, 1);
+          const isReversed = seg.fromNode !== conn.from;
+          const burnT = isReversed ? 1 - p : p;
+
+          // Unburnt portion
+          ctx.strokeStyle = COL.fuse;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          if (isReversed) {
+            ctx.moveTo(from.x, from.y);
+            ctx.lineTo(lerp(from.x, to.x, 1 - burnT), lerp(from.y, to.y, 1 - burnT));
+          } else {
+            ctx.moveTo(lerp(from.x, to.x, burnT), lerp(from.y, to.y, burnT));
+            ctx.lineTo(to.x, to.y);
+          }
+          ctx.stroke();
+
+          // Burnt portion
+          ctx.strokeStyle = COL.fuseBurnt;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          if (isReversed) {
+            ctx.moveTo(lerp(from.x, to.x, 1 - burnT), lerp(from.y, to.y, 1 - burnT));
+            ctx.lineTo(to.x, to.y);
+          } else {
+            ctx.moveTo(from.x, from.y);
+            ctx.lineTo(lerp(from.x, to.x, burnT), lerp(from.y, to.y, burnT));
+          }
+          ctx.stroke();
+        } else {
+          // Unburnt fuse
+          ctx.strokeStyle = COL.fuse;
+          ctx.lineWidth = 3;
+          ctx.setLineDash([8, 4]);
+          ctx.beginPath();
+          ctx.moveTo(from.x, from.y);
+          ctx.lineTo(to.x, to.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      function drawHUD() {
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 18px Trebuchet MS";
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText(`폭죽: ${litFireworks}/${totalFireworks}`, 24, 20);
+
+        const timeLeft = Math.max(0, DURATION - elapsed);
+        ctx.textAlign = "right";
+        ctx.fillStyle = timeLeft < 10 ? COL.fail : COL.text;
+        ctx.fillText(`${Math.ceil(timeLeft)}초`, W - 24, 20);
+
+        // Phase hint
+        ctx.textAlign = "center";
+        ctx.fillStyle = COL.textDim;
+        ctx.font = "500 14px Trebuchet MS";
+        if (!burnStarted) {
+          ctx.fillText("노드를 드래그로 연결한 후 촛불을 탭!", CX, 22);
+        } else {
+          ctx.fillText("불이 전파 중...", CX, 22);
+        }
+      }
+
+      function drawParticlesAll() {
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * Math.max(0, p.life), 0, Math.PI * 2);
+          ctx.fillStyle = COL.spark;
+          ctx.globalAlpha = Math.max(0, p.life);
+          ctx.fill();
+        }
+        for (const p of fireworkParticles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size * Math.max(0, p.life), 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = Math.max(0, p.life) * 0.8;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function roundRect(c, x, y, w, h, r) {
+        c.beginPath();
+        c.moveTo(x + r, y); c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r);
+        c.arcTo(x, y, x + r, y, r);
+      }
+
+      function drawCard(title, lines, accent) {
+        const cardW = Math.min(340, W - 40);
+        const lineH = 28;
+        const cardH = 50 + lines.length * lineH + 44;
+        const cardX = CX - cardW / 2, cardY = CY - cardH / 2;
+
+        ctx.fillStyle = "rgba(61,43,31,0.95)";
+        roundRect(ctx, cardX, cardY, cardW, cardH, 12);
+        ctx.fill();
+
+        ctx.fillStyle = accent;
+        ctx.fillRect(cardX + 16, cardY, cardW - 32, 3);
+
+        ctx.fillStyle = COL.text;
+        ctx.font = "bold 24px Trebuchet MS";
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        ctx.fillText(title, CX, cardY + 18);
+
+        ctx.font = "500 14px Trebuchet MS";
+        ctx.fillStyle = COL.textDim;
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], CX, cardY + 52 + i * lineH);
+        }
+
+        ctx.fillStyle = "rgba(255,228,181,0.3)";
+        ctx.font = "400 13px Trebuchet MS";
+        ctx.fillText("TAP or ENTER", CX, cardY + cardH - 22);
+      }
+
+      function draw() {
+        ctx.save();
+        const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+        const sy = shake > 0.3 ? rand(-shake, shake) : 0;
+        ctx.translate(sx, sy);
+
+        // Background
+        ctx.fillStyle = COL.bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Subtle texture
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.04;
+          ctx.fillStyle = "#1a1008";
+          for (let i = 0; i < 20; i++) {
+            const px = (i * 143 + 17) % W;
+            const py = (i * 211 + 31) % H;
+            ctx.fillRect(px, py, rand(2, 5), rand(2, 5));
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        // Draw connections
+        for (const conn of connections) {
+          drawFuseConnection(conn);
+        }
+
+        // Draw current drag line
+        if (drawing && drawStart >= 0) {
+          ctx.strokeStyle = "rgba(200, 168, 130, 0.5)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(nodes[drawStart].x, nodes[drawStart].y);
+          ctx.lineTo(dragX, dragY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // Draw nodes
+        for (let i = 0; i < nodes.length; i++) {
+          drawNode(nodes[i], i);
+        }
+
+        // Particles
+        drawParticlesAll();
+
+        // HUD
+        if (mode === "running") drawHUD();
+
+        ctx.restore();
+
+        // Overlays
+        if (mode === "menu") {
+          ctx.fillStyle = "rgba(43,27,18,0.6)";
+          ctx.fillRect(0, 0, W, H);
+          drawCard("도화선 잇기", [
+            "노드를 드래그로 연결하여",
+            "도화선 경로를 만드세요!",
+            "",
+            "조작: 드래그로 도화선 경로 연결",
+            "클리어: 모든 폭죽에 불 전파",
+            "실패: 불이 꺼지거나 시간 초과",
+          ], COL.fire);
+        } else if (mode === "clear") {
+          clearAnim = clamp(clearAnim + 0.02, 0, 1);
+          ctx.fillStyle = `rgba(43,27,18,${clearAnim * 0.5})`;
+          ctx.fillRect(0, 0, W, H);
+          if (clearAnim > 0.3) {
+            drawCard("축제 시작!", [
+              `${Math.ceil(elapsed)}초 만에 모든 폭죽 점화`,
+              `폭죽 ${litFireworks}개 성공`,
+            ], COL.success);
+          }
+        } else if (mode === "failed") {
+          ctx.fillStyle = "rgba(30,15,8,0.4)";
+          ctx.fillRect(0, 0, W, H);
+          drawCard("불이 꺼졌다!", [
+            elapsed >= DURATION ? "시간이 다했습니다" : "경로가 끊어졌습니다",
+            `점화된 폭죽: ${litFireworks}/${totalFireworks}`,
+          ], COL.fail);
+        }
+      }
+
+      // --- Input ---
+      let dragX = 0, dragY = 0;
+
+      function getCanvasPos(clientX, clientY) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (clientX - rect.left) * (W / rect.width),
+          y: (clientY - rect.top) * (H / rect.height),
+        };
+      }
+
+      canvas.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        if (mode !== "running") {
+          if (mode === "menu" || mode === "clear" || mode === "failed") {
+            reset(); mode = "running";
+          }
+          return;
+        }
+
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        const nodeIdx = getNodeAt(pos.x, pos.y);
+
+        if (nodeIdx === 0 && !burnStarted && connections.length > 0) {
+          startBurn();
+          return;
+        }
+
+        if (nodeIdx >= 0 && !burnStarted) {
+          drawing = true;
+          drawStart = nodeIdx;
+          dragX = pos.x;
+          dragY = pos.y;
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (!drawing) return;
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        dragX = pos.x;
+        dragY = pos.y;
+      });
+
+      canvas.addEventListener("pointerup", (e) => {
+        if (!drawing) return;
+        const pos = getCanvasPos(e.clientX, e.clientY);
+        const nodeIdx = getNodeAt(pos.x, pos.y);
+
+        if (nodeIdx >= 0 && nodeIdx !== drawStart) {
+          addConnection(drawStart, nodeIdx);
+        }
+        drawing = false;
+        drawStart = -1;
+      });
+
+      canvas.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (mode !== "running") {
+            reset(); mode = "running";
+          } else if (!burnStarted && connections.length > 0) {
+            startBurn();
+          }
+        }
+      });
+
+      // --- Game loop ---
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) { lastTimestamp = timestamp; return; }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) { update(FIXED_DT); dt -= FIXED_DT; steps++; }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode, elapsed: +elapsed.toFixed(1),
+          connections: connections.length,
+          litFireworks, totalFireworks,
+          burnStarted,
+          result: window.relayStageResult.status,
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i++) update(FIXED_DT);
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageDebug = {
+        forceClear() {
+          reset(); mode = "running";
+          litFireworks = totalFireworks; allLit = true;
+          mode = "clear"; clearAnim = 0;
+          window.relayStageResult.status = "cleared";
+          reportCleared(); draw();
+        },
+        forceFail() {
+          reset(); mode = "running";
+          mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailed("debug_force_fail"); draw();
+        },
+      };
+
+      generateLevel();
+      reportReady();
+      animFrame = requestAnimationFrame(gameLoop);
+    </script>
+  </body>
+</html>
