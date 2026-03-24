@@ -1114,5 +1114,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "별 15개를 모으면 클리어",
     thumbnail: "./trampoline-star/thumbnail.png",
     path: "./trampoline-star/index.html",
+  },
+  {
+    id: "cup-stack",
+    title: "종이컵 쌓기",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "Speed stacking",
+    clearCondition: "피라미드 3단 완성 시 클리어",
+    thumbnail: "./cup-stack/thumbnail.png",
+    path: "./cup-stack/index.html",
   }
 ];
