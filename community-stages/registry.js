@@ -1159,5 +1159,14 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "5개 물체의 그림자를 맞추면 클리어",
     thumbnail: "./shadow-rotate/thumbnail.png",
     path: "./shadow-rotate/index.html",
+  },
+  {
+    id: "xr-pottery",
+    title: "3D 도자기 빚기",
+    creator: { name: "jungcollin", avatar: null, github: null },
+    genre: "Crafting",
+    clearCondition: "목표 모양과 80% 이상 일치",
+    thumbnail: "./xr-pottery/thumbnail.png",
+    path: "./xr-pottery/index.html",
   }
 ];

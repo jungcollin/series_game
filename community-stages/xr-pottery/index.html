@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>3D 도자기 빚기</title>
+  <style>
+    :root {
+      color-scheme: light;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      background: #0f172a;
+    }
+
+    .skip-link {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 20;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      clip-path: inset(50%);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.92);
+      color: #f8fafc;
+      font-weight: 800;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: transform 0.15s ease;
+    }
+
+    .skip-link:focus,
+    .skip-link:focus-visible {
+      width: auto;
+      height: auto;
+      padding: 12px 16px;
+      overflow: visible;
+      clip: auto;
+      clip-path: none;
+      transform: translateY(0);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    /* This canvas is used for the 2D HUD overlay. */
+    canvas#game {
+      position: absolute;
+      top: 0;
+      left: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      z-index: 10;
+      background: transparent;
+      touch-action: none;
+    }
+
+    canvas#game:focus-visible {
+      outline: 4px solid rgba(248, 250, 252, 0.9);
+      outline-offset: -8px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+  <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+          "xrblocks": "https://cdn.jsdelivr.net/gh/google/xrblocks@build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/gh/google/xrblocks@build/addons/"
+        }
+      }
+    </script>
+</head>
+
+<body>
+  <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+  <p id="stage-instructions" class="sr-only">3D 도자기 빚기. 조작: 드래그로 점토 성형. 드래그로 점토 모양을 빚어 목표 형태(초록 반투명 메쉬)와 일치시키세요.</p>
+  <canvas id="game" width="960" height="540" aria-label="3D 도자기 빚기" aria-describedby="stage-instructions"
+    tabindex="0"></canvas>
+  <script src="../relay-runtime.js"></script>
+  <script src="../registry.js"></script>
+  <!-- Provide Relay context synchronously -->
+  <script>
+    window.relayStageMeta = {
+      id: "xr-pottery", title: "3D 도자기 빚기", creator: "jungcollin",
+      genre: "Crafting", clearCondition: "목표 모양과 80% 이상 일치",
+    };
+    window.relayStageResult = { status: "running" };
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import * as xb from 'xrblocks';
+
+    const canvas = document.querySelector("#game");
+    const ctx = canvas.getContext("2d");
+    const VIEW = { width: canvas.width, height: canvas.height };
+    const FIXED_DT = 1 / 60;
+    const MAX_DT = 1 / 20;
+
+    const relayContext = window.RelayRuntime?.readContext("xr-pottery") || {
+      history: [], clearCount: 0, previousStageId: null,
+    };
+
+    let animationFrame = 0;
+    let lastTimestamp = 0;
+    let hostFailedReported = false;
+    let hostClearedReported = false;
+
+    // --- Game Constants ---
+    const CLAY_POINTS = 20;
+    const CLAY_HEIGHT = 0.4;
+    const CLAY_MAX_R = 0.16;
+    const CLAY_MIN_R = 0.03;
+    const DURATION = 35;
+    const TARGET_MATCH_THRESHOLD = 0.82;
+
+    const state = {
+      mode: "menu", elapsed: 0, lastRunTime: 0,
+      note: "XR Blocks를 활용한 3D 도자기 빚기 게임",
+      clay: [], clayTarget: [],
+      stability: 100, matchPercent: 0, scoreTimer: 0,
+      dragging: false
+    };
+
+    function initClay() {
+      state.clay = [];
+      for (let i = 0; i < CLAY_POINTS; i++) {
+        state.clay.push(0.08 + (Math.random() - 0.5) * 0.01);
+      }
+    }
+
+    function generateTarget() {
+      const shapes = [
+        (p) => 0.04 + 0.08 * Math.pow(Math.sin(p * Math.PI * 0.5), 0.6), // Bowl
+        (p) => 0.04 + 0.09 * Math.sin(p * Math.PI * 0.8) + (p > 0.6 ? -0.03 * (p - 0.6) / 0.4 : 0) + (p > 0.85 ? 0.02 * (p - 0.85) / 0.15 : 0), // Vase
+        (p) => 0.04 + 0.03 * p + 0.02 * Math.sin(p * Math.PI), // Cup
+        (p) => 0.04 + 0.09 * Math.sin(p * Math.PI * 0.65) + (p > 0.7 ? -0.04 * Math.pow((p - 0.7) / 0.3, 1.2) : 0) // Jar
+      ];
+      const fn = shapes[Math.floor(Math.random() * shapes.length)];
+      const t = [];
+      for (let i = 0; i < CLAY_POINTS; i++) {
+        t.push(fn(i / (CLAY_POINTS - 1)));
+      }
+      return t;
+    }
+
+    function calcMatch() {
+      let totalDiff = 0;
+      for (let i = 0; i < CLAY_POINTS; i++) {
+        totalDiff += Math.abs(state.clay[i] - state.clayTarget[i]) / CLAY_MAX_R;
+      }
+      return Math.max(0, 1 - (totalDiff / CLAY_POINTS) * 3);
+    }
+
+    // --- XR Blocks Setup ---
+    class PotteryScript extends xb.Script {
+      init() {
+        this.add(new THREE.AmbientLight(0xffffff, 0.4));
+        const dl = new THREE.DirectionalLight(0xffffff, 1.5);
+        dl.position.set(2, 3, 2);
+        this.add(dl);
+
+        const platGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.02, 32);
+        const platMat = new THREE.MeshPhongMaterial({ color: 0x8B7355 });
+        this.platform = new THREE.Mesh(platGeo, platMat);
+        this.platform.position.set(0, xb.user.height - 0.5, -0.6);
+        this.add(this.platform);
+
+        const clayGeo = new THREE.CylinderGeometry(1, 1, CLAY_HEIGHT, 32, CLAY_POINTS - 1);
+        const clayMat = new THREE.MeshPhongMaterial({ color: 0xC17A50 });
+        this.clayMesh = new THREE.Mesh(clayGeo, clayMat);
+        this.clayMesh.position.set(0, CLAY_HEIGHT / 2 + 0.01, 0);
+        this.platform.add(this.clayMesh);
+
+        const targetMat = new THREE.MeshBasicMaterial({ color: 0x6AA050, wireframe: true, transparent: true, opacity: 0.35 });
+        this.targetMesh = new THREE.Mesh(clayGeo.clone(), targetMat);
+        this.targetMesh.position.set(0, CLAY_HEIGHT / 2 + 0.01, 0);
+        this.platform.add(this.targetMesh);
+
+        this.initialDir = [];
+        const pos = clayGeo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i);
+          const z = pos.getZ(i);
+          const r = Math.sqrt(x * x + z * z);
+          this.initialDir.push({ nx: r === 0 ? 0 : x / r, nz: r === 0 ? 0 : z / r });
+        }
+      }
+
+      updateMesh(mesh, profile) {
+        if (!profile.length) return;
+        const pos = mesh.geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          let ty = (pos.getY(i) + CLAY_HEIGHT / 2) / CLAY_HEIGHT;
+          ty = Math.max(0, Math.min(1, ty));
+          const floatIdx = ty * (CLAY_POINTS - 1);
+          const idx0 = Math.floor(floatIdx);
+          const idx1 = Math.min(CLAY_POINTS - 1, idx0 + 1);
+          const frac = floatIdx - idx0;
+          const targetR = profile[idx0] * (1 - frac) + profile[idx1] * frac;
+
+          const spinPhase = Date.now() * 0.005;
+          const spinR = targetR * (1 + Math.sin(spinPhase + ty * 10) * 0.015);
+
+          pos.setX(i, this.initialDir[i].nx * spinR);
+          pos.setZ(i, this.initialDir[i].nz * spinR);
+        }
+        pos.needsUpdate = true;
+        mesh.geometry.computeVertexNormals();
+      }
+
+      updateVisuals() {
+        if (!this.platform || !this.clayMesh || !this.targetMesh) return;
+        if (state.mode === "running") {
+          this.platform.rotation.y -= 0.04;
+          this.updateMesh(this.clayMesh, state.clay);
+          this.updateMesh(this.targetMesh, state.clayTarget);
+          this.targetMesh.visible = true;
+        } else {
+          this.targetMesh.visible = false;
+          if (state.clay.length > 0) {
+            this.platform.rotation.y -= 0.005;
+            this.updateMesh(this.clayMesh, state.clay);
+          }
+        }
+      }
+    }
+
+    window.potteryScript = new PotteryScript();
+
+    // Initialize XR Blocks
+    document.addEventListener('DOMContentLoaded', function () {
+      function isWebGLAvailable() {
+        try {
+          const tempCanvas = document.createElement('canvas');
+          return !!(window.WebGLRenderingContext && (tempCanvas.getContext('webgl') || tempCanvas.getContext('experimental-webgl')));
+        } catch (e) { return false; }
+      }
+
+      if (isWebGLAvailable()) {
+        // Configure options if needed
+        const options = new xb.Options();
+        options.enableSimulator = true;
+        xb.add(window.potteryScript);
+        xb.init(options);
+      } else {
+        window.potteryScript = null; // Disable visual updates if no WebGL
+      }
+    });
+
+    // --- Interaction Logic ---
+    function sculptFromScreen(screenX, screenY) {
+      const h = window.innerHeight;
+      const mappedTop = h * 0.25;
+      const mappedBottom = h * 0.85;
+      let p = 1.0 - (screenY - mappedTop) / (mappedBottom - mappedTop);
+      p = Math.max(0, Math.min(1, p));
+      const floatIdx = p * (CLAY_POINTS - 1);
+
+      const w = window.innerWidth;
+      const dx = Math.abs(screenX - w / 2);
+      const mappedR = Math.max(CLAY_MIN_R, Math.min(CLAY_MAX_R, (dx / (w / 2 * 0.8)) * CLAY_MAX_R * 1.5));
+
+      let changed = 0;
+      for (let i = 0; i < CLAY_POINTS; i++) {
+        const dist = Math.abs(i - floatIdx);
+        if (dist < 3) {
+          const weight = Math.max(0, Math.cos((dist / 3) * (Math.PI / 2))); // smoother falloff
+          const diff = mappedR - state.clay[i];
+          state.clay[i] += diff * 0.15 * weight;
+          changed += Math.abs(diff * 0.15 * weight);
+        }
+      }
+
+      state.stability -= changed * 2.5;
+
+      for (let i = 0; i < CLAY_POINTS; i++) {
+        state.clay[i] = Math.max(CLAY_MIN_R, Math.min(CLAY_MAX_R, state.clay[i]));
+      }
+    }
+
+    function handlePointer(e) {
+      if (state.mode !== "running") return;
+      if (e.type === "pointerdown") {
+        state.dragging = true;
+        sculptFromScreen(e.clientX, e.clientY);
+      } else if (e.type === "pointermove" && state.dragging) {
+        sculptFromScreen(e.clientX, e.clientY);
+      } else if (e.type === "pointerup" || e.type === "pointercancel") {
+        state.dragging = false;
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointer);
+    window.addEventListener("pointermove", handlePointer);
+    window.addEventListener("pointerup", handlePointer);
+    window.addEventListener("pointercancel", handlePointer);
+
+    // --- Relay Host & Logic ---
+    function inRelayHost() {
+      try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch (e) { return false; }
+    }
+
+    function reportReadyToHost() {
+      if (!inRelayHost()) return;
+      window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+    }
+
+    function reportFailedToHost(reason = "failed") {
+      if (!inRelayHost() || hostFailedReported) return;
+      hostFailedReported = true;
+      window.parent.RelayHost.onStageFailed?.({
+        stageId: window.relayStageMeta.id, stageTitle: window.relayStageMeta.title, reason, durationSec: Number(state.lastRunTime.toFixed(1)),
+      });
+    }
+
+    function reportClearedToHost() {
+      if (!inRelayHost() || hostClearedReported) return;
+      hostClearedReported = true;
+      window.parent.RelayHost.onStageCleared?.({
+        stageId: window.relayStageMeta.id, stageTitle: window.relayStageMeta.title, clearCountAfter: relayContext.clearCount + 1, durationSec: Number(state.lastRunTime.toFixed(1)),
+      });
+    }
+
+    function startStage() {
+      state.mode = "running"; state.elapsed = 0; state.lastRunTime = 0;
+      state.stability = 100; state.matchPercent = 0; state.scoreTimer = 0;
+      state.dragging = false;
+      window.relayStageResult.status = "running";
+      hostFailedReported = false; hostClearedReported = false;
+      initClay();
+      state.clayTarget = generateTarget();
+    }
+
+    function failStage(reason = "failed") {
+      state.mode = "failed"; state.lastRunTime = state.elapsed;
+      window.relayStageResult.status = "failed";
+      reportFailedToHost(reason);
+    }
+
+    function clearStage() {
+      state.mode = "cleared"; state.lastRunTime = state.elapsed;
+      window.relayStageResult.status = "cleared";
+      reportClearedToHost();
+    }
+
+    // Start on tap/enter
+    window.addEventListener("pointerdown", (e) => {
+      if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+        startStage();
+      }
+    });
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared")) {
+        event.preventDefault(); startStage();
+      }
+    });
+
+    function update(dt) {
+      if (state.mode !== "running") return;
+      state.elapsed += dt;
+
+      if (!state.dragging) state.stability = Math.min(100, state.stability + dt * 10);
+
+      state.matchPercent = calcMatch();
+
+      if (state.matchPercent >= TARGET_MATCH_THRESHOLD) {
+        state.scoreTimer += dt;
+        if (state.scoreTimer > 0.8) { clearStage(); return; }
+      } else {
+        state.scoreTimer = Math.max(0, state.scoreTimer - dt * 2);
+      }
+
+      if (state.stability <= 0) { failStage("점토가 무너졌습니다"); return; }
+      if (state.elapsed >= DURATION) { failStage("시간 초과"); return; }
+    }
+
+    function renderCard(title, lines, accent) {
+      const cw = Math.min(460, VIEW.width - 40);
+      const ch = 280;
+      const cx = (VIEW.width - cw) / 2;
+      const cy = (VIEW.height - ch) / 2;
+
+      ctx.fillStyle = "rgba(15, 23, 42, 0.5)";
+      ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+      ctx.fillStyle = "rgba(248, 250, 252, 0.95)";
+      ctx.beginPath(); ctx.roundRect(cx, cy, cw, ch, 16); ctx.fill();
+      ctx.lineWidth = 4; ctx.strokeStyle = accent; ctx.stroke();
+
+      ctx.fillStyle = accent; ctx.font = "800 36px Trebuchet MS"; ctx.textAlign = "center";
+      ctx.fillText(title, VIEW.width / 2, cy + 60);
+
+      ctx.fillStyle = "#0f172a"; ctx.font = "600 20px Trebuchet MS";
+      lines.forEach((line, index) => {
+        ctx.fillText(line, VIEW.width / 2, cy + 120 + index * 36);
+      });
+      ctx.textAlign = "left";
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, VIEW.width, VIEW.height);
+
+      if (state.mode === "menu") {
+        renderCard("3D 도자기 빚기", [
+          "조작: 드래그로 점토 성형",
+          "목표 모양(초록색)과 80% 일치하면 클리어!",
+          "점토가 무너지면 실패!",
+          "",
+          "터치 또는 Enter로 시작"
+        ], "#f97316");
+        return;
+      }
+
+      if (state.mode === "failed") {
+        renderCard("실패", ["시간 초과 또는 점토 무너짐!", "터치하여 재시작"], "#ef4444");
+        return;
+      }
+
+      if (state.mode === "cleared") {
+        renderCard("클리어!", [`일치율: ${Math.round(state.matchPercent * 100)}%`, `남은 시간: ${(DURATION - state.lastRunTime).toFixed(1)}초`, "터치하여 재시작"], "#10b981");
+        return;
+      }
+
+      // Running HUD
+      ctx.fillStyle = "white"; ctx.font = "900 24px Trebuchet MS";
+      ctx.shadowColor = "rgba(0,0,0,0.8)"; ctx.shadowBlur = 4;
+
+      const timeLeft = Math.max(0, DURATION - state.elapsed);
+      ctx.fillText(`⏱ ${Math.ceil(timeLeft)}초`, 24, 40);
+
+      ctx.font = "800 22px Trebuchet MS";
+      ctx.fillText(`일치율: ${Math.round(state.matchPercent * 100)}%`, VIEW.width - 160, 40);
+
+      ctx.font = "800 18px Trebuchet MS";
+      ctx.fillText(`안정도`, 24, 80);
+      ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.shadowBlur = 0;
+      ctx.fillRect(90, 64, 150, 16);
+      ctx.fillStyle = state.stability > 30 ? "#f97316" : "#ef4444";
+      ctx.fillRect(90, 64, 150 * (state.stability / 100), 16);
+
+      if (state.scoreTimer > 0) {
+        ctx.fillStyle = "#10b981"; ctx.shadowBlur = 4;
+        ctx.font = "900 48px Trebuchet MS"; ctx.textAlign = "center";
+        ctx.fillText("완성 중...", VIEW.width / 2, VIEW.height / 2 - 100);
+        ctx.textAlign = "left"; ctx.shadowBlur = 0;
+      }
+    }
+
+    function renderGameToText() {
+      return JSON.stringify({
+        mode: state.mode, elapsed: Math.round(state.elapsed * 10) / 10,
+        result: window.relayStageResult.status, note: state.note,
+        matchPercent: Math.round(state.matchPercent * 100), stability: Math.round(state.stability)
+      });
+    }
+
+    function frame(timestamp) {
+      const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+      lastTimestamp = timestamp;
+
+      update(dt);
+      if (window.potteryScript) window.potteryScript.updateVisuals();
+      render();
+
+      animationFrame = requestAnimationFrame(frame);
+    }
+
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = (ms = 16.67) => {
+      const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+      for (let i = 0; i < steps; i++) update(FIXED_DT);
+      if (window.potteryScript) window.potteryScript.updateVisuals();
+      render(); return renderGameToText();
+    };
+
+    window.relayStageResult.status = "running";
+    window.relayStageDebug = {
+      forceClear: () => { startStage(); clearStage(); render(); },
+      forceFail: () => { startStage(); failStage("debug_force_fail"); render(); }
+    };
+
+    canvas.addEventListener("click", () => canvas.focus());
+    window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+    reportReadyToHost();
+    render();
+    canvas.focus();
+    animationFrame = requestAnimationFrame(frame);
+  </script>
+</body>
+
+</html>
