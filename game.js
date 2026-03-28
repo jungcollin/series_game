@@ -788,6 +788,7 @@ window.__relayHostDebug = {
 
 relayFrameEl?.addEventListener("load", () => {
   updateRunHeader();
+  relayFrameEl.focus();
 });
 relayFrameEl?.addEventListener("error", handleStageLoadTimeout);
 
@@ -797,6 +798,18 @@ relaySecondaryActionBtn?.addEventListener("click", () => {
 });
 leaderboardRefreshBtn?.addEventListener("click", loadLeaderboard);
 rankingSaveFormEl?.addEventListener("submit", saveCurrentRunToLeaderboard);
+
+window.addEventListener("keydown", (e) => {
+  // 32: Space, 37: Left, 38: Up, 39: Right, 40: Down
+  if ([32, 37, 38, 39, 40].includes(e.keyCode)) {
+    const active = document.activeElement;
+    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+      return; // Allow typing
+    }
+    // Prevent the parent page from scrolling while playing
+    e.preventDefault();
+  }
+}, { capture: false });
 
 promptStepCopyButtons.forEach((button) => {
   button.addEventListener("click", () => copyPromptStep(button));

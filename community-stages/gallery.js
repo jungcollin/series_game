@@ -115,7 +115,7 @@
       : '<span class="stage-card-thumb-icon">' + genre.icon + "</span>";
 
     return (
-      '<article class="stage-card" data-stage-id="' + escapeHtml(entry.id) + '">' +
+      '<article class="stage-card tilt-card reveal-up glow-target" data-stage-id="' + escapeHtml(entry.id) + '">' +
       '<a class="stage-card-media-link" href="' + playHref + '" aria-label="' + escapeHtml(entry.title) + ' 플레이 페이지로 이동">' +
       '<div class="stage-card-thumb" data-has-image="' + (thumbnailUrl ? "true" : "false") + '" style="background:' + genre.bg + '">' +
       thumbnailMarkup +
@@ -133,10 +133,10 @@
       "</div>" +
       '<div class="stage-card-actions">' +
       '<div class="vote-group">' +
-      '<button class="vote-btn vote-up" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="1" data-active="' + (myVote === 1) + '" type="button" aria-label="좋아요">\uD83D\uDC4D</button>' +
-      '<button class="vote-btn vote-down" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="-1" data-active="' + (myVote === -1) + '" type="button" aria-label="싫어요">\uD83D\uDC4E</button>' +
+      '<button class="vote-btn vote-up magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="1" data-active="' + (myVote === 1) + '" type="button" aria-label="좋아요">\uD83D\uDC4D</button>' +
+      '<button class="vote-btn vote-down magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="-1" data-active="' + (myVote === -1) + '" type="button" aria-label="싫어요">\uD83D\uDC4E</button>' +
       "</div>" +
-      '<a class="play-link" href="./play.html?stage=' + encodeURIComponent(entry.id) + '">플레이</a>' +
+      '<a class="play-link magnetic-btn" href="./play.html?stage=' + encodeURIComponent(entry.id) + '">플레이</a>' +
       "</div>" +
       "</div>" +
       "</article>"
