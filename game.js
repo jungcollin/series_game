@@ -452,22 +452,33 @@ function syncModalBodyState() {
   document.body.classList.toggle("modal-open", Boolean(promptOpen || leaderboardOpen));
 }
 
+function setNavActive(el) {
+  document.querySelectorAll(".navbar-actions .nav-link, .navbar-actions .nav-btn").forEach(function (n) {
+    n.classList.remove("nav-link--active");
+  });
+  if (el) el.classList.add("nav-link--active");
+}
+
 function openPromptModal() {
   setLeaderboardModal(false, { restoreFocus: false });
   setPromptModal(true, { triggerEl: openPromptBtn });
+  setNavActive(openPromptBtn);
 }
 
 function closePromptModal() {
   setPromptModal(false);
+  setNavActive(null);
 }
 
 function openLeaderboardModal() {
   setPromptModal(false, { restoreFocus: false });
   setLeaderboardModal(true, { triggerEl: openLeaderboardBtn });
+  setNavActive(openLeaderboardBtn);
 }
 
 function closeLeaderboardModal() {
   setLeaderboardModal(false);
+  setNavActive(null);
 }
 
 function copyPromptStep(button) {

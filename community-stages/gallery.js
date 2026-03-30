@@ -5,7 +5,10 @@
   var sortButtons = document.querySelectorAll(".sort-btn");
   var voteScores = new Map(); // stageId -> { score, upvotes, downvotes }
   var myVotes = {}; // stageId -> 1 | -1
-  var currentSort = "popular";
+  var SORT_STORAGE_KEY = "olr-gallery-sort";
+  var SCROLL_STORAGE_KEY = "olr-gallery-scroll";
+  var savedSort = localStorage.getItem(SORT_STORAGE_KEY);
+  var currentSort = (savedSort === "popular" || savedSort === "newest" || savedSort === "name") ? savedSort : "popular";
   var hasLoadedVoteScores = false;
 
   var GENRE_STYLES = {
@@ -244,6 +247,7 @@
     var sort = btn.dataset.sort;
     if (sort === currentSort) return;
     currentSort = sort;
+    localStorage.setItem(SORT_STORAGE_KEY, sort);
     sortButtons.forEach(function (b) {
       var isActive = b.dataset.sort === sort;
       b.dataset.active = isActive ? "true" : "false";
@@ -256,6 +260,25 @@
     gridEl.addEventListener("click", handleVoteClick);
   }
   sortButtons.forEach(function (btn) { btn.addEventListener("click", handleSortClick); });
+
+  // Apply saved sort to button states
+  sortButtons.forEach(function (b) {
+    var isActive = b.dataset.sort === currentSort;
+    b.dataset.active = isActive ? "true" : "false";
+    b.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
+
+  // Save scroll position before navigating away
+  window.addEventListener("beforeunload", function () {
+    sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY));
+  });
+  // Also save when clicking play links (same-origin navigation)
+  document.addEventListener("click", function (e) {
+    var link = e.target.closest("a[href]");
+    if (link && link.href && link.href.indexOf("play.html") !== -1) {
+      sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY));
+    }
+  });
 
   // Load cached votes for immediate render
   myVotes = window.LikesClient.getCachedVotes();
@@ -271,5 +294,13 @@
     voteScores = results[0];
     myVotes = results[1];
     renderGrid();
+    // Restore scroll position after grid is rendered
+    var savedScroll = sessionStorage.getItem(SCROLL_STORAGE_KEY);
+    if (savedScroll) {
+      requestAnimationFrame(function () {
+        window.scrollTo(0, parseInt(savedScroll, 10) || 0);
+      });
+      sessionStorage.removeItem(SCROLL_STORAGE_KEY);
+    }
   });
 })();
