@@ -7,20 +7,20 @@
     <style>
       :root { color-scheme: light; }
       * { box-sizing: border-box; }
-      html, body { margin:0; width:100%; height:100%; overflow:hidden; font-family:"Trebuchet MS","Segoe UI",sans-serif; background:#f0ead8; }
+      html, body { margin:0; width:100%; height:100%; overflow:hidden; font-family:"Trebuchet MS","Segoe UI",sans-serif; background:#1a1520; }
       body { display:grid; place-items:center; }
       a, canvas { -webkit-tap-highlight-color: rgba(148,163,184,0.2); }
       .skip-link { position:absolute; top:12px; left:12px; z-index:10; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); clip-path:inset(50%); border-radius:999px; background:rgba(80,50,20,0.92); color:#f0ead8; font-weight:800; text-decoration:none; white-space:nowrap; transition:transform 0.15s ease; }
       .skip-link:focus, .skip-link:focus-visible { width:auto; height:auto; padding:12px 16px; overflow:visible; clip:auto; clip-path:none; }
       .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
-      canvas { display:block; width:100%; height:100%; background:#f0ead8; touch-action:none; }
-      canvas:focus-visible { outline:4px solid rgba(180,120,50,0.6); outline-offset:-8px; }
+      canvas { display:block; width:100%; height:100%; background:#1a1520; touch-action:none; }
+      canvas:focus-visible { outline:4px solid rgba(212,168,67,0.6); outline-offset:-8px; }
       @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration:0.01ms!important; animation-iteration-count:1!important; transition-duration:0.01ms!important; scroll-behavior:auto!important; } }
     </style>
   </head>
   <body>
     <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
-    <p id="stage-instructions" class="sr-only">모래시계. 화면 터치로 기울기를 조절하여 모래를 그릇에 채우세요.</p>
+    <p id="stage-instructions" class="sr-only">모래시계. 화면을 누르고 있으면 모래가 흘러내립니다. 목표선에 맞춰 손을 떼세요.</p>
     <canvas id="game" width="960" height="540" aria-label="모래시계" aria-describedby="stage-instructions" tabindex="0"></canvas>
     <script src="../relay-runtime.js"></script>
     <script src="../registry.js"></script>
@@ -28,45 +28,81 @@
     "use strict";
     const canvas = document.querySelector("#game");
     const ctx = canvas.getContext("2d");
-    let W = canvas.width;
-    let H = canvas.height;
-    let CX = W / 2;
-    let CY = H / 2;
+    let W = canvas.width, H = canvas.height, CX, CY;
     const FIXED_DT = 1/60, MAX_DT = 1/20;
     const relayCtx = window.RelayRuntime?.readContext("sand-flow") || { history:[], clearCount:0, previousStageId:null };
 
-    const COL = {
-      bg:"#f0ead8", sand:"#d4a843", sandLight:"#e8c878", sandDark:"#b08930",
-      terra:"#c06840", terraDark:"#a05030", sky:"#88b8d8", skyLight:"#c0dce8",
-      bowl:"#a08060", bowlDark:"#806040", text:"#503218", textLight:"#907050",
-      cardBg:"rgba(240,234,216,0.96)", fail:"#c04040", clear:"#2d8a50", gold:"#d4a843"
+    /* ── palette ── */
+    const C = {
+      bg1:"#1a1520", bg2:"#2a2035", bg3:"#3a2d48",
+      sand:"#d4a843", sandLight:"#f0d070", sandDark:"#b08930", sandGlow:"#ffe4a0",
+      glass:"rgba(180,200,220,0.15)", glassEdge:"rgba(180,200,220,0.4)", glassShine:"rgba(255,255,255,0.12)",
+      wood:"#8b6040", woodDark:"#6a4530", woodLight:"#a07050",
+      bowl:"#5a4a6a", bowlLight:"#7a6a8a", bowlDark:"#3a2a4a",
+      target:"#e06060", targetGlow:"rgba(224,96,96,0.3)",
+      success:"#50c878", successGlow:"rgba(80,200,120,0.3)",
+      fail:"#e05050", failGlow:"rgba(224,80,80,0.3)",
+      text:"#e8e0d0", textDim:"#8a7a6a", accent:"#d4a843", accentDim:"#a08030",
+      star:"#ffe080",
     };
 
-    const TIME_LIMIT = 40, TARGET_BOWLS = 5, MAX_OVERFLOW = 3;
+    /* ── game config ── */
+    const TIME_LIMIT = 45;
+    const TARGET_BOWLS = 5;
+    const MAX_OVERFLOW = 3;
+    const TOLERANCE = [15, 13, 11, 9, 8]; // tolerance per round (%)
+    const POUR_SPEED = [28, 32, 36, 38, 42]; // sand units per second per round
+    const BOWL_SPEED = [0.6, 0.75, 0.9, 1.05, 1.2]; // bowl sway speed per round
+    const BOWL_RANGE = [0.28, 0.32, 0.36, 0.38, 0.40]; // bowl sway range (fraction of W)
+    const CATCH_RADIUS = 0.15; // fraction of W — how close bowl must be to center to catch sand
+
+    /* ── state ── */
     let mode = "menu", elapsed = 0, lastRunTime = 0;
     let hostFailedReported = false, hostClearedReported = false;
     let animFrame = 0, lastTs = 0;
-    let bowlsFilled = 0, overflows = 0;
-    let tiltAngle = 0; // -1 to 1
-    let hourglass = { sand: 100, pouring: false };
-    let bowl = { x: 0, targetFill: 0, currentFill: 0, width: 80 };
-    let sandParticles = [];
-    let pourStream = [];
+    let round = 0, overflows = 0;
+    let targetFill = 0, currentFill = 0;
+    let sandLeft = 100, pouring = false;
+    let bowlPhase = 0; // oscillation phase for bowl movement
+    let bowlX = 0; // current bowl X position
     let shakeTimer = 0, shakeIntensity = 0;
-    let particles = [], feedbackTimer = 0, feedbackSuccess = false;
+    let feedbackTimer = 0, feedbackType = "";
+    let roundTransition = 0;
+    let sandGrains = []; // falling sand particles
+    let burstParticles = [];
+    let bgStars = [];
+    let menuAnim = 0;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
     function lerp(a, b, t) { return a + (b - a) * t; }
     function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+    function easeOut(t) { return 1 - (1 - t) * (1 - t); }
+    function easeInOut(t) { return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2; }
 
-    function getHourglassY() {
-      return Math.max(110, H * 0.2);
+    /* ── bg stars ── */
+    function initStars() {
+      bgStars = [];
+      for (let i = 0; i < 60; i++) {
+        bgStars.push({ x: Math.random()*W, y: Math.random()*H, size: 0.5+Math.random()*1.5, speed: 0.2+Math.random()*0.6, phase: Math.random()*Math.PI*2 });
+      }
+    }
+
+    /* ── layout ── */
+    let layout = {};
+    function calcLayout() {
+      CX = W/2; CY = H/2;
+      const scale = Math.min(W/390, H/700, 1.4);
+      const hgH = 180 * scale;
+      const hgW = 70 * scale;
+      const hgY = H * 0.22;
+      const bowlY = H * 0.78;
+      const bowlW = 120 * scale;
+      const bowlH = 70 * scale;
+      layout = { scale, hgH, hgW, hgY, bowlY, bowlW, bowlH };
     }
 
     function resizeCanvas() {
-      const prevW = W;
-      const prevH = H;
       const rect = canvas.getBoundingClientRect();
       const cssW = Math.max(1, rect.width || window.innerWidth);
       const cssH = Math.max(1, rect.height || window.innerHeight);
@@ -74,366 +110,659 @@
       canvas.width = Math.round(cssW * dpr);
       canvas.height = Math.round(cssH * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      W = cssW;
-      H = cssH;
-      CX = W / 2;
-      CY = H / 2;
-
-      if (prevW > 0 && prevH > 0) {
-        const sx = W / prevW;
-        const sy = H / prevH;
-        bowl.x *= sx;
-        bowl.width = clamp(bowl.width * sx, 56, Math.max(72, W * 0.26));
-        for (const p of particles) {
-          p.x *= sx;
-          p.y *= sy;
-        }
-        for (const p of pourStream) {
-          p.x *= sx;
-          p.y *= sy;
-        }
-      }
+      W = cssW; H = cssH;
+      calcLayout();
+      initStars();
     }
 
+    /* ── relay ── */
     window.relayStageMeta = {
-      id: "sand-flow",
-      title: "모래시계",
-      description: "화면 터치로 모래시계를 기울여 목표 높이만큼 그릇을 채우는 퍼즐 게임",
-      creator: "jungcollin",
-      genre: "Tilt physics puzzle",
-      controls: "터치/드래그로 기울기 조절",
-      clearCondition: "모래를 5개 그릇에 채우면 클리어",
+      id: "sand-flow", title: "모래시계",
+      description: "화면을 누르면 모래가 쏟아집니다. 목표선에 맞춰 손을 떼세요.",
+      creator: "jungcollin", genre: "Timing puzzle",
+      controls: "화면 터치(홀드)로 모래 조절",
+      clearCondition: "5개 그릇을 정확히 채우면 클리어",
       failCondition: "시간 초과 또는 넘침 3회 시 실패",
     };
     window.relayStageResult = { status:"running" };
-
     function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch(e) { return false; } }
     function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
     function reportFailed(reason) { if (!inRelayHost()||hostFailedReported) return; hostFailedReported=true; window.parent.RelayHost.onStageFailed?.({stageId:"sand-flow",stageTitle:"모래시계",reason,durationSec:+lastRunTime.toFixed(1)}); }
     function reportCleared() { if (!inRelayHost()||hostClearedReported) return; hostClearedReported=true; window.parent.RelayHost.onStageCleared?.({stageId:"sand-flow",stageTitle:"모래시계",clearCountAfter:relayCtx.clearCount+1,durationSec:+lastRunTime.toFixed(1)}); }
 
-    function createBowl() {
-      const margin = Math.min(200, Math.max(60, W * 0.18));
-      const span = Math.max(0, W - margin * 2);
-      bowl.x = margin + Math.random() * span;
-      bowl.targetFill = 30 + Math.random() * 50; // 30-80%
-      bowl.currentFill = 0;
-      bowl.width = clamp(70 + Math.random() * 30, 56, Math.max(72, W * 0.26));
-      hourglass.sand = 100;
-      hourglass.pouring = false;
-      tiltAngle = 0;
-      pourStream = [];
+    /* ── game flow ── */
+    function newRound() {
+      targetFill = 25 + Math.random() * 55; // 25-80%
+      currentFill = 0;
+      sandLeft = 100;
+      pouring = false;
+      sandGrains = [];
+      roundTransition = 0.8;
+      bowlPhase = Math.random() * Math.PI * 2; // random start phase
     }
 
     function startGame() {
       mode = "running"; elapsed = 0; lastRunTime = 0;
-      bowlsFilled = 0; overflows = 0; particles = [];
+      round = 0; overflows = 0;
+      burstParticles = []; feedbackTimer = 0;
       hostFailedReported = false; hostClearedReported = false;
       window.relayStageResult.status = "running";
-      shakeTimer = 0; feedbackTimer = 0;
-      createBowl();
+      shakeTimer = 0;
+      newRound();
     }
+
     function failGame(reason) { mode = "failed"; lastRunTime = elapsed; window.relayStageResult.status = "failed"; reportFailed(reason); }
     function clearGame() { mode = "cleared"; lastRunTime = elapsed; window.relayStageResult.status = "cleared"; reportCleared(); }
 
-    function spawnParticles(x, y, color, count) {
-      for (let i = 0; i < count; i++) {
-        const a = Math.random()*Math.PI*2, spd = 50+Math.random()*80;
-        particles.push({ x, y, vx:Math.cos(a)*spd, vy:Math.sin(a)*spd-30, life:1, decay:1.5+Math.random(), size:2+Math.random()*3, color });
+    function judgeFill() {
+      const diff = Math.abs(currentFill - targetFill);
+      const tol = TOLERANCE[Math.min(round, TOLERANCE.length-1)];
+      if (diff <= tol) {
+        // success
+        round++;
+        feedbackTimer = 0.8; feedbackType = "success";
+        spawnBurst(bowlX, layout.bowlY - 20, C.success, 20);
+        spawnBurst(bowlX, layout.bowlY - 20, C.star, 8);
+        if (round >= TARGET_BOWLS) {
+          setTimeout(() => clearGame(), 700);
+        } else {
+          setTimeout(() => newRound(), 900);
+        }
+      } else if (currentFill > targetFill + tol) {
+        // overflow
+        overflows++;
+        feedbackTimer = 0.6; feedbackType = "fail";
+        shakeTimer = 0.35; shakeIntensity = 6;
+        spawnBurst(bowlX, layout.bowlY, C.fail, 12);
+        if (overflows >= MAX_OVERFLOW) {
+          setTimeout(() => failGame("넘침 " + MAX_OVERFLOW + "회"), 500);
+        } else {
+          setTimeout(() => newRound(), 900);
+        }
+      } else {
+        // underfill
+        overflows++;
+        feedbackTimer = 0.6; feedbackType = "fail";
+        shakeTimer = 0.25; shakeIntensity = 4;
+        if (overflows >= MAX_OVERFLOW) {
+          setTimeout(() => failGame("넘침 " + MAX_OVERFLOW + "회"), 500);
+        } else {
+          setTimeout(() => newRound(), 900);
+        }
       }
     }
 
-    let pointerActive = false;
+    function spawnBurst(x, y, color, count) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.random()*Math.PI*2, spd = 60+Math.random()*120;
+        burstParticles.push({ x, y, vx:Math.cos(a)*spd, vy:Math.sin(a)*spd - 50, life:1, decay:1.2+Math.random()*0.8, size:2+Math.random()*4, color });
+      }
+    }
+
+    /* ── input ── */
     canvas.addEventListener("pointerdown", (e) => {
       e.preventDefault();
-      if (mode !== "running") {
-        startGame();
-      }
-      pointerActive = true;
-      hourglass.pouring = true;
-      updateTiltFromPointer(e);
+      if (mode !== "running") { startGame(); return; }
+      if (roundTransition > 0) return;
+      pouring = true;
       if (canvas.setPointerCapture && e.pointerId !== undefined) {
         try { canvas.setPointerCapture(e.pointerId); } catch {}
       }
       canvas.focus();
     });
-    canvas.addEventListener("pointermove", (e) => {
-      e.preventDefault();
-      if (mode === "running" && pointerActive) updateTiltFromPointer(e);
-    });
     canvas.addEventListener("pointerup", (e) => {
       e.preventDefault();
-      pointerActive = false;
-      hourglass.pouring = false;
+      if (mode === "running" && pouring) { pouring = false; judgeFill(); }
       if (canvas.releasePointerCapture && e.pointerId !== undefined) {
         try { canvas.releasePointerCapture(e.pointerId); } catch {}
       }
     });
     canvas.addEventListener("pointercancel", (e) => {
       e.preventDefault();
-      pointerActive = false;
-      hourglass.pouring = false;
+      if (mode === "running" && pouring) { pouring = false; judgeFill(); }
       if (canvas.releasePointerCapture && e.pointerId !== undefined) {
         try { canvas.releasePointerCapture(e.pointerId); } catch {}
       }
     });
-
-    function updateTiltFromPointer(e) {
-      const r = canvas.getBoundingClientRect();
-      const px = (e.clientX - r.left) / r.width * W;
-      tiltAngle = (px / W - 0.5) * 2; // -1 to 1
-    }
-
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); if (mode !== "running") startGame(); else checkBowl(); }
-      if (mode === "running") {
-        if (e.key === "ArrowLeft") tiltAngle = Math.max(-1, tiltAngle - 0.05);
-        if (e.key === "ArrowRight") tiltAngle = Math.min(1, tiltAngle + 0.05);
-        if (e.key === " ") { e.preventDefault(); hourglass.pouring = !hourglass.pouring; }
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        if (mode !== "running") { startGame(); return; }
+        if (roundTransition > 0) return;
+        if (!pouring) { pouring = true; }
+        else { pouring = false; judgeFill(); }
       }
     });
 
-    function checkBowl() {
-      const diff = Math.abs(bowl.currentFill - bowl.targetFill);
-      if (diff < 12) {
-        // Success
-        bowlsFilled++;
-        feedbackTimer = 0.6; feedbackSuccess = true;
-        spawnParticles(bowl.x, H - 100, COL.gold, 15);
-        if (bowlsFilled >= TARGET_BOWLS) {
-          setTimeout(() => clearGame(), 600);
-        } else {
-          setTimeout(() => createBowl(), 800);
-        }
-      } else if (bowl.currentFill > bowl.targetFill + 10) {
-        // Overflow
-        overflows++;
-        feedbackTimer = 0.5; feedbackSuccess = false;
-        shakeTimer = 0.3; shakeIntensity = 5;
-        if (overflows >= MAX_OVERFLOW) {
-          setTimeout(() => failGame("넘침 3회"), 400);
-        } else {
-          setTimeout(() => createBowl(), 800);
-        }
-      }
-    }
-
+    /* ── update ── */
     function update(dt) {
-      if (mode !== "running") return;
+      menuAnim += dt;
+      if (mode !== "running") {
+        for (const p of burstParticles) { p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=120*dt; p.life-=p.decay*dt; }
+        burstParticles = burstParticles.filter(p=>p.life>0);
+        return;
+      }
       elapsed += dt;
-      if (elapsed >= TIME_LIMIT) { failGame("시간 초과"); return; }
+      if (elapsed >= TIME_LIMIT) { pouring = false; failGame("시간 초과"); return; }
       if (shakeTimer > 0) shakeTimer = Math.max(0, shakeTimer - dt);
       if (feedbackTimer > 0) feedbackTimer = Math.max(0, feedbackTimer - dt);
 
+      // Move bowl (always, even during transition)
+      const spd = BOWL_SPEED[Math.min(round, BOWL_SPEED.length-1)];
+      const rng = BOWL_RANGE[Math.min(round, BOWL_RANGE.length-1)];
+      bowlPhase += dt * spd * Math.PI * 2;
+      bowlX = CX + Math.sin(bowlPhase) * W * rng;
+
+      if (roundTransition > 0) { roundTransition = Math.max(0, roundTransition - dt * 1.5); return; }
+
+      // Is bowl under the stream?
+      const catchDist = Math.abs(bowlX - CX);
+      const catching = catchDist < W * CATCH_RADIUS;
+
       // Pour sand
-      if (hourglass.pouring && hourglass.sand > 0) {
-        const pourRate = 40 * dt; // sand per second
-        const poured = Math.min(pourRate, hourglass.sand);
-        hourglass.sand -= poured;
+      if (pouring && sandLeft > 0) {
+        const rate = POUR_SPEED[Math.min(round, POUR_SPEED.length-1)] * dt;
+        const poured = Math.min(rate, sandLeft);
+        sandLeft -= poured;
 
-        // Calculate pour destination based on tilt
-        const hgX = W / 2;
-        const hgY = getHourglassY();
-        const pourX = hgX + tiltAngle * 200;
-        const pourY = hgY + 80;
-
-        // Add pour stream particles
-        for (let i = 0; i < 3; i++) {
-          pourStream.push({
-            x: pourX + (Math.random()-0.5)*8,
-            y: pourY,
-            vy: 200 + Math.random()*100,
-            vx: tiltAngle * 30 + (Math.random()-0.5)*20,
-            life: 1, size: 2+Math.random()*2
-          });
+        // Only fill bowl if it's under the stream
+        if (catching) {
+          const efficiency = 1 - (catchDist / (W * CATCH_RADIUS)) * 0.3; // closer = more fill
+          currentFill += poured * (targetFill < 50 ? 0.85 : 0.75) * efficiency;
         }
 
-        // Check if sand lands in bowl
-        const landX = pourX + tiltAngle * 60;
-        if (Math.abs(landX - bowl.x) < bowl.width/2 + 15) {
-          bowl.currentFill += poured * 0.7;
-          // Auto-check overflow
-          if (bowl.currentFill > 100) {
-            bowl.currentFill = 100;
-            overflows++;
-            feedbackTimer = 0.5; feedbackSuccess = false;
-            shakeTimer = 0.3; shakeIntensity = 5;
-            hourglass.pouring = false;
-            if (overflows >= MAX_OVERFLOW) {
-              setTimeout(() => failGame("넘침 3회"), 400);
-            } else {
-              setTimeout(() => createBowl(), 800);
-            }
+        // Spawn sand grains — aim toward bowl
+        if (!reducedMotion) {
+          const startY = layout.hgY + layout.hgH * 0.5;
+          const endY = layout.bowlY - layout.bowlH * 0.3;
+          const fallTime = 0.6; // approx time to fall
+          const dxNeeded = (bowlX - CX) / fallTime; // horizontal velocity to reach bowl
+          for (let i = 0; i < 4; i++) {
+            sandGrains.push({
+              x: CX + rand(-6, 6),
+              y: startY,
+              vy: 100 + rand(0, 60),
+              vx: dxNeeded * rand(0.7, 1.3) + rand(-8, 8),
+              life: 1, size: 1.5 + Math.random() * 2,
+              bright: Math.random() > 0.6,
+              caught: catching
+            });
           }
         }
+
+        // Auto-overflow
+        if (currentFill >= 100) {
+          currentFill = 100; pouring = false;
+          judgeFill();
+          return;
+        }
       }
 
-      // Update pour stream
-      for (const p of pourStream) {
-        p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; p.life -= 2 * dt;
-      }
-      pourStream = pourStream.filter(p => p.life > 0 && p.y < H - 50);
-
-      // Auto-check: if stopped pouring and fill is close enough
-      if (!hourglass.pouring && bowl.currentFill > 5 && feedbackTimer <= 0) {
-        const diff = Math.abs(bowl.currentFill - bowl.targetFill);
-        if (diff < 12 && bowl.currentFill > 0) checkBowl();
+      // If sand runs out while pouring
+      if (pouring && sandLeft <= 0) {
+        pouring = false;
+        judgeFill();
+        return;
       }
 
-      for (const p of particles) { p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 150*dt; p.life -= p.decay*dt; }
-      particles = particles.filter(p => p.life > 0);
+      // Update sand grains
+      const groundY = layout.bowlY + layout.bowlH * 0.3;
+      for (const g of sandGrains) {
+        g.x += g.vx * dt; g.y += g.vy * dt; g.vy += 500 * dt;
+        // When grain reaches ground/bowl level
+        if (g.y >= groundY && !g.hit) {
+          g.hit = true;
+          if (g.caught) {
+            // Caught by bowl: absorb quickly
+            g.life = 0.15;
+          } else {
+            // Missed: bounce/scatter on ground
+            g.vy = -60 - Math.random() * 40;
+            g.vx = (Math.random() - 0.5) * 80;
+            g.life = 0.4;
+            g.bright = false; // dim the scattered grains
+          }
+        }
+        g.life -= (g.hit ? 3 : 0.2) * dt;
+      }
+      sandGrains = sandGrains.filter(g => g.life > 0);
+
+      for (const p of burstParticles) { p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=120*dt; p.life-=p.decay*dt; }
+      burstParticles = burstParticles.filter(p=>p.life>0);
+    }
+
+    /* ── draw helpers ── */
+    function drawBgGradient() {
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, C.bg1); g.addColorStop(0.5, C.bg2); g.addColorStop(1, C.bg3);
+      ctx.fillStyle = g; ctx.fillRect(-10,-10,W+20,H+20);
+    }
+
+    function drawStars() {
+      for (const s of bgStars) {
+        const flicker = 0.4 + 0.6 * Math.sin(menuAnim * s.speed + s.phase);
+        ctx.globalAlpha = flicker * 0.5;
+        ctx.fillStyle = C.sandGlow;
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawHourglass(cx, cy, sandPct, scale) {
+      const s = scale || 1;
+      const hw = 50 * s, hh = 80 * s, neck = 6 * s, frameW = 58 * s;
+      ctx.save(); ctx.translate(cx, cy);
+
+      // Wooden frame (top and bottom bars)
+      ctx.fillStyle = C.wood;
+      drawRR(-frameW, -hh - 10*s, frameW*2, 12*s, 4*s); ctx.fill();
+      drawRR(-frameW, hh - 2*s, frameW*2, 12*s, 4*s); ctx.fill();
+      ctx.fillStyle = C.woodDark;
+      ctx.fillRect(-frameW + 4*s, -hh - 8*s, 3*s, hh*2 + 16*s);
+      ctx.fillRect(frameW - 7*s, -hh - 8*s, 3*s, hh*2 + 16*s);
+
+      // Glass body - top bulb
+      ctx.beginPath();
+      ctx.moveTo(-hw, -hh);
+      ctx.bezierCurveTo(-hw, -hh + hh*0.7, -neck, -neck*2, -neck, 0);
+      ctx.lineTo(neck, 0);
+      ctx.bezierCurveTo(neck, -neck*2, hw, -hh + hh*0.7, hw, -hh);
+      ctx.closePath();
+      ctx.fillStyle = C.glass; ctx.fill();
+      ctx.strokeStyle = C.glassEdge; ctx.lineWidth = 1.5*s; ctx.stroke();
+
+      // Glass body - bottom bulb
+      ctx.beginPath();
+      ctx.moveTo(-hw, hh);
+      ctx.bezierCurveTo(-hw, hh - hh*0.7, -neck, neck*2, -neck, 0);
+      ctx.lineTo(neck, 0);
+      ctx.bezierCurveTo(neck, neck*2, hw, hh - hh*0.7, hw, hh);
+      ctx.closePath();
+      ctx.fillStyle = C.glass; ctx.fill();
+      ctx.strokeStyle = C.glassEdge; ctx.lineWidth = 1.5*s; ctx.stroke();
+
+      // Glass shine
+      ctx.beginPath();
+      ctx.moveTo(-hw + 8*s, -hh + 8*s);
+      ctx.bezierCurveTo(-hw + 8*s, -hh + hh*0.5, -neck - 6*s, -neck*1.5, -neck - 4*s, 0);
+      ctx.strokeStyle = C.glassShine; ctx.lineWidth = 3*s; ctx.stroke();
+
+      // Sand in top (draining)
+      if (sandPct > 0) {
+        const sandH = (sandPct / 100) * (hh - 15*s);
+        ctx.save(); ctx.beginPath();
+        ctx.moveTo(-hw+2*s, -hh+2*s);
+        ctx.bezierCurveTo(-hw+2*s, -hh + hh*0.7, -neck-1*s, -neck*2, -neck-1*s, 0);
+        ctx.lineTo(neck+1*s, 0);
+        ctx.bezierCurveTo(neck+1*s, -neck*2, hw-2*s, -hh + hh*0.7, hw-2*s, -hh+2*s);
+        ctx.closePath(); ctx.clip();
+
+        const sandTop = -hh + (hh - 15*s - sandH);
+        const grad = ctx.createLinearGradient(0, sandTop, 0, 0);
+        grad.addColorStop(0, C.sandLight); grad.addColorStop(1, C.sand);
+        ctx.fillStyle = grad;
+        ctx.fillRect(-hw, sandTop, hw*2, -sandTop + 2);
+        ctx.restore();
+      }
+
+      // Sand in bottom (filling) - inverted
+      const bottomPct = 100 - sandPct;
+      if (bottomPct > 0) {
+        const sandH = (bottomPct / 100) * (hh - 15*s);
+        ctx.save(); ctx.beginPath();
+        ctx.moveTo(-hw+2*s, hh-2*s);
+        ctx.bezierCurveTo(-hw+2*s, hh - hh*0.7, -neck-1*s, neck*2, -neck-1*s, 0);
+        ctx.lineTo(neck+1*s, 0);
+        ctx.bezierCurveTo(neck+1*s, neck*2, hw-2*s, hh - hh*0.7, hw-2*s, hh-2*s);
+        ctx.closePath(); ctx.clip();
+
+        const sandTop = hh - sandH;
+        const grad = ctx.createLinearGradient(0, hh, 0, sandTop);
+        grad.addColorStop(0, C.sandDark); grad.addColorStop(1, C.sand);
+        ctx.fillStyle = grad;
+        ctx.fillRect(-hw, sandTop, hw*2, sandH);
+        ctx.restore();
+      }
+
+      // Sand stream through neck
+      if (sandPct > 0 && sandPct < 100 && pouring) {
+        ctx.fillStyle = C.sand;
+        ctx.fillRect(-1.5*s, -neck*2.5, 3*s, neck*5);
+        ctx.globalAlpha = 0.5;
+        ctx.fillRect(-2.5*s, -neck*1.5, 5*s, neck*3);
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.restore();
+    }
+
+    function drawBowl(cx, cy, w, h, fillPct, targetPct) {
+      ctx.save(); ctx.translate(cx, cy);
+
+      // Bowl shadow
+      ctx.fillStyle = "rgba(0,0,0,0.2)";
+      ctx.beginPath();
+      ctx.ellipse(0, h*0.5 + 8, w*0.5, 8, 0, 0, Math.PI*2);
+      ctx.fill();
+
+      // Bowl body
+      ctx.beginPath();
+      ctx.moveTo(-w*0.5, -h*0.6);
+      ctx.bezierCurveTo(-w*0.55, h*0.2, -w*0.3, h*0.5, 0, h*0.5);
+      ctx.bezierCurveTo(w*0.3, h*0.5, w*0.55, h*0.2, w*0.5, -h*0.6);
+      const bowlGrad = ctx.createLinearGradient(-w*0.5, 0, w*0.5, 0);
+      bowlGrad.addColorStop(0, C.bowlDark); bowlGrad.addColorStop(0.3, C.bowlLight); bowlGrad.addColorStop(0.7, C.bowl); bowlGrad.addColorStop(1, C.bowlDark);
+      ctx.fillStyle = bowlGrad; ctx.fill();
+      ctx.strokeStyle = "rgba(120,100,140,0.5)"; ctx.lineWidth = 1.5; ctx.stroke();
+
+      // Inner bowl clip for sand fill
+      const innerW = w * 0.44;
+      const innerH = h * 0.85;
+      const innerTop = -h * 0.5;
+      const innerBot = h * 0.4;
+
+      if (fillPct > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(-innerW, innerTop);
+        ctx.bezierCurveTo(-innerW*1.05, innerBot*0.5, -innerW*0.6, innerBot, 0, innerBot);
+        ctx.bezierCurveTo(innerW*0.6, innerBot, innerW*1.05, innerBot*0.5, innerW, innerTop);
+        ctx.closePath(); ctx.clip();
+
+        const fillH = (fillPct / 100) * (innerBot - innerTop);
+        const fillTop = innerBot - fillH;
+        const sandGrad = ctx.createLinearGradient(0, innerBot, 0, fillTop);
+        sandGrad.addColorStop(0, C.sandDark); sandGrad.addColorStop(0.4, C.sand); sandGrad.addColorStop(1, C.sandLight);
+        ctx.fillStyle = sandGrad;
+        ctx.fillRect(-innerW-5, fillTop, (innerW+5)*2, fillH + 2);
+
+        // Sand surface wave
+        ctx.fillStyle = C.sandLight;
+        ctx.beginPath();
+        ctx.moveTo(-innerW, fillTop);
+        for (let x = -innerW; x <= innerW; x += 4) {
+          ctx.lineTo(x, fillTop + Math.sin(x*0.15 + menuAnim*3)*1.5);
+        }
+        ctx.lineTo(innerW, fillTop + 4);
+        ctx.lineTo(-innerW, fillTop + 4);
+        ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+
+      // Target line
+      const targetLineY = innerBot - (targetPct / 100) * (innerBot - innerTop);
+      const tol = TOLERANCE[Math.min(round, TOLERANCE.length-1)];
+      const tolH = (tol / 100) * (innerBot - innerTop);
+
+      // Tolerance zone
+      ctx.fillStyle = C.targetGlow;
+      ctx.fillRect(-innerW - 5, targetLineY - tolH, (innerW + 5) * 2, tolH * 2);
+
+      // Target line itself
+      ctx.strokeStyle = C.target; ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(-innerW - 5, targetLineY); ctx.lineTo(innerW + 5, targetLineY); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Arrow indicator on right
+      ctx.fillStyle = C.target;
+      const arrowX = innerW + 12;
+      ctx.beginPath();
+      ctx.moveTo(arrowX, targetLineY);
+      ctx.lineTo(arrowX + 8, targetLineY - 5);
+      ctx.lineTo(arrowX + 8, targetLineY + 5);
+      ctx.closePath(); ctx.fill();
+
+      // Bowl rim highlight
+      ctx.beginPath();
+      ctx.moveTo(-w*0.48, -h*0.56);
+      ctx.bezierCurveTo(-w*0.2, -h*0.7, w*0.2, -h*0.7, w*0.48, -h*0.56);
+      ctx.strokeStyle = "rgba(200,180,220,0.3)"; ctx.lineWidth = 2; ctx.stroke();
+
+      ctx.restore();
     }
 
     function drawRR(x,y,w,h,r) { ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r); ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r); ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath(); }
 
-    function drawCard(title, lines, accent) {
-      ctx.fillStyle = "rgba(240,234,216,0.5)"; ctx.fillRect(0,0,W,H);
-      const cw=320, ch=44+lines.length*28+44, cx=(W-cw)/2, cy=(H-ch)/2;
-      drawRR(cx,cy,cw,ch,10); ctx.fillStyle=COL.cardBg; ctx.fill();
-      ctx.fillStyle=accent; ctx.fillRect(cx+20,cy+8,cw-40,3);
-      ctx.textAlign="center"; ctx.fillStyle=COL.text; ctx.font="bold 24px 'Trebuchet MS',sans-serif";
-      ctx.fillText(title,W/2,cy+38);
-      ctx.font="400 13px 'Trebuchet MS',sans-serif"; ctx.fillStyle=COL.textLight;
-      lines.forEach((l,i) => ctx.fillText(l,W/2,cy+64+i*28));
-      ctx.fillStyle="#aaa"; ctx.font="400 12px 'Trebuchet MS',sans-serif";
-      ctx.fillText("TAP 또는 ENTER",W/2,cy+ch-16); ctx.textAlign="left";
-    }
-
-    function drawHourglass(cx, cy, sandPct, tilt) {
-      ctx.save(); ctx.translate(cx, cy); ctx.rotate(tilt * 0.4);
-      // Frame
-      ctx.strokeStyle = COL.terra; ctx.lineWidth = 3;
-      // Top bulb
-      ctx.beginPath(); ctx.moveTo(-35, -60); ctx.lineTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(35, -60); ctx.closePath();
-      ctx.fillStyle = COL.skyLight; ctx.fill(); ctx.stroke();
-      // Bottom bulb
-      ctx.beginPath(); ctx.moveTo(-35, 60); ctx.lineTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(35, 60); ctx.closePath();
-      ctx.fillStyle = COL.skyLight; ctx.fill(); ctx.stroke();
-      // Sand in top
-      if (sandPct > 0) {
-        const h = sandPct / 100 * 50;
-        ctx.beginPath();
-        const topW = 5 + (h/50) * 30;
-        ctx.moveTo(-topW, -60 + (50-h)); ctx.lineTo(-5, 0); ctx.lineTo(5, 0); ctx.lineTo(topW, -60 + (50-h)); ctx.closePath();
-        ctx.fillStyle = COL.sand; ctx.fill();
+    function drawSandStream() {
+      // Falling sand grains
+      for (const g of sandGrains) {
+        ctx.globalAlpha = g.life;
+        ctx.fillStyle = g.bright ? C.sandLight : (g.hit && !g.caught ? C.sandDark : C.sand);
+        ctx.beginPath(); ctx.arc(g.x, g.y, g.size, 0, Math.PI*2); ctx.fill();
       }
-      // Sand in bottom (inverted sandPct)
-      const bottom = 100 - sandPct;
-      if (bottom > 0) {
-        const bh = bottom / 100 * 50;
+      ctx.globalAlpha = 1;
+
+      // Main stream — curves toward the bowl
+      if (pouring && sandLeft > 0) {
+        const streamTop = layout.hgY + layout.hgH * 0.52;
+        const streamBot = layout.bowlY - layout.bowlH * 0.4;
+        const midY = (streamTop + streamBot) / 2;
+        const grad = ctx.createLinearGradient(0, streamTop, 0, streamBot);
+        grad.addColorStop(0, C.sand); grad.addColorStop(0.5, C.sandLight); grad.addColorStop(1, C.sand + "60");
+        // Curved stream toward bowl
+        ctx.strokeStyle = grad; ctx.lineWidth = 3;
         ctx.beginPath();
-        const bw = 5 + (bh/50) * 30;
-        ctx.moveTo(-bw, 60); ctx.lineTo(-5 + (5-bw)*(1-bh/50), 60-bh); ctx.lineTo(5 + (bw-5)*(1-bh/50), 60-bh); ctx.lineTo(bw, 60); ctx.closePath();
-        ctx.fillStyle = COL.sandDark; ctx.fill();
-      }
-      ctx.restore();
-    }
-
-    function drawBowl(bx, by, w, targetFill, currentFill) {
-      // Bowl shape
-      ctx.beginPath();
-      ctx.moveTo(bx - w/2, by - 40);
-      ctx.quadraticCurveTo(bx - w/2 - 10, by + 10, bx, by + 15);
-      ctx.quadraticCurveTo(bx + w/2 + 10, by + 10, bx + w/2, by - 40);
-      ctx.strokeStyle = COL.bowlDark; ctx.lineWidth = 3; ctx.stroke();
-      ctx.fillStyle = COL.bowl + "40"; ctx.fill();
-
-      // Target line
-      const targetY = by + 15 - (targetFill / 100) * 55;
-      ctx.setLineDash([4,4]);
-      ctx.beginPath(); ctx.moveTo(bx - w/2 + 5, targetY); ctx.lineTo(bx + w/2 - 5, targetY);
-      ctx.strokeStyle = COL.terra; ctx.lineWidth = 2; ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Current fill
-      if (currentFill > 0) {
-        const fillH = (currentFill / 100) * 55;
-        const fillY = by + 15 - fillH;
+        ctx.moveTo(CX, streamTop);
+        ctx.quadraticCurveTo(CX + (bowlX - CX) * 0.3, midY, bowlX, streamBot);
+        ctx.stroke();
+        // Glow
+        ctx.strokeStyle = C.sandGlow + "20"; ctx.lineWidth = 8;
         ctx.beginPath();
-        const fw = w * (0.3 + 0.7 * Math.min(1, fillH/55));
-        ctx.moveTo(bx - fw/2, by + 15);
-        ctx.quadraticCurveTo(bx - fw/2 - 3, fillY + fillH*0.3, bx - fw*0.3, fillY);
-        ctx.lineTo(bx + fw*0.3, fillY);
-        ctx.quadraticCurveTo(bx + fw/2 + 3, fillY + fillH*0.3, bx + fw/2, by + 15);
-        ctx.closePath();
-        ctx.fillStyle = COL.sand; ctx.fill();
+        ctx.moveTo(CX, streamTop);
+        ctx.quadraticCurveTo(CX + (bowlX - CX) * 0.3, midY, bowlX, streamBot);
+        ctx.stroke();
       }
-
-      // Label
-      ctx.textAlign = "center"; ctx.fillStyle = COL.terra;
-      ctx.font = "bold 12px 'Trebuchet MS',sans-serif";
-      ctx.fillText(`목표: ${Math.round(targetFill)}%`, bx, by + 35);
-      ctx.fillStyle = currentFill > targetFill + 10 ? COL.fail : COL.text;
-      ctx.fillText(`${Math.round(currentFill)}%`, bx, by + 50);
     }
 
     function drawHUD() {
       const tl = Math.max(0, TIME_LIMIT - elapsed);
-      ctx.fillStyle=COL.text; ctx.font="600 16px 'Trebuchet MS',sans-serif"; ctx.textAlign="left";
-      ctx.fillText(`${bowlsFilled} / ${TARGET_BOWLS}`, 20, 30);
-      ctx.textAlign="right"; ctx.fillStyle=tl<10?COL.fail:COL.text;
-      ctx.fillText(Math.ceil(tl)+"s", W-20, 30);
-      ctx.fillStyle="#e0d8c8"; ctx.fillRect(W-180,38,160,4);
-      ctx.fillStyle=tl<10?COL.fail:COL.terra; ctx.fillRect(W-180,38,160*(tl/TIME_LIMIT),4);
-      ctx.textAlign="left";
-      for (let i=0;i<MAX_OVERFLOW;i++) { ctx.fillStyle=i<overflows?COL.fail:"#d8d0c0"; ctx.font="16px sans-serif"; ctx.fillText("\u2716",20+i*22,58); }
-      ctx.textAlign="center"; ctx.fillStyle=COL.textLight; ctx.font="400 12px 'Trebuchet MS',sans-serif";
-      ctx.fillText("화면 터치로 기울기 조절 · 놓으면 멈춤", W/2, H-12);
+      const pad = 16;
+
+      // Round indicators (dots)
+      for (let i = 0; i < TARGET_BOWLS; i++) {
+        const dx = pad + i * 24;
+        ctx.beginPath(); ctx.arc(dx + 8, 24, 7, 0, Math.PI*2);
+        if (i < round) { ctx.fillStyle = C.success; ctx.fill(); }
+        else if (i === round && mode === "running") { ctx.strokeStyle = C.accent; ctx.lineWidth = 2; ctx.stroke(); }
+        else { ctx.strokeStyle = C.textDim; ctx.lineWidth = 1; ctx.stroke(); }
+      }
+
+      // Timer
+      ctx.textAlign = "right"; ctx.fillStyle = tl < 10 ? C.fail : C.text;
+      ctx.font = "600 16px 'Trebuchet MS',sans-serif";
+      ctx.fillText(Math.ceil(tl) + "s", W - pad, 28);
+
+      // Timer bar
+      const barW = 120, barH = 4, barX = W - pad - barW, barY = 36;
+      ctx.fillStyle = "rgba(255,255,255,0.1)";
+      drawRR(barX, barY, barW, barH, 2); ctx.fill();
+      ctx.fillStyle = tl < 10 ? C.fail : C.accent;
+      drawRR(barX, barY, barW * (tl / TIME_LIMIT), barH, 2); ctx.fill();
+
+      // Overflow X marks
+      for (let i = 0; i < MAX_OVERFLOW; i++) {
+        ctx.fillStyle = i < overflows ? C.fail : "rgba(255,255,255,0.15)";
+        ctx.font = "14px sans-serif"; ctx.textAlign = "left";
+        ctx.fillText("\u2716", pad + i * 20, 56);
+      }
+
+      // Instruction
+      ctx.textAlign = "center";
+      ctx.font = "400 11px 'Trebuchet MS',sans-serif";
+      if (pouring) {
+        const catchDist = Math.abs(bowlX - CX);
+        const inCatch = catchDist < W * CATCH_RADIUS;
+        if (inCatch) {
+          ctx.fillStyle = C.success;
+          ctx.fillText("채우는 중! 손을 떼면 판정!", CX, H - 14);
+        } else {
+          ctx.fillStyle = C.fail;
+          ctx.fillText("그릇이 멀어요! 모래 낭비 중...", CX, H - 14);
+        }
+      } else {
+        ctx.fillStyle = C.textDim;
+        ctx.fillText("화면을 누르고 있으면 모래가 쏟아집니다", CX, H - 14);
+      }
     }
 
+    function drawCard(title, lines, accent) {
+      ctx.fillStyle = "rgba(20,15,25,0.7)"; ctx.fillRect(0,0,W,H);
+      const cw = Math.min(320, W - 40);
+      const ch = 50 + lines.length * 28 + 44;
+      const cx = (W-cw)/2, cy = (H-ch)/2 + 40;
+      drawRR(cx, cy, cw, ch, 12); ctx.fillStyle = "rgba(40,30,50,0.95)"; ctx.fill();
+      ctx.strokeStyle = accent + "60"; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = accent; ctx.fillRect(cx + 20, cy + 8, cw - 40, 2);
+      ctx.textAlign = "center"; ctx.fillStyle = C.text; ctx.font = "bold 22px 'Trebuchet MS',sans-serif";
+      ctx.fillText(title, W/2, cy + 38);
+      ctx.font = "400 13px 'Trebuchet MS',sans-serif"; ctx.fillStyle = C.textDim;
+      lines.forEach((l, i) => ctx.fillText(l, W/2, cy + 64 + i * 28));
+      ctx.fillStyle = accent + "80"; ctx.font = "400 11px 'Trebuchet MS',sans-serif";
+      ctx.fillText("TAP to play", W/2, cy + ch - 14); ctx.textAlign = "left";
+    }
+
+    function drawFeedbackOverlay() {
+      if (feedbackTimer <= 0) return;
+      const alpha = feedbackTimer * 0.25;
+      if (feedbackType === "success") {
+        ctx.fillStyle = `rgba(80,200,120,${alpha})`;
+      } else {
+        ctx.fillStyle = `rgba(224,80,80,${alpha})`;
+      }
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    /* ── render ── */
     function render() {
       ctx.save();
-      if (shakeTimer>0&&!reducedMotion) { const s=shakeIntensity*(shakeTimer/0.3); ctx.translate((Math.random()-0.5)*s,(Math.random()-0.5)*s); }
-      // Background gradient
-      const grad = ctx.createLinearGradient(0,0,0,H);
-      grad.addColorStop(0, COL.skyLight); grad.addColorStop(0.4, COL.bg); grad.addColorStop(1, "#e8dcc0");
-      ctx.fillStyle = grad; ctx.fillRect(-10,-10,W+20,H+20);
+      if (shakeTimer > 0 && !reducedMotion) {
+        const s = shakeIntensity * (shakeTimer / 0.35);
+        ctx.translate((Math.random()-0.5)*s, (Math.random()-0.5)*s);
+      }
 
-      if (mode==="menu") {
-        drawHourglass(W/2, H/2-40, 70, 0);
-        drawCard("모래시계", ["화면 터치로 기울기 조절","클리어: 모래를 5개 그릇에 채우면 클리어","실패: 시간 초과 또는 넘침 3회 시 실패"], COL.terra);
+      drawBgGradient();
+      drawStars();
+
+      if (mode === "menu") {
+        const bob = Math.sin(menuAnim * 1.5) * 5;
+        drawHourglass(CX, CY - 60 + bob, 60 + Math.sin(menuAnim * 0.5) * 15, layout.scale);
+        drawCard("모래시계", [
+          "화면을 누르면 모래가 쏟아집니다",
+          "목표선에 맞춰 손을 떼세요",
+          "5개 그릇을 채우면 클리어!"
+        ], C.accent);
         ctx.restore(); return;
       }
-      if (mode==="running") {
-        drawHourglass(W/2, getHourglassY(), hourglass.sand, tiltAngle);
-        drawBowl(bowl.x, H - 120, bowl.width, bowl.targetFill, bowl.currentFill);
 
-        // Pour stream
-        for (const p of pourStream) {
+      if (mode === "running") {
+        // Round transition fade
+        const rAlpha = roundTransition > 0 ? easeOut(1 - roundTransition / 0.8) : 1;
+        ctx.globalAlpha = rAlpha;
+
+        drawHourglass(CX, layout.hgY, sandLeft, layout.scale);
+        drawSandStream();
+        drawBowl(bowlX, layout.bowlY, layout.bowlW, layout.bowlH, currentFill, targetFill);
+
+        // Burst particles
+        for (const p of burstParticles) {
           ctx.globalAlpha = p.life;
-          ctx.fillStyle = COL.sandLight;
+          ctx.fillStyle = p.color;
           ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
         }
         ctx.globalAlpha = 1;
 
-        // Feedback flash
-        if (feedbackTimer > 0) {
-          ctx.fillStyle = feedbackSuccess ? `rgba(45,138,80,${feedbackTimer*0.4})` : `rgba(192,64,64,${feedbackTimer*0.4})`;
-          ctx.fillRect(0,0,W,H);
+        drawFeedbackOverlay();
+        drawHUD();
+
+        // Pouring status indicator
+        if (pouring) {
+          const catchDist = Math.abs(bowlX - CX);
+          const inCatch = catchDist < W * CATCH_RADIUS;
+          const pulse = 0.5 + 0.5 * Math.sin(menuAnim * 8);
+          if (inCatch) {
+            // Green glow around bowl when catching
+            ctx.shadowColor = C.success; ctx.shadowBlur = 15;
+            ctx.strokeStyle = `rgba(80,200,120,${pulse * 0.6})`;
+            ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(bowlX, layout.bowlY, layout.bowlW * 0.7, 0, Math.PI * 2); ctx.stroke();
+            ctx.shadowBlur = 0;
+          } else {
+            // Dim indicator + "miss" text when sand is wasting
+            ctx.strokeStyle = `rgba(224,80,80,${0.15 + pulse * 0.15})`;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.arc(bowlX, layout.bowlY, layout.bowlW * 0.7, 0, Math.PI * 2); ctx.stroke();
+            // Splashing X near ground center
+            ctx.fillStyle = `rgba(224,80,80,${0.3 + pulse * 0.2})`;
+            ctx.font = "bold 14px 'Trebuchet MS',sans-serif"; ctx.textAlign = "center";
+            ctx.fillText("\u2716", CX, layout.bowlY + layout.bowlH * 0.5);
+          }
         }
 
-        for (const p of particles) { ctx.globalAlpha=p.life; ctx.fillStyle=p.color; ctx.beginPath(); ctx.arc(p.x,p.y,p.size,0,Math.PI*2); ctx.fill(); }
-        ctx.globalAlpha=1;
-        drawHUD(); ctx.restore(); return;
-      }
-      if (mode==="failed") {
-        drawCard("실패", [overflows>=MAX_OVERFLOW?"넘침 3회 초과":"시간 초과",`완성: ${bowlsFilled}개 · 시간: ${lastRunTime.toFixed(1)}초`], COL.fail);
         ctx.restore(); return;
       }
-      if (mode==="cleared") {
-        for (let i=0;i<5;i++) drawHourglass(W/2-160+i*80, H/2-40, 50-i*10, (i-2)*0.1);
-        drawCard("채우기 완료!", [`그릇 ${TARGET_BOWLS}개 완성`,`시간: ${lastRunTime.toFixed(1)}초`], COL.clear);
+
+      if (mode === "failed") {
+        drawHourglass(CX, CY - 80, 0, layout.scale * 0.8);
+        for (const p of burstParticles) {
+          ctx.globalAlpha = p.life; ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        drawCard("실패", [
+          overflows >= MAX_OVERFLOW ? "넘침 " + MAX_OVERFLOW + "회 초과" : "시간 초과",
+          `완성: ${round}개 / ${TARGET_BOWLS}개`,
+          `시간: ${lastRunTime.toFixed(1)}초`
+        ], C.fail);
+        ctx.restore(); return;
+      }
+
+      if (mode === "cleared") {
+        // Victory hourglass parade
+        for (let i = 0; i < 3; i++) {
+          const bx = CX + (i - 1) * 90 * layout.scale;
+          const bob = Math.sin(menuAnim * 2 + i * 1.2) * 8;
+          drawHourglass(bx, CY - 80 + bob, 30 + i * 20, layout.scale * (0.6 + i * 0.1));
+        }
+        for (const p of burstParticles) {
+          ctx.globalAlpha = p.life; ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        drawCard("채우기 완료!", [
+          `그릇 ${TARGET_BOWLS}개 완성`,
+          `시간: ${lastRunTime.toFixed(1)}초`
+        ], C.success);
+        // Continuous celebration
+        if (Math.random() < 0.08) spawnBurst(rand(W*0.2,W*0.8), rand(H*0.2,H*0.5), [C.star,C.success,C.sandLight][Math.floor(Math.random()*3)], 3);
         ctx.restore(); return;
       }
       ctx.restore();
     }
 
+    /* ── loop ── */
     function frame(ts) { const dt=lastTs?Math.min((ts-lastTs)/1000,MAX_DT):FIXED_DT; lastTs=ts; update(dt); render(); animFrame=requestAnimationFrame(frame); }
-    function renderGameToText() { return JSON.stringify({mode,elapsed:Math.round(elapsed*10)/10,bowlsFilled,overflows,sandLeft:Math.round(hourglass.sand),bowlFill:Math.round(bowl.currentFill),bowlTarget:Math.round(bowl.targetFill),timeLeft:Math.max(0,Math.round((TIME_LIMIT-elapsed)*10)/10),result:window.relayStageResult.status}); }
+
+    function renderGameToText() {
+      return JSON.stringify({
+        mode, elapsed:Math.round(elapsed*10)/10,
+        round, overflows,
+        sandLeft:Math.round(sandLeft),
+        currentFill:Math.round(currentFill),
+        targetFill:Math.round(targetFill),
+        tolerance:TOLERANCE[Math.min(round,TOLERANCE.length-1)],
+        bowlX:Math.round(bowlX),
+        timeLeft:Math.max(0, Math.round((TIME_LIMIT-elapsed)*10)/10),
+        result:window.relayStageResult.status
+      });
+    }
 
     window.render_game_to_text = renderGameToText;
     window.advanceTime = (ms=16.67) => { const steps=Math.max(1,Math.round(ms/(FIXED_DT*1000))); for(let i=0;i<steps;i++) update(FIXED_DT); render(); return renderGameToText(); };
-    window.relayStageDebug = { forceClear() { startGame(); clearGame(); render(); }, forceFail() { startGame(); failGame("debug_force_fail"); render(); } };
+    window.relayStageDebug = {
+      forceClear() { startGame(); clearGame(); render(); },
+      forceFail() { startGame(); failGame("debug_force_fail"); render(); }
+    };
 
     canvas.addEventListener("click", () => canvas.focus());
     window.addEventListener("resize", resizeCanvas);
