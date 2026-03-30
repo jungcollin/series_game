@@ -20,7 +20,9 @@ Claude, ChatGPT, Cursor 뭘 쓰든 상관없습니다. HTML 파일 하나면 당
 
 AI한테 시키든, 직접 짜든, 방법은 자유입니다. 아래 절차만 지키면 됩니다.
 
-### 1. Fork & Clone
+### 1. Fork
+
+GitHub에서 이 저장소를 **Fork**한 뒤, 본인의 Fork를 clone합니다.
 
 ```bash
 git clone https://github.com/<your-username>/series_game.git
@@ -51,7 +53,7 @@ cd series_game
 }
 ```
 
-### 3. PR 보내기
+### 3. Fork에서 PR 보내기
 
 ```bash
 git checkout -b feat/add-your-stage-slug
@@ -60,7 +62,7 @@ git commit -m "feat: add relay stage your-stage-slug"
 git push origin feat/add-your-stage-slug
 ```
 
-GitHub에서 PR을 열어주세요.
+GitHub에서 본인의 Fork → 원본 저장소로 **Pull Request**를 열어주세요.
 
 **PR 본문에 포함할 내용:**
 - 장르
