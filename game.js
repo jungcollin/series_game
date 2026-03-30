@@ -829,6 +829,10 @@ openPromptBtn?.addEventListener("click", openPromptModal);
 closePromptBtn?.addEventListener("click", closePromptModal);
 openLeaderboardBtn?.addEventListener("click", openLeaderboardModal);
 closeLeaderboardBtn?.addEventListener("click", closeLeaderboardModal);
+if (location.hash === "#leaderboard") {
+  openLeaderboardModal();
+  history.replaceState(null, "", location.pathname + location.search);
+}
 promptModalEl?.addEventListener("click", (event) => {
   if (event.target instanceof HTMLElement && event.target.dataset.closePrompt === "true") {
     closePromptModal();
