@@ -31,7 +31,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     title: "Jump Hurdle",
     creator: { name: "지현정", avatar: null, github: "jyeonjeeong" },
     genre: "Platformer",
-    clearCondition: "30초 동안 장애물을 피하고 문에 도달하면 클리어",
+    clearCondition: "22초 동안 장애물을 피하고 문에 도달하면 클리어",
     thumbnail: "./jump-hurdle/thumbnail.png",
     path: "./jump-hurdle/index.html",
   },
