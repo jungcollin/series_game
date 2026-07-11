@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>심도 사냥</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: #111827;
+        font-family: "Avenir Next", "Pretendard", "Segoe UI", sans-serif;
+      }
+      body { display: grid; place-items: center; }
+      .skip-link {
+        position: fixed; z-index: 4; top: 12px; left: 12px;
+        width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%);
+        border-radius: 999px; background: #4dd8c1; color: #111827;
+        text-decoration: none; font-weight: 800;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 11px 16px; overflow: visible; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block;
+        width: min(100vw, calc(100vh * 16 / 9));
+        height: min(100vh, calc(100vw * 9 / 16));
+        min-height: min(220px, 100vh);
+        max-width: 100vw; max-height: 100vh;
+        object-fit: contain; background: #111827; touch-action: none; -webkit-tap-highlight-color: transparent;
+      }
+      canvas:focus-visible { outline: 4px solid #4dd8c1; outline-offset: -7px; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">심도 사냥. 화면 터치 드래그로 초점 깊이 조절, 표본을 탭. 특징이 맞는 미생물 표본 10개 채집. 오채집 3회 또는 40초 초과 시 실패. 캔버스를 터치하거나 Enter로 시작합니다. 모바일에서는 오른쪽 초점 슬라이더를 터치 드래그한 뒤 선명한 표본을 탭합니다. 키보드는 방향키로 초점을 조절하고 Tab으로 표본을 선택해 Space로 채집합니다.</p>
+    <canvas id="game" width="960" height="540" tabindex="0" aria-label="심도 사냥" aria-describedby="stage-instructions"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.querySelector("#game");
+        const ctx = canvas.getContext("2d");
+        const W = canvas.width;
+        const H = canvas.height;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 40;
+        const TAU = Math.PI * 2;
+        const VIEW = { x: 375, y: 292, radius: 205 };
+        const SLIDER = { x: 760, y: 150, width: 66, height: 252 };
+        const BUTTON_MINUS = { x: 692, y: 424, width: 58, height: 52 };
+        const BUTTON_PLUS = { x: 836, y: 424, width: 58, height: 52 };
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "microscope-hunt",
+          title: "심도 사냥",
+          description: "초점 깊이를 바꿔 여러 층에 숨은 표본을 찾아내세요.",
+          creator: "jungcollin",
+          genre: "Focus-depth search",
+          clearCondition: "특징이 맞는 미생물 표본 10개 채집",
+          failCondition: "오채집 3회 또는 40초 초과 시 실패",
+          controls: "화면 터치 드래그로 초점 깊이 조절, 표본을 탭",
+        };
+        const COLORS = {
+          ink: "#111827",
+          panel: "#243447",
+          mint: "#4dd8c1",
+          coral: "#f06b78",
+          lens: "#e8ecd8",
+        };
+        const FEATURES = ["고리", "꼬리", "가시"];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          collected: 0,
+          wrong: 0,
+          focus: 0,
+          feature: FEATURES[0],
+          organisms: [],
+          selectedIndex: 0,
+          focusDragging: false,
+          keys: new Set(),
+          feedback: "초점 링을 움직여 목표 특징을 찾으세요",
+          feedbackTimer: 0,
+          successFlash: 0,
+          errorFlash: 0,
+          failReason: "",
+          round: 0,
+          particles: [],
+        };
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+
+        function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function distance(left, right) { return Math.hypot(left.x - right.x, left.y - right.y); }
+        function seeded(seed) {
+          const value = Math.sin(seed * 91.731 + 17.19) * 43758.5453;
+          return value - Math.floor(value);
+        }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            focusTolerance: lerp(0.2, 0.065, difficulty),
+            layerCount: Math.min(7, 3 + Math.floor(difficulty * 5)),
+            decoyCount: Math.min(11, 3 + Math.floor(difficulty * 9)),
+            driftSpeed: lerp(12, 42, difficulty),
+            similarDecoyRatio: lerp(0.08, 0.82, difficulty),
+            blurScale: lerp(9, 15, difficulty),
+          };
+        }
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.parent.RelayHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.parent.RelayHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function layerDepth(index, layerCount, round) {
+          if (layerCount <= 1) return 0;
+          const layer = (index + round * 2) % layerCount;
+          return lerp(-0.86, 0.86, layer / (layerCount - 1));
+        }
+        function similarVariant(feature) {
+          if (feature === "고리") return "끊긴 고리";
+          if (feature === "꼬리") return "갈라진 꼬리";
+          return "뭉툭한 가시";
+        }
+        function appendDecoy(index, params) {
+          const seed = state.round * 101 + index * 13 + 31;
+          const angle = seeded(seed) * TAU;
+          const radius = 38 + seeded(seed + 1) * 142;
+          const similar = seeded(seed + 2) < params.similarDecoyRatio;
+          const baseFeature = similar
+            ? state.feature
+            : FEATURES[(FEATURES.indexOf(state.feature) + 1 + (index % 2)) % FEATURES.length];
+          state.organisms.push({
+            id: `decoy-${state.round}-${index}`,
+            x: VIEW.x + Math.cos(angle) * radius,
+            y: VIEW.y + Math.sin(angle) * radius,
+            z: layerDepth(index + 2, params.layerCount, state.round),
+            feature: similar ? similarVariant(baseFeature) : baseFeature,
+            exact: false,
+            size: 18 + seeded(seed + 3) * 9,
+            driftAngle: seeded(seed + 4) * TAU,
+            wobble: seeded(seed + 5) * TAU,
+          });
+        }
+        function ensureDifficultyPopulation(params) {
+          while (state.organisms.length < params.decoyCount + 1) {
+            appendDecoy(state.organisms.length - 1, params);
+          }
+        }
+        function spawnRound() {
+          const params = difficultyAt(state.elapsed);
+          state.feature = FEATURES[state.round % FEATURES.length];
+          const targetDepth = layerDepth(state.round, params.layerCount, 0);
+          const targetAngle = seeded(state.round * 11 + 2) * TAU;
+          const targetRadius = 42 + seeded(state.round * 13 + 4) * 112;
+          state.organisms = [{
+            id: `target-${state.round}`,
+            x: VIEW.x + Math.cos(targetAngle) * targetRadius,
+            y: VIEW.y + Math.sin(targetAngle) * targetRadius,
+            z: targetDepth,
+            feature: state.feature,
+            exact: true,
+            size: 23,
+            driftAngle: seeded(state.round * 17 + 5) * TAU,
+            wobble: seeded(state.round * 19 + 8) * TAU,
+          }];
+          for (let index = 0; index < params.decoyCount; index += 1) {
+            appendDecoy(index, params);
+          }
+          state.selectedIndex = 0;
+          state.feedback = `목표 특징 · ${state.feature}`;
+          state.feedbackTimer = 1.2;
+        }
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.collected = 0;
+          state.wrong = 0;
+          state.focus = 0;
+          state.selectedIndex = 0;
+          state.focusDragging = false;
+          state.keys.clear();
+          state.feedback = "초점 링을 움직여 목표 특징을 찾으세요";
+          state.feedbackTimer = 0;
+          state.successFlash = 0;
+          state.errorFlash = 0;
+          state.failReason = "";
+          state.round = 0;
+          state.particles = [];
+          hostClearReported = false;
+          hostFailReported = false;
+          spawnRound();
+          const tutorialTarget = state.organisms.find((organism) => organism.exact);
+          if (tutorialTarget) state.focus = tutorialTarget.z;
+        }
+        function startStage() {
+          if (state.mode !== "menu") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+        }
+        function clearStage() {
+          if (state.mode === "cleared") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          emitParticles(VIEW.x, VIEW.y, 30, COLORS.mint);
+          reportClear();
+        }
+        function failStage(reason) {
+          if (state.mode === "failed") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          reportFail(reason);
+        }
+        function emitParticles(x, y, count, color) {
+          const amount = reducedMotion ? Math.min(count, 4) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (index / amount) * TAU;
+            const speed = 45 + (index % 7) * 11;
+            state.particles.push({
+              x, y,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed,
+              life: 0.6 + (index % 4) * 0.1,
+              color,
+            });
+          }
+        }
+        function organismFocusError(organism) { return Math.abs(state.focus - organism.z); }
+        function attemptCollect(index) {
+          if (state.mode !== "running" || index < 0 || index >= state.organisms.length) return;
+          const params = difficultyAt(state.elapsed);
+          const organism = state.organisms[index];
+          const sharp = organismFocusError(organism) <= params.focusTolerance;
+          if (organism.exact && sharp) {
+            state.collected += 1;
+            state.successFlash = 0.5;
+            state.feedback = `${state.feature} 표본 채집 · Z ${organism.z >= 0 ? "+" : ""}${organism.z.toFixed(2)}`;
+            state.feedbackTimer = 1.15;
+            emitParticles(organism.x, organism.y, 14, COLORS.mint);
+            if (state.collected >= 10) {
+              clearStage();
+            } else {
+              state.round += 1;
+              spawnRound();
+            }
+            return;
+          }
+
+          const grace = state.elapsed < 5;
+          if (!grace) state.wrong += 1;
+          state.errorFlash = 0.48;
+          if (!sharp) state.feedback = grace ? "초점 밖 표본 · 연습 구간이라 감점 없음" : "초점이 흐립니다 · 오채집";
+          else state.feedback = grace ? "특징 불일치 · 연습 구간이라 감점 없음" : "목표 특징과 다릅니다 · 오채집";
+          state.feedbackTimer = 1.2;
+          if (state.wrong >= 3) failStage("오채집 3회");
+        }
+        function updateOrganisms(dt, params) {
+          state.organisms.forEach((organism, index) => {
+            const depthRate = 0.74 + (organism.z + 1) * 0.16;
+            const speed = params.driftSpeed * depthRate * (organism.exact ? 0.78 : 1);
+            organism.driftAngle += Math.sin(state.elapsed * 0.7 + organism.wobble) * dt * 0.32;
+            organism.x += Math.cos(organism.driftAngle) * speed * dt;
+            organism.y += Math.sin(organism.driftAngle) * speed * dt;
+            const dx = organism.x - VIEW.x;
+            const dy = organism.y - VIEW.y;
+            const radial = Math.hypot(dx, dy);
+            const limit = VIEW.radius - organism.size - 18;
+            if (radial > limit) {
+              const normalX = dx / radial;
+              const normalY = dy / radial;
+              organism.x = VIEW.x + normalX * limit;
+              organism.y = VIEW.y + normalY * limit;
+              organism.driftAngle = Math.atan2(-normalY, -normalX) + (index % 2 ? 0.42 : -0.42);
+            }
+          });
+        }
+        function updateKeyboard(dt) {
+          const speed = 0.7;
+          if (state.keys.has("ArrowUp") || state.keys.has("ArrowRight") || state.keys.has("KeyW") || state.keys.has("KeyD")) state.focus += speed * dt;
+          if (state.keys.has("ArrowDown") || state.keys.has("ArrowLeft") || state.keys.has("KeyS") || state.keys.has("KeyA")) state.focus -= speed * dt;
+          state.focus = clamp(state.focus, -1, 1);
+        }
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.vx *= 0.98;
+            particle.vy *= 0.98;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+        function update(dt) {
+          updateParticles(dt);
+          state.feedbackTimer = Math.max(0, state.feedbackTimer - dt);
+          state.successFlash = Math.max(0, state.successFlash - dt);
+          state.errorFlash = Math.max(0, state.errorFlash - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          ensureDifficultyPopulation(params);
+          updateKeyboard(dt);
+          updateOrganisms(dt, params);
+          if (state.elapsed >= DURATION) failStage("40초 제한 시간 초과");
+        }
+
+        function roundedRect(x, y, width, height, radius) {
+          ctx.beginPath(); ctx.roundRect(x, y, width, height, radius);
+        }
+        function drawShell() {
+          ctx.fillStyle = COLORS.ink; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "rgba(77,216,193,0.035)";
+          for (let x = 0; x < W; x += 64) ctx.fillRect(x, 0, 1, H);
+          ctx.fillStyle = "rgba(36,52,71,0.9)";
+          roundedRect(42, 78, 666, 424, 30); ctx.fill();
+          ctx.strokeStyle = "rgba(232,236,216,0.22)"; ctx.lineWidth = 2; ctx.stroke();
+          roundedRect(724, 78, 194, 424, 24);
+          ctx.fillStyle = "rgba(36,52,71,0.96)"; ctx.fill(); ctx.stroke();
+          ctx.fillStyle = "rgba(240,107,120,0.12)";
+          ctx.fillRect(744, 98, 154, 3);
+        }
+        function drawLens(params) {
+          const gradient = ctx.createRadialGradient(VIEW.x - 42, VIEW.y - 55, 20, VIEW.x, VIEW.y, VIEW.radius);
+          gradient.addColorStop(0, "#fbf6d8");
+          gradient.addColorStop(0.68, "#d9e5c9");
+          gradient.addColorStop(1, "#91b8a8");
+          ctx.save();
+          ctx.beginPath(); ctx.arc(VIEW.x, VIEW.y, VIEW.radius, 0, TAU); ctx.clip();
+          ctx.fillStyle = gradient; ctx.fillRect(VIEW.x - VIEW.radius, VIEW.y - VIEW.radius, VIEW.radius * 2, VIEW.radius * 2);
+          ctx.strokeStyle = "rgba(17,24,39,0.12)"; ctx.lineWidth = 1;
+          for (let index = 0; index < 7; index += 1) {
+            const radius = 30 + index * 27;
+            ctx.beginPath(); ctx.arc(VIEW.x, VIEW.y, radius, 0, TAU); ctx.stroke();
+          }
+          ctx.beginPath(); ctx.moveTo(VIEW.x - VIEW.radius, VIEW.y); ctx.lineTo(VIEW.x + VIEW.radius, VIEW.y); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(VIEW.x, VIEW.y - VIEW.radius); ctx.lineTo(VIEW.x, VIEW.y + VIEW.radius); ctx.stroke();
+          state.organisms
+            .map((organism, index) => ({ organism, index, focusError: organismFocusError(organism) }))
+            .sort((left, right) => right.focusError - left.focusError)
+            .forEach(({ organism, index, focusError }) => drawOrganism(organism, index, focusError, params));
+          ctx.restore();
+          ctx.strokeStyle = COLORS.mint; ctx.lineWidth = 6;
+          ctx.beginPath(); ctx.arc(VIEW.x, VIEW.y, VIEW.radius + 3, 0, TAU); ctx.stroke();
+          ctx.strokeStyle = "rgba(232,236,216,0.32)"; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(VIEW.x, VIEW.y, VIEW.radius + 13, 0, TAU); ctx.stroke();
+        }
+        function drawFeatureShape(feature, size, exact) {
+          ctx.beginPath();
+          ctx.ellipse(0, 0, size * 1.18, size * 0.78, 0, 0, TAU);
+          ctx.fill(); ctx.stroke();
+          if (feature.includes("고리")) {
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            if (feature === "끊긴 고리") ctx.arc(0, 0, size * 0.42, 0.45, TAU - 0.65);
+            else ctx.arc(0, 0, size * 0.42, 0, TAU);
+            ctx.stroke();
+          } else if (feature.includes("꼬리")) {
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(size * 1.12, 0);
+            ctx.bezierCurveTo(size * 1.7, -size * 0.45, size * 1.7, size * 0.7, size * 2.2, size * 0.18);
+            ctx.stroke();
+            if (feature === "갈라진 꼬리") {
+              ctx.beginPath();
+              ctx.moveTo(size * 1.55, size * 0.22);
+              ctx.quadraticCurveTo(size * 1.8, size * 0.7, size * 2.08, size * 0.62);
+              ctx.stroke();
+            }
+          } else {
+            const count = feature === "뭉툭한 가시" ? 7 : 11;
+            const length = exact ? size * 0.55 : size * 0.31;
+            ctx.lineWidth = exact ? 2.5 : 4;
+            for (let index = 0; index < count; index += 1) {
+              const angle = (index / count) * TAU;
+              ctx.beginPath();
+              ctx.moveTo(Math.cos(angle) * size, Math.sin(angle) * size * 0.68);
+              ctx.lineTo(Math.cos(angle) * (size + length), Math.sin(angle) * (size * 0.68 + length));
+              ctx.stroke();
+            }
+          }
+        }
+        function drawOrganism(organism, index, focusError, params) {
+          const blur = clamp((focusError - params.focusTolerance * 0.35) * params.blurScale, 0, 12);
+          const sharpness = clamp(1 - focusError / 0.72, 0.16, 1);
+          ctx.save();
+          ctx.translate(organism.x, organism.y);
+          ctx.rotate(Math.sin(state.elapsed * 0.7 + organism.wobble) * 0.22);
+          ctx.filter = blur > 0.25 ? `blur(${blur.toFixed(1)}px)` : "none";
+          ctx.globalAlpha = 0.32 + sharpness * 0.68;
+          ctx.fillStyle = organism.exact ? "rgba(77,216,193,0.34)" : "rgba(240,107,120,0.22)";
+          ctx.strokeStyle = organism.exact ? "#167d72" : "#a44858";
+          ctx.lineWidth = 2.5;
+          drawFeatureShape(organism.feature, organism.size, organism.exact);
+          ctx.filter = "none";
+          ctx.globalAlpha = 1;
+          if (index === state.selectedIndex) {
+            ctx.strokeStyle = COLORS.coral; ctx.lineWidth = 2; ctx.setLineDash([5, 5]);
+            ctx.beginPath(); ctx.arc(0, 0, organism.size * 1.8, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+          }
+          ctx.restore();
+        }
+        function drawTargetCard() {
+          roundedRect(88, 95, 574, 48, 13);
+          ctx.fillStyle = "rgba(17,24,39,0.88)"; ctx.fill();
+          ctx.strokeStyle = "rgba(77,216,193,0.35)"; ctx.stroke();
+          ctx.fillStyle = "rgba(232,236,216,0.58)";
+          ctx.font = "700 11px Avenir Next, sans-serif"; ctx.fillText("TARGET MORPHOLOGY", 104, 115);
+          ctx.fillStyle = COLORS.mint;
+          ctx.font = "800 19px Avenir Next, sans-serif"; ctx.fillText(`${state.feature} 특징`, 104, 136);
+          ctx.fillStyle = state.feedbackTimer > 0 ? COLORS.coral : "rgba(232,236,216,0.7)";
+          ctx.font = "700 13px Avenir Next, sans-serif";
+          ctx.textAlign = "right"; ctx.fillText(state.feedback, 644, 127); ctx.textAlign = "left";
+        }
+        function focusToY(focus) {
+          return SLIDER.y + ((1 - clamp(focus, -1, 1)) / 2) * SLIDER.height;
+        }
+        function drawFocusPanel(params) {
+          ctx.fillStyle = COLORS.mint;
+          ctx.font = "800 13px Avenir Next, sans-serif";
+          ctx.fillText("Z-AXIS FOCUS", 748, 119);
+          ctx.fillStyle = "rgba(232,236,216,0.55)";
+          ctx.font = "700 11px Avenir Next, sans-serif";
+          ctx.fillText("NEAR +1.0", 834, 151);
+          ctx.fillText("FAR  -1.0", 834, 404);
+          roundedRect(SLIDER.x, SLIDER.y, SLIDER.width, SLIDER.height, 28);
+          ctx.fillStyle = "rgba(17,24,39,0.9)"; ctx.fill();
+          ctx.strokeStyle = "rgba(232,236,216,0.22)"; ctx.stroke();
+          ctx.strokeStyle = "rgba(77,216,193,0.3)"; ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(SLIDER.x + SLIDER.width / 2, SLIDER.y + 22); ctx.lineTo(SLIDER.x + SLIDER.width / 2, SLIDER.y + SLIDER.height - 22); ctx.stroke();
+          for (let index = 0; index <= 8; index += 1) {
+            const y = SLIDER.y + 18 + index * ((SLIDER.height - 36) / 8);
+            ctx.strokeStyle = index % 2 ? "rgba(232,236,216,0.18)" : "rgba(232,236,216,0.42)";
+            ctx.beginPath(); ctx.moveTo(SLIDER.x + 19, y); ctx.lineTo(SLIDER.x + 31, y); ctx.stroke();
+          }
+          const knobY = focusToY(state.focus);
+          ctx.fillStyle = COLORS.coral;
+          roundedRect(SLIDER.x + 7, knobY - 13, SLIDER.width - 14, 26, 11); ctx.fill();
+          ctx.fillStyle = COLORS.ink;
+          ctx.font = "900 12px Avenir Next, sans-serif";
+          ctx.textAlign = "center"; ctx.fillText(`${state.focus >= 0 ? "+" : ""}${state.focus.toFixed(2)}`, SLIDER.x + SLIDER.width / 2, knobY + 4); ctx.textAlign = "left";
+
+          for (const [button, label] of [[BUTTON_MINUS, "−"], [BUTTON_PLUS, "+"]]) {
+            roundedRect(button.x, button.y, button.width, button.height, 14);
+            ctx.fillStyle = "rgba(17,24,39,0.94)"; ctx.fill();
+            ctx.strokeStyle = "rgba(77,216,193,0.4)"; ctx.lineWidth = 2; ctx.stroke();
+            ctx.fillStyle = COLORS.mint; ctx.font = "900 27px Avenir Next, sans-serif";
+            ctx.textAlign = "center"; ctx.fillText(label, button.x + button.width / 2, button.y + 35); ctx.textAlign = "left";
+          }
+          ctx.fillStyle = "rgba(232,236,216,0.62)";
+          ctx.font = "700 11px Avenir Next, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(`허용 심도 ±${params.focusTolerance.toFixed(2)}`, 793, 494);
+          ctx.textAlign = "left";
+        }
+        function drawHud(params) {
+          const entries = [
+            ["채집", `${state.collected}/10`, COLORS.mint],
+            ["오채집", `${state.wrong}/3`, state.wrong ? COLORS.coral : COLORS.lens],
+            ["남은 시간", `${Math.max(0, DURATION - state.elapsed).toFixed(1)}초`, COLORS.lens],
+            ["레이어", `${params.layerCount}`, COLORS.lens],
+          ];
+          entries.forEach(([label, value, color], index) => {
+            const x = 24 + index * 229;
+            roundedRect(x, 16, 209, 45, 11);
+            ctx.fillStyle = "rgba(17,24,39,0.92)"; ctx.fill();
+            ctx.strokeStyle = "rgba(77,216,193,0.2)"; ctx.stroke();
+            ctx.fillStyle = "rgba(232,236,216,0.55)";
+            ctx.font = "700 11px Avenir Next, sans-serif"; ctx.fillText(label, x + 12, 34);
+            ctx.fillStyle = color; ctx.font = "800 16px Avenir Next, sans-serif";
+            ctx.textAlign = "right"; ctx.fillText(value, x + 196, 44); ctx.textAlign = "left";
+          });
+        }
+        function wrapText(text, centerX, startY, maxWidth, lineHeight) {
+          const words = text.split(" ");
+          let line = "";
+          let y = startY;
+          words.forEach((word) => {
+            const test = line ? `${line} ${word}` : word;
+            if (line && ctx.measureText(test).width > maxWidth) {
+              ctx.fillText(line, centerX, y); line = word; y += lineHeight;
+            } else line = test;
+          });
+          if (line) ctx.fillText(line, centerX, y);
+        }
+        function drawCard(kind) {
+          ctx.fillStyle = COLORS.ink; ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(77,216,193,0.12)";
+          for (let index = 0; index < 12; index += 1) {
+            const radius = 34 + index * 31;
+            ctx.beginPath(); ctx.arc(W / 2, H / 2, radius, index * 0.12, TAU - index * 0.08); ctx.stroke();
+          }
+          roundedRect(125, 70, 710, 400, 28);
+          ctx.fillStyle = "rgba(36,52,71,0.96)"; ctx.fill();
+          ctx.strokeStyle = kind === "failed" ? COLORS.coral : COLORS.mint;
+          ctx.lineWidth = 2; ctx.stroke();
+          ctx.textAlign = "center";
+          ctx.fillStyle = kind === "failed" ? COLORS.coral : COLORS.mint;
+          ctx.font = "800 14px Avenir Next, sans-serif";
+          ctx.fillText("PELAGIC MICROBIOLOGY UNIT · OPTICAL BAY 2", W / 2, 109);
+          ctx.fillStyle = COLORS.lens;
+          ctx.font = "800 48px Avenir Next, sans-serif";
+          ctx.fillText(kind === "menu" ? META.title : kind === "failed" ? "표본 창 폐쇄" : "심도 지도 완성", W / 2, 165);
+          ctx.fillStyle = "rgba(232,236,216,0.78)";
+          ctx.font = "600 19px Avenir Next, sans-serif";
+          if (kind === "menu") {
+            wrapText("서로 다른 Z축에서 떠다니는 미생물을 관찰하세요. 목표 특징을 확인하고 초점이 가장 선명한 순간에 표본을 탭합니다.", W / 2, 211, 590, 29);
+            ctx.fillStyle = COLORS.mint; ctx.font = "700 17px Avenir Next, sans-serif";
+            ctx.fillText(`조작 · ${META.controls}`, W / 2, 287);
+            ctx.fillStyle = "rgba(232,236,216,0.72)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText(`클리어 · ${META.clearCondition}`, W / 2, 326);
+            ctx.fillText(`실패 · ${META.failCondition}`, W / 2, 354);
+            ctx.fillStyle = COLORS.coral; ctx.font = "800 18px Avenir Next, sans-serif";
+            ctx.fillText("화면을 터치하거나 Enter로 관찰 시작", W / 2, 414);
+          } else if (kind === "failed") {
+            ctx.fillText(state.failReason || META.failCondition, W / 2, 230);
+            ctx.fillStyle = COLORS.coral; ctx.font = "800 24px Avenir Next, sans-serif";
+            ctx.fillText(`채집 ${state.collected}/10 · 오채집 ${state.wrong}/3`, W / 2, 288);
+            ctx.fillStyle = "rgba(232,236,216,0.62)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText("공유 표본 창이 종료되었습니다.", W / 2, 342);
+          } else {
+            ctx.fillText("열 개의 미세 생명체가 Z축 지도에 기록되었습니다.", W / 2, 230);
+            ctx.fillStyle = COLORS.mint; ctx.font = "800 25px Avenir Next, sans-serif";
+            ctx.fillText(`${state.lastRunTime.toFixed(1)}초 · 10 SPECIMENS`, W / 2, 288);
+            ctx.fillStyle = "rgba(232,236,216,0.62)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText(META.clearCondition, W / 2, 342);
+          }
+          ctx.textAlign = "left";
+        }
+        function render() {
+          if (state.mode === "menu") { drawCard("menu"); return; }
+          if (state.mode === "failed") { drawCard("failed"); return; }
+          if (state.mode === "cleared") { drawCard("cleared"); return; }
+          const params = difficultyAt(state.elapsed);
+          drawShell();
+          drawLens(params);
+          drawTargetCard();
+          drawFocusPanel(params);
+          drawHud(params);
+          state.particles.forEach((particle) => {
+            ctx.globalAlpha = clamp(particle.life, 0, 1);
+            ctx.fillStyle = particle.color;
+            ctx.fillRect(particle.x - 2, particle.y - 2, 4, 4);
+          });
+          ctx.globalAlpha = 1;
+          if (state.elapsed < 5) {
+            ctx.fillStyle = "rgba(232,236,216,0.7)";
+            ctx.font = "700 12px Avenir Next, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("GRACE · 첫 5초의 흐린 표본과 특징 오인은 감점되지 않습니다", VIEW.x, 490);
+            ctx.textAlign = "left";
+          }
+          if (state.successFlash > 0) {
+            ctx.fillStyle = `rgba(77,216,193,${state.successFlash * 0.15})`; ctx.fillRect(0, 0, W, H);
+          } else if (state.errorFlash > 0) {
+            ctx.fillStyle = `rgba(240,107,120,${state.errorFlash * 0.18})`; ctx.fillRect(0, 0, W, H);
+          }
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const targetIndex = state.organisms.findIndex((organism) => organism.exact);
+          const target = state.organisms[targetIndex] || null;
+          return JSON.stringify({
+            coordinate_system: "960x540 microscope console; specimen lens centered at (375,292)",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            collected: state.collected,
+            wrong_collections: state.wrong,
+            focus_depth: Number(state.focus.toFixed(3)),
+            target_feature: state.feature,
+            target: target ? {
+              index: targetIndex,
+              x: Number(target.x.toFixed(1)),
+              y: Number(target.y.toFixed(1)),
+              z: Number(target.z.toFixed(3)),
+              focus_error: Number(organismFocusError(target).toFixed(3)),
+            } : null,
+            selected_index: state.selectedIndex,
+            focus_tolerance: Number(params.focusTolerance.toFixed(3)),
+            layer_count: params.layerCount,
+            active_layer_count: new Set(state.organisms.map((organism) => organism.z.toFixed(2))).size,
+            organism_count: state.organisms.length,
+            decoy_count: params.decoyCount,
+            actual_decoy_count: Math.max(0, state.organisms.length - 1),
+            drift_speed: Number(params.driftSpeed.toFixed(2)),
+            similar_decoy_ratio: Number(params.similarDecoyRatio.toFixed(3)),
+            blur_scale: Number(params.blurScale.toFixed(2)),
+            grace_active: state.elapsed < 5,
+            result: window.relayStageResult.status,
+          });
+        }
+        function pointerPosition(event) {
+          const rect = canvas.getBoundingClientRect();
+          const scale = Math.min(rect.width / W, rect.height / H);
+          const contentWidth = W * scale;
+          const contentHeight = H * scale;
+          const contentLeft = rect.left + (rect.width - contentWidth) / 2;
+          const contentTop = rect.top + (rect.height - contentHeight) / 2;
+          return {
+            x: clamp((event.clientX - contentLeft) * (W / contentWidth), 0, W),
+            y: clamp((event.clientY - contentTop) * (H / contentHeight), 0, H),
+          };
+        }
+        function pointInside(point, rect) {
+          return point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height;
+        }
+        function focusFromPoint(point) {
+          const ratio = clamp((point.y - SLIDER.y) / SLIDER.height, 0, 1);
+          state.focus = 1 - ratio * 2;
+        }
+        function organismAtPoint(point) {
+          let bestIndex = -1;
+          let bestDistance = Infinity;
+          state.organisms.forEach((organism, index) => {
+            const hitDistance = distance(point, organism);
+            const radius = Math.max(26, organism.size * 1.45);
+            if (hitDistance <= radius && hitDistance < bestDistance) {
+              bestDistance = hitDistance; bestIndex = index;
+            }
+          });
+          return bestIndex;
+        }
+        function onPointerDown(event) {
+          event.preventDefault(); canvas.focus();
+          if (state.mode === "menu") { startStage(); return; }
+          if (state.mode !== "running") return;
+          const point = pointerPosition(event);
+          if (pointInside(point, SLIDER)) {
+            state.focusDragging = true;
+            canvas.setPointerCapture?.(event.pointerId);
+            focusFromPoint(point);
+            return;
+          }
+          if (pointInside(point, BUTTON_MINUS)) {
+            state.focus = clamp(state.focus - 0.08, -1, 1); return;
+          }
+          if (pointInside(point, BUTTON_PLUS)) {
+            state.focus = clamp(state.focus + 0.08, -1, 1); return;
+          }
+          const index = organismAtPoint(point);
+          if (index >= 0) {
+            state.selectedIndex = index;
+            attemptCollect(index);
+          }
+        }
+        function onPointerMove(event) {
+          if (!state.focusDragging || state.mode !== "running") return;
+          event.preventDefault(); focusFromPoint(pointerPosition(event));
+        }
+        function onPointerUp(event) {
+          state.focusDragging = false;
+          canvas.releasePointerCapture?.(event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode === "menu") {
+            event.preventDefault(); startStage(); return;
+          }
+          if (state.mode !== "running") return;
+          if (event.code === "Tab") {
+            event.preventDefault();
+            const direction = event.shiftKey ? -1 : 1;
+            state.selectedIndex = (state.selectedIndex + direction + state.organisms.length) % state.organisms.length;
+            return;
+          }
+          if (event.code === "Space" || event.code === "Enter") {
+            event.preventDefault(); attemptCollect(state.selectedIndex); return;
+          }
+          if (["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) {
+            event.preventDefault(); state.keys.add(event.code);
+          }
+        }
+        function onKeyUp(event) { state.keys.delete(event.code); }
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt); render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "running" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } state.collected = 10; clearStage(); render(); },
+          forceFail() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } state.wrong = 3; failStage("debug_force_fail"); render(); },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          setFocus(value) { state.focus = clamp(Number(value), -1, 1); },
+          collect(index = state.selectedIndex) { attemptCollect(Number(index)); render(); },
+        };
+
+        canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
+        canvas.addEventListener("pointermove", onPointerMove, { passive: false });
+        canvas.addEventListener("pointerup", onPointerUp);
+        canvas.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => state.keys.clear());
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

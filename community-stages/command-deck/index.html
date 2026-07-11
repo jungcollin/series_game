@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>명령 갑판</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; width: 100%; height: 100%; overflow: hidden;
+      background: #06131b; font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+    }
+    body { display: grid; place-items: center; }
+    .skip-link {
+      position: fixed; z-index: 5; top: 8px; left: 8px; padding: 10px 14px;
+      color: #06131b; background: #5cf2d4; border-radius: 999px;
+      transform: translateY(-160%); transition: transform .15s ease;
+    }
+    .skip-link:focus, .skip-link:focus-visible { transform: translateY(0); }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+    canvas {
+      display: block;
+      width: min(100vw, calc(100vh * 16 / 9));
+      height: min(100vh, calc(100vw * 9 / 16));
+      min-height: min(220px, 100vh);
+      max-width: 100vw; max-height: 100vh;
+      aspect-ratio: 16 / 9; object-fit: contain;
+      background: #06131b; touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    canvas:focus-visible { outline: 4px solid #5cf2d4; outline-offset: -6px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important; scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#game">게임으로 건너뛰기</a>
+  <p id="stage-instructions" class="sr-only">명령 갑판. 명령 카드를 터치해 순서를 만들고 실행. 로봇 명령 큐로 화물 구역 4곳 통과. 센서 충돌 또는 40초 초과 시 실패. 모바일은 화면의 큰 명령 카드를 터치하고, 키보드는 숫자 1에서 4와 Space를 사용합니다.</p>
+  <canvas id="game" width="960" height="540" tabindex="0" aria-label="명령 갑판" aria-describedby="stage-instructions"></canvas>
+  <script src="../relay-runtime.js"></script>
+  <script src="../registry.js"></script>
+  <script>
+  (() => {
+    "use strict";
+    const canvas = document.querySelector("#game");
+    const ctx = canvas.getContext("2d");
+    const W = 960, H = 540, DT = 1 / 60, LIMIT = 40;
+    const COLORS = { ink: "#06131b", mint: "#5cf2d4", amber: "#ffc857", mist: "#d9fff7" };
+    const META = {
+      id: "command-deck", title: "명령 갑판", creator: "jungcollin",
+      genre: "Programmed movement", clearCondition: "로봇 명령 큐로 화물 구역 4곳 통과"
+    };
+    const COPY = {
+      description: "움직이기 전에 명령을 조립해 로봇을 탈출시키세요.",
+      controls: "명령 카드를 터치해 순서를 만들고 실행",
+      clear: "로봇 명령 큐로 화물 구역 4곳 통과",
+      fail: "센서 충돌 또는 40초 초과 시 실패"
+    };
+    const relayContext = window.RelayRuntime?.readContext(META.id) || { history: [], clearCount: 0 };
+    const DIRS = [[1,0],[0,1],[-1,0],[0,-1]];
+    const COMMANDS = [
+      { id: "forward", label: "전진", glyph: "↑", key: "1" },
+      { id: "turn", label: "회전", glyph: "↻", key: "2" },
+      { id: "wait", label: "대기", glyph: "Ⅱ", key: "3" },
+      { id: "pick", label: "집기", glyph: "◇", key: "4" }
+    ];
+    const ZONES = [
+      { start:[1,3], dir:0, cargo:[4,3], walls:[[3,1],[3,2]], label:"입문 부두" },
+      { start:[1,4], dir:3, cargo:[5,1], walls:[[2,2],[3,2],[4,2],[5,3]], label:"교차 갑판" },
+      { start:[5,4], dir:2, cargo:[1,1], walls:[[3,4],[3,3],[3,1],[4,1]], label:"센서 회랑" },
+      { start:[1,4], dir:3, cargo:[5,0], walls:[[1,2],[2,2],[4,3],[5,3],[3,0]], label:"선장 구역" }
+    ];
+    const BUTTONS = [
+      { x:24,  y:420, w:120, h:100, type:"forward" },
+      { x:154, y:420, w:120, h:100, type:"turn" },
+      { x:284, y:420, w:120, h:100, type:"wait" },
+      { x:414, y:420, w:120, h:100, type:"pick" },
+      { x:544, y:420, w:120, h:100, type:"undo" },
+      { x:674, y:420, w:262, h:100, type:"execute" }
+    ];
+    const state = {
+      mode: "menu", elapsed: 0, lastRunTime: 0, zone: 0,
+      robot: { x:1, y:3, dir:0 }, queue: [], execution: null,
+      transition: 0, message: "", messageTime: 0, pulse: 0,
+      lastAction: "none", completedCommands: 0
+    };
+    let raf = 0, lastStamp = 0, hostClearSent = false, hostFailSent = false;
+
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const smooth = t => t * t * (3 - 2 * t);
+    function difficultyAt(seconds) {
+      return smooth(clamp((Number(seconds) - 5) / (LIMIT - 5), 0, 1));
+    }
+    function phaseAt(d) {
+      return d < .2 ? "CALIBRATE" : d < .5 ? "ROUTE" : d < .78 ? "PRESSURE" : "LOCKDOWN";
+    }
+    function paramsAt(seconds = state.elapsed) {
+      const difficulty = difficultyAt(seconds);
+      return {
+        difficulty,
+        phase: phaseAt(difficulty),
+        queueSlots: 7 - Math.floor(difficulty * 3.001),
+        sensorCount: seconds < 5 ? 0 : 1 + Math.floor(difficulty * 3.001),
+        sensorSpeed: Number((.46 + difficulty * .82).toFixed(3)),
+        commandStep: Number((.62 - difficulty * .18).toFixed(3))
+      };
+    }
+    function inHost() {
+      try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+      catch (_) { return false; }
+    }
+    function sendReady() { if (inHost()) window.parent.RelayHost.onStageReady?.(META); }
+    function sendFail(reason) {
+      if (!inHost() || hostFailSent) return;
+      hostFailSent = true;
+      window.parent.RelayHost.onStageFailed?.({ stageId:META.id, stageTitle:META.title, reason, durationSec:+state.lastRunTime.toFixed(1) });
+    }
+    function sendClear() {
+      if (!inHost() || hostClearSent) return;
+      hostClearSent = true;
+      window.parent.RelayHost.onStageCleared?.({ stageId:META.id, stageTitle:META.title, clearCountAfter:(relayContext.clearCount || 0) + 1, durationSec:+state.lastRunTime.toFixed(1) });
+    }
+    function loadZone(index) {
+      const zone = ZONES[index];
+      state.robot = { x:zone.start[0], y:zone.start[1], dir:zone.dir };
+      state.queue = [];
+      state.execution = null;
+      state.message = zone.label;
+      state.messageTime = 1.2;
+    }
+    function startStage() {
+      state.mode = "running"; state.elapsed = 0; state.lastRunTime = 0;
+      state.zone = 0; state.transition = 0; state.pulse = 0;
+      state.completedCommands = 0; state.lastAction = "stage_started";
+      hostClearSent = false; hostFailSent = false;
+      window.relayStageResult.status = "running";
+      loadZone(0);
+    }
+    function failStage(reason) {
+      if (state.mode !== "running") return;
+      state.mode = "failed"; state.lastRunTime = state.elapsed;
+      state.execution = null; state.lastAction = reason;
+      window.relayStageResult.status = "failed"; sendFail(reason);
+    }
+    function clearStage() {
+      if (state.mode !== "running") return;
+      state.mode = "cleared"; state.lastRunTime = state.elapsed;
+      state.execution = null; state.lastAction = "all_zones_cleared";
+      window.relayStageResult.status = "cleared"; sendClear();
+    }
+    function isWall(x, y) {
+      if (x < 0 || y < 0 || x >= 7 || y >= 5) return true;
+      return ZONES[state.zone].walls.some(cell => cell[0] === x && cell[1] === y);
+    }
+    function sensorLines(seconds = state.elapsed) {
+      const p = paramsAt(seconds), lines = [];
+      for (let i = 0; i < p.sensorCount; i++) {
+        const axis = i % 2 === 0 ? "x" : "y";
+        const size = axis === "x" ? 7 : 5;
+        const travel = (seconds * p.sensorSpeed + i * 1.91) % (size * 2 - 2);
+        const pos = Math.round(travel < size ? travel : size * 2 - 2 - travel);
+        lines.push({ axis, pos });
+      }
+      return lines;
+    }
+    function sensorHitsRobot(seconds = state.elapsed) {
+      return sensorLines(seconds).some(line => line.axis === "x" ? state.robot.x === line.pos : state.robot.y === line.pos);
+    }
+    function addCommand(id) {
+      if (state.mode !== "running" || state.execution || state.transition > 0) return;
+      const slots = paramsAt().queueSlots;
+      if (state.queue.length >= slots) {
+        state.message = "큐가 가득 찼습니다"; state.messageTime = 1; state.lastAction = "queue_full"; return;
+      }
+      state.queue.push(id); state.lastAction = `queued_${id}`; state.pulse = .24;
+    }
+    function undoCommand() {
+      if (state.mode !== "running" || state.execution) return;
+      const removed = state.queue.pop();
+      state.lastAction = removed ? `undo_${removed}` : "undo_empty";
+    }
+    function executeQueue() {
+      if (state.mode !== "running" || state.execution || state.transition > 0) return;
+      if (!state.queue.length) {
+        state.message = "명령을 먼저 조립하세요"; state.messageTime = 1; state.lastAction = "execute_empty"; return;
+      }
+      state.execution = { commands:state.queue.slice(), index:0, timer:.12 };
+      state.queue = []; state.lastAction = "execution_started";
+    }
+    function applyCommand(id) {
+      const zone = ZONES[state.zone];
+      if (id === "forward") {
+        const [dx,dy] = DIRS[state.robot.dir];
+        const nx = state.robot.x + dx, ny = state.robot.y + dy;
+        if (isWall(nx, ny)) {
+          state.message = "벽 감지 · 프로그램 계속"; state.messageTime = .9; state.lastAction = "wall_blocked";
+        } else {
+          state.robot.x = nx; state.robot.y = ny; state.lastAction = "moved_forward";
+        }
+      } else if (id === "turn") {
+        state.robot.dir = (state.robot.dir + 1) % 4; state.lastAction = "turned_clockwise";
+      } else if (id === "wait") {
+        state.lastAction = "waited";
+      } else if (id === "pick") {
+        if (state.robot.x === zone.cargo[0] && state.robot.y === zone.cargo[1]) {
+          state.lastAction = "cargo_collected";
+          state.zone += 1; state.transition = .9; state.execution = null;
+          state.message = `구역 ${state.zone} 확보`; state.messageTime = 1.2;
+          if (state.zone >= ZONES.length) clearStage();
+          return;
+        }
+        state.message = "화물이 이 칸에 없습니다"; state.messageTime = .9; state.lastAction = "pick_empty";
+      }
+      state.completedCommands += 1;
+      if (state.elapsed >= 5 && sensorHitsRobot()) failStage("sensor_collision");
+    }
+    function update(dt) {
+      state.pulse = Math.max(0, state.pulse - dt);
+      state.messageTime = Math.max(0, state.messageTime - dt);
+      if (state.mode !== "running") return;
+      state.elapsed += dt;
+      if (state.elapsed >= LIMIT) { failStage("time_limit"); return; }
+      if (state.transition > 0) {
+        state.transition -= dt;
+        if (state.transition <= 0 && state.zone < ZONES.length) loadZone(state.zone);
+        return;
+      }
+      if (!state.execution) return;
+      state.execution.timer -= dt;
+      if (state.execution.timer > 0) return;
+      const command = state.execution.commands[state.execution.index];
+      applyCommand(command);
+      if (state.mode !== "running" || !state.execution) return;
+      state.execution.index += 1;
+      if (state.execution.index >= state.execution.commands.length) {
+        state.execution = null; state.lastAction = "execution_finished";
+      } else {
+        state.execution.timer = paramsAt().commandStep;
+      }
+    }
+
+    function roundRect(x,y,w,h,r,fill,stroke,line=2) {
+      ctx.beginPath(); ctx.roundRect(x,y,w,h,r);
+      if (fill) { ctx.fillStyle=fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle=stroke; ctx.lineWidth=line; ctx.stroke(); }
+    }
+    function text(value,x,y,size,color=COLORS.mist,align="left",weight=700) {
+      ctx.fillStyle=color; ctx.font=`${weight} ${size}px Trebuchet MS, Segoe UI, sans-serif`;
+      ctx.textAlign=align; ctx.textBaseline="middle"; ctx.fillText(value,x,y);
+    }
+    function drawBackground() {
+      ctx.fillStyle=COLORS.ink; ctx.fillRect(0,0,W,H);
+      ctx.save(); ctx.globalAlpha=.11; ctx.strokeStyle=COLORS.mint; ctx.lineWidth=1;
+      for(let x=-100;x<W+100;x+=44){ ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x-170,H);ctx.stroke(); }
+      ctx.restore();
+      const glow=ctx.createRadialGradient(450,280,10,450,280,500);
+      glow.addColorStop(0,"rgba(92,242,212,.11)"); glow.addColorStop(1,"rgba(6,19,27,0)");
+      ctx.fillStyle=glow; ctx.fillRect(0,0,W,H);
+    }
+    function drawHud() {
+      const p=paramsAt();
+      text("COMMAND DECK",24,25,16,COLORS.mint,"left",900);
+      const values=[[`TIME`,`${Math.max(0,LIMIT-state.elapsed).toFixed(1)}s`],[`ZONE`,`${Math.min(state.zone+1,4)}/4`],[`QUEUE`,`${state.queue.length}/${p.queueSlots}`],[`SENSORS`,`${p.sensorCount}`]];
+      values.forEach((item,i)=>{
+        const x=24+i*168; text(item[0],x,55,11,COLORS.mint,"left",800); text(item[1],x,78,22,COLORS.mist,"left",900);
+      });
+      roundRect(710,22,226,62,14,"rgba(92,242,212,.07)","rgba(92,242,212,.28)");
+      text(p.phase,730,43,12,COLORS.amber,"left",900);
+      text(state.elapsed<5?"센서 보정 중":ZONES[Math.min(state.zone,3)].label,730,65,15,COLORS.mist,"left",800);
+    }
+    function gridPoint(gx,gy) { return { x:58+gx*78, y:126+gy*53 }; }
+    function drawGrid() {
+      const zone=ZONES[Math.min(state.zone,3)], lines=sensorLines();
+      roundRect(24,106,570,298,22,"rgba(217,255,247,.035)","rgba(92,242,212,.25)");
+      for(let y=0;y<5;y++) for(let x=0;x<7;x++) {
+        const p=gridPoint(x,y), wall=zone.walls.some(v=>v[0]===x&&v[1]===y);
+        roundRect(p.x,p.y,62,40,8,wall?"rgba(255,200,87,.22)":"rgba(92,242,212,.055)",wall?"rgba(255,200,87,.55)":"rgba(92,242,212,.18)",1.5);
+        if(wall){ ctx.fillStyle=COLORS.amber;ctx.globalAlpha=.45;ctx.fillRect(p.x+16,p.y+12,30,4);ctx.globalAlpha=1; }
+      }
+      ctx.save(); ctx.globalCompositeOperation="screen";
+      lines.forEach(line=>{
+        const grad=line.axis==="x"?ctx.createLinearGradient(0,0,0,390):ctx.createLinearGradient(30,0,590,0);
+        grad.addColorStop(0,"rgba(255,200,87,0)");grad.addColorStop(.5,"rgba(255,200,87,.42)");grad.addColorStop(1,"rgba(255,200,87,0)");
+        ctx.fillStyle=grad;
+        if(line.axis==="x") { const p=gridPoint(line.pos,0);ctx.fillRect(p.x+19,112,24,286); }
+        else { const p=gridPoint(0,line.pos);ctx.fillRect(30,p.y+7,558,26); }
+      }); ctx.restore();
+      const cp=gridPoint(zone.cargo[0],zone.cargo[1]);
+      ctx.save();ctx.translate(cp.x+31,cp.y+20);ctx.rotate(Math.PI/4);roundRect(-12,-12,24,24,4,COLORS.amber,COLORS.mist,2);ctx.restore();
+      const rp=gridPoint(state.robot.x,state.robot.y); drawRobot(rp.x+31,rp.y+20,state.robot.dir);
+    }
+    function drawRobot(x,y,dir) {
+      ctx.save();ctx.translate(x,y);ctx.rotate(dir*Math.PI/2);
+      ctx.shadowColor=COLORS.mint;ctx.shadowBlur=state.pulse>0?24:12;
+      roundRect(-19,-15,38,30,10,COLORS.mint,null);
+      ctx.fillStyle=COLORS.ink;ctx.fillRect(-10,-5,7,7);ctx.fillRect(3,-5,7,7);
+      ctx.fillStyle=COLORS.amber;ctx.beginPath();ctx.moveTo(19,0);ctx.lineTo(29,-8);ctx.lineTo(29,8);ctx.closePath();ctx.fill();
+      ctx.restore();
+    }
+    function drawQueue() {
+      roundRect(614,106,322,298,22,"rgba(217,255,247,.035)","rgba(92,242,212,.25)");
+      text("PROGRAM QUEUE",638,132,13,COLORS.mint,"left",900);
+      const p=paramsAt();
+      for(let i=0;i<p.queueSlots;i++) {
+        const x=638+(i%4)*68,y=158+Math.floor(i/4)*72;
+        const id=state.execution ? state.execution.commands[i] : state.queue[i];
+        roundRect(x,y,56,56,13,id?"rgba(92,242,212,.16)":"rgba(92,242,212,.025)",id?COLORS.mint:"rgba(92,242,212,.18)");
+        if(id){ const c=COMMANDS.find(v=>v.id===id);text(c.glyph,x+28,y+29,27,id===state.execution?.commands[state.execution.index]?COLORS.amber:COLORS.mist,"center",900); }
+        else text(String(i+1),x+28,y+29,11,"rgba(217,255,247,.26)","center",700);
+      }
+      text("센서 빔을 읽고 WAIT를 끼우세요",638,334,14,COLORS.mist,"left",700);
+      const d=paramsAt().difficulty;
+      ctx.fillStyle="rgba(92,242,212,.12)";ctx.fillRect(638,366,274,8);
+      ctx.fillStyle=COLORS.amber;ctx.fillRect(638,366,274*d,8);
+      text("LOCKDOWN",912,388,10,COLORS.amber,"right",900);
+    }
+    function drawButtons() {
+      BUTTONS.forEach((b,i)=>{
+        const command=COMMANDS.find(c=>c.id===b.type);
+        const isExecute=b.type==="execute";
+        roundRect(b.x,b.y,b.w,b.h,18,isExecute?COLORS.amber:"rgba(92,242,212,.09)",isExecute?COLORS.amber:"rgba(92,242,212,.36)",2);
+        if(command){ text(command.glyph,b.x+b.w/2,b.y+34,28,COLORS.mint,"center",900);text(command.label,b.x+b.w/2,b.y+72,16,COLORS.mist,"center",900); }
+        else if(b.type==="undo"){text("↶",b.x+b.w/2,b.y+34,28,COLORS.mint,"center",900);text("취소",b.x+b.w/2,b.y+72,16,COLORS.mist,"center",900);}
+        else {text(state.execution?"실행 중":"EXECUTE",b.x+b.w/2,b.y+51,20,COLORS.ink,"center",900);}
+      });
+    }
+    function drawMessage() {
+      if(state.messageTime<=0)return;
+      const a=clamp(state.messageTime*2,0,1);ctx.globalAlpha=a;
+      roundRect(300,365,360,42,12,"rgba(6,19,27,.92)",COLORS.amber);
+      text(state.message,480,387,16,COLORS.amber,"center",900);ctx.globalAlpha=1;
+    }
+    function drawCard(title, subtitle, accent, lines) {
+      drawBackground();
+      roundRect(134,64,692,412,28,"rgba(6,19,27,.92)",accent,3);
+      text("ONE LIFE / PROGRAM",480,103,13,accent,"center",900);
+      text(title,480,153,43,COLORS.mist,"center",900);
+      text(subtitle,480,198,18,accent,"center",800);
+      lines.forEach((line,i)=>text(line,480,251+i*38,17,COLORS.mist,"center",700));
+      roundRect(288,397,384,54,16,accent,null);text(state.mode==="menu"?"터치 또는 Enter로 시작":"릴레이 결과",480,425,17,COLORS.ink,"center",900);
+    }
+    function render() {
+      if(state.mode==="menu") {
+        drawCard("명령 갑판",COPY.description,COLORS.mint,[`조작 · ${COPY.controls}`,`클리어 · ${COPY.clear}`,`실패 · ${COPY.fail}`,"전진 / 회전 / 대기 / 집기를 조립하세요"]); return;
+      }
+      if(state.mode==="failed") { drawCard("갑판 봉쇄",state.lastAction==="time_limit"?"시간 제한 초과":"이동 센서와 충돌했습니다",COLORS.amber,[COPY.fail,`통과 구역 ${state.zone} / 4`,"명령은 맞아도 실행 타이밍이 중요합니다"]); return; }
+      if(state.mode==="cleared") { drawCard("ROUTE COMPLETE","화물 갑판의 네 구역을 모두 통과했습니다",COLORS.mint,[COPY.clear,`${state.lastRunTime.toFixed(1)}초 · ${state.completedCommands}개 명령 실행`,"다음 릴레이 스테이지가 이어집니다"]); return; }
+      drawBackground();drawHud();drawGrid();drawQueue();drawButtons();drawMessage();
+      if(state.transition>0){ctx.fillStyle=`rgba(6,19,27,${clamp(state.transition,.15,.75)})`;ctx.fillRect(0,96,W,310);text(`ZONE ${Math.min(state.zone+1,4)}`,480,250,54,COLORS.mint,"center",900);}
+    }
+
+    function contentPoint(event) {
+      const r=canvas.getBoundingClientRect();
+      const scale=Math.min(r.width/W,r.height/H), cw=W*scale,ch=H*scale;
+      const left=r.left+(r.width-cw)/2,top=r.top+(r.height-ch)/2;
+      const x=(event.clientX-left)/scale,y=(event.clientY-top)/scale;
+      return { x,y,inside:x>=0&&x<=W&&y>=0&&y<=H };
+    }
+    function handlePointer(event) {
+      event.preventDefault();canvas.focus();const p=contentPoint(event);if(!p.inside)return;
+      if(state.mode==="menu"){startStage();return;}
+      if(state.mode!=="running")return;
+      const button=BUTTONS.find(b=>p.x>=b.x&&p.x<=b.x+b.w&&p.y>=b.y&&p.y<=b.y+b.h);
+      if(!button)return;
+      if(COMMANDS.some(c=>c.id===button.type))addCommand(button.type);
+      else if(button.type==="undo")undoCommand();else executeQueue();
+    }
+    function handleKey(event) {
+      if(event.key==="Enter"&&state.mode==="menu"){event.preventDefault();startStage();return;}
+      if(state.mode!=="running")return;
+      const c=COMMANDS.find(v=>v.key===event.key);
+      if(c){event.preventDefault();addCommand(c.id);return;}
+      if(event.code==="Space"){event.preventDefault();executeQueue();}
+      if(event.key==="Backspace"||event.key==="Escape"){event.preventDefault();undoCommand();}
+    }
+    function renderGameToText() {
+      const p=paramsAt();
+      return JSON.stringify({
+        mode:state.mode, elapsed:+state.elapsed.toFixed(2), difficulty:+p.difficulty.toFixed(4), phase:p.phase,
+        actual_difficulty:{ queue_slots:p.queueSlots, sensor_count:p.sensorCount, sensor_speed:p.sensorSpeed, command_step_seconds:p.commandStep, learning_grace:state.elapsed<5 },
+        zone:state.zone+1, queue:state.queue.slice(), executing:Boolean(state.execution), robot:{...state.robot},
+        last_action:state.lastAction, result:window.relayStageResult.status
+      });
+    }
+    function advanceTime(ms=16.67) {
+      const steps=Math.max(1,Math.round(Number(ms)/(DT*1000)));
+      for(let i=0;i<steps;i++)update(DT);render();return renderGameToText();
+    }
+    function frame(stamp) {
+      const elapsed=lastStamp?Math.min((stamp-lastStamp)/1000,.05):DT;lastStamp=stamp;
+      const steps=Math.max(1,Math.round(elapsed/DT));for(let i=0;i<steps;i++)update(DT);
+      render();raf=requestAnimationFrame(frame);
+    }
+    window.relayStageMeta=META;
+    window.relayStageResult={ status:"running" };
+    window.render_game_to_text=renderGameToText;
+    window.advanceTime=advanceTime;
+    window.relayStageDebug={
+      forceClear(){ if(state.mode!=="running")startStage();clearStage();render(); },
+      forceFail(){ if(state.mode!=="running")startStage();failStage("debug_force_fail");render(); },
+      difficultyAt(seconds){ return difficultyAt(seconds); }
+    };
+    canvas.addEventListener("pointerdown",handlePointer,{passive:false});
+    canvas.addEventListener("touchstart",event=>event.preventDefault(),{passive:false});
+    window.addEventListener("keydown",handleKey);
+    window.addEventListener("beforeunload",()=>cancelAnimationFrame(raf));
+    render();sendReady();raf=requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

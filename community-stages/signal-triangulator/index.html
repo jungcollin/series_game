@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>유령 신호</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: #071a26;
+        font-family: "IBM Plex Mono", "SFMono-Regular", "Pretendard", monospace;
+      }
+      body { display: grid; place-items: center; }
+      .skip-link {
+        position: fixed; left: 12px; top: 12px; z-index: 4;
+        width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%);
+        border-radius: 999px; background: #9dfc5c; color: #071a26;
+        font-weight: 800; text-decoration: none;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 11px 16px; overflow: visible; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block;
+        width: min(100vw, calc(100vh * 16 / 9));
+        height: min(100vh, calc(100vw * 9 / 16));
+        min-height: min(220px, 100vh);
+        max-width: 100vw; max-height: 100vh;
+        object-fit: contain; background: #071a26; touch-action: none; -webkit-tap-highlight-color: transparent;
+      }
+      canvas:focus-visible { outline: 4px solid #9dfc5c; outline-offset: -7px; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">유령 신호. 세 안테나를 터치 드래그해 교차점을 조준. 숨은 송신기 5개의 위치를 확정. 오판 3회 또는 40초 초과 시 실패. 캔버스를 터치하거나 Enter로 시작합니다. 모바일에서는 각 안테나의 방향선을 터치 드래그하고 확정 버튼을 누릅니다. 키보드는 1, 2, 3으로 안테나를 선택하고 방향키로 조준합니다.</p>
+    <canvas id="game" width="960" height="540" tabindex="0" aria-label="유령 신호" aria-describedby="stage-instructions"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.querySelector("#game");
+        const ctx = canvas.getContext("2d");
+        const W = canvas.width;
+        const H = canvas.height;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 40;
+        const TAU = Math.PI * 2;
+        const CONFIRM = { x: 397, y: 466, width: 166, height: 52 };
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "signal-triangulator",
+          title: "유령 신호",
+          description: "세 안테나의 지연과 세기를 읽어 숨은 송신기를 찾으세요.",
+          creator: "jungcollin",
+          genre: "Spatial deduction",
+          clearCondition: "숨은 송신기 5개의 위치를 확정",
+          failCondition: "오판 3회 또는 40초 초과 시 실패",
+          controls: "세 안테나를 터치 드래그해 교차점을 조준",
+        };
+        const COLORS = {
+          night: "#071a26",
+          slate: "#123246",
+          phosphor: "#9dfc5c",
+          amber: "#ff9c42",
+          mist: "#d7e6dc",
+        };
+        const TARGETS = [
+          { x: 430, y: 255 },
+          { x: 590, y: 295 },
+          { x: 365, y: 335 },
+          { x: 535, y: 205 },
+          { x: 480, y: 365 },
+          { x: 650, y: 245 },
+          { x: 305, y: 245 },
+        ];
+        const ANTENNA_BASES = [
+          { x: 150, y: 405, label: "A" },
+          { x: 810, y: 405, label: "B" },
+          { x: 480, y: 118, label: "C" },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          found: 0,
+          wrong: 0,
+          target: { ...TARGETS[0] },
+          antennas: ANTENNA_BASES.map((base) => ({ ...base, bearing: 0 })),
+          selected: 0,
+          dragging: -1,
+          keys: new Set(),
+          estimate: { x: W / 2, y: H / 2, stable: false },
+          reveal: null,
+          revealTimer: 0,
+          feedback: "세 방향선의 신호 피크를 찾으세요",
+          feedbackTimer: 0,
+          failReason: "",
+          pulse: 0,
+        };
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+
+        function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function wrapAngle(value) {
+          let angle = value;
+          while (angle > Math.PI) angle -= TAU;
+          while (angle < -Math.PI) angle += TAU;
+          return angle;
+        }
+        function angleDifference(left, right) { return Math.abs(wrapAngle(left - right)); }
+        function distance(left, right) { return Math.hypot(left.x - right.x, left.y - right.y); }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const jammerProgress = clamp((Number(seconds || 0) - 15) / 25, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            beamWidth: lerp(0.48, 0.2, difficulty),
+            confirmTolerance: lerp(84, 42, difficulty),
+            signalNoise: lerp(0.015, 0.15, difficulty),
+            delayNoiseMs: lerp(0.025, 0.32, difficulty),
+            jammerStrength: lerp(0, 0.68, jammerProgress),
+            jammerCount: seconds < 15 ? 0 : seconds < 28 ? 1 : 2,
+          };
+        }
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.parent.RelayHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.parent.RelayHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function trueBearing(antenna) {
+          return Math.atan2(state.target.y - antenna.y, state.target.x - antenna.x);
+        }
+        function jammerBearing(antennaIndex, jammerIndex = 0) {
+          const offset = (antennaIndex % 2 ? 1 : -1) * (0.86 + jammerIndex * 0.54);
+          return wrapAngle(trueBearing(state.antennas[antennaIndex]) + offset + Math.sin(state.elapsed * 0.17 + antennaIndex) * 0.08);
+        }
+        function readingFor(index, params) {
+          const antenna = state.antennas[index];
+          const truth = trueBearing(antenna);
+          const mainError = angleDifference(antenna.bearing, truth);
+          const mainPeak = Math.exp(-(mainError * mainError) / (2 * params.beamWidth * params.beamWidth));
+          let jammerPeak = 0;
+          for (let jammer = 0; jammer < params.jammerCount; jammer += 1) {
+            const jammerError = angleDifference(antenna.bearing, jammerBearing(index, jammer));
+            const jammerWidth = params.beamWidth * 0.72;
+            jammerPeak = Math.max(jammerPeak, params.jammerStrength * Math.exp(-(jammerError * jammerError) / (2 * jammerWidth * jammerWidth)));
+          }
+          const noise = params.signalNoise * (0.5 + 0.5 * Math.sin(state.elapsed * (3.2 + index * 0.4) + index * 1.7));
+          const strength = clamp(Math.max(mainPeak, jammerPeak) + noise, 0, 1);
+          const delay = distance(antenna, state.target) / 165 + params.delayNoiseMs * Math.sin(state.elapsed * 2.4 + index * 2.1);
+          return { truth, mainError, mainPeak, jammerPeak, strength, delay: Math.max(0, delay) };
+        }
+        function calculateEstimate() {
+          let a00 = 0;
+          let a01 = 0;
+          let a11 = 0;
+          let b0 = 0;
+          let b1 = 0;
+          state.antennas.forEach((antenna) => {
+            const nx = -Math.sin(antenna.bearing);
+            const ny = Math.cos(antenna.bearing);
+            const projection = nx * antenna.x + ny * antenna.y;
+            a00 += nx * nx;
+            a01 += nx * ny;
+            a11 += ny * ny;
+            b0 += nx * projection;
+            b1 += ny * projection;
+          });
+          const determinant = a00 * a11 - a01 * a01;
+          if (Math.abs(determinant) < 0.0001) return { x: W / 2, y: H / 2, stable: false };
+          return {
+            x: (b0 * a11 - b1 * a01) / determinant,
+            y: (a00 * b1 - a01 * b0) / determinant,
+            stable: true,
+          };
+        }
+        function configureTarget(index) {
+          state.target = { ...TARGETS[index % TARGETS.length] };
+          const offsets = [0.72, -0.64, 0.5];
+          state.antennas.forEach((antenna, antennaIndex) => {
+            antenna.bearing = wrapAngle(trueBearing(antenna) + offsets[antennaIndex] * (1 - state.found * 0.06));
+          });
+          state.selected = index % 3;
+          state.estimate = calculateEstimate();
+        }
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.found = 0;
+          state.wrong = 0;
+          state.dragging = -1;
+          state.keys.clear();
+          state.reveal = null;
+          state.revealTimer = 0;
+          state.feedback = "세 방향선의 신호 피크를 찾으세요";
+          state.feedbackTimer = 0;
+          state.failReason = "";
+          state.pulse = 0;
+          hostClearReported = false;
+          hostFailReported = false;
+          configureTarget(0);
+        }
+        function startStage() {
+          if (state.mode !== "menu") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+        }
+        function clearStage() {
+          if (state.mode === "cleared") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          reportClear();
+        }
+        function failStage(reason) {
+          if (state.mode === "failed") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          reportFail(reason);
+        }
+        function confirmEstimate() {
+          if (state.mode !== "running") return;
+          const params = difficultyAt(state.elapsed);
+          state.estimate = calculateEstimate();
+          const error = state.estimate.stable ? distance(state.estimate, state.target) : Infinity;
+          state.reveal = { ...state.target, success: error <= params.confirmTolerance };
+          state.revealTimer = 0.85;
+          if (error <= params.confirmTolerance) {
+            state.found += 1;
+            state.feedback = `LOCK ${state.found}/5 · 오차 ${Math.round(error)}m`;
+            state.feedbackTimer = 1.1;
+            if (state.found >= 5) {
+              clearStage();
+            } else {
+              configureTarget(state.found);
+            }
+          } else {
+            state.wrong += 1;
+            state.feedback = state.estimate.stable ? `오판 · 교차 오차 ${Math.round(error)}m` : "오판 · 방향선이 평행합니다";
+            state.feedbackTimer = 1.2;
+            if (state.wrong >= 3) failStage("오판 3회");
+          }
+        }
+        function updateControls(dt) {
+          const rotateSpeed = 1.2;
+          if (state.keys.has("ArrowLeft") || state.keys.has("KeyA")) state.antennas[state.selected].bearing -= rotateSpeed * dt;
+          if (state.keys.has("ArrowRight") || state.keys.has("KeyD")) state.antennas[state.selected].bearing += rotateSpeed * dt;
+          state.antennas[state.selected].bearing = wrapAngle(state.antennas[state.selected].bearing);
+        }
+        function update(dt) {
+          state.revealTimer = Math.max(0, state.revealTimer - dt);
+          state.feedbackTimer = Math.max(0, state.feedbackTimer - dt);
+          state.pulse += dt;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          updateControls(dt);
+          state.estimate = calculateEstimate();
+          if (state.elapsed >= DURATION) failStage("40초 제한 시간 초과");
+        }
+
+        function roundedRect(x, y, width, height, radius) {
+          ctx.beginPath(); ctx.roundRect(x, y, width, height, radius);
+        }
+        function drawMap() {
+          ctx.fillStyle = COLORS.night; ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(157,252,92,0.10)";
+          ctx.lineWidth = 1;
+          for (let x = 30; x < W; x += 45) {
+            ctx.beginPath(); ctx.moveTo(x, 68); ctx.lineTo(x, H); ctx.stroke();
+          }
+          for (let y = 90; y < H; y += 45) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+          }
+          ctx.strokeStyle = "rgba(215,230,220,0.13)";
+          for (let line = 0; line < 6; line += 1) {
+            ctx.beginPath();
+            for (let x = 40; x <= 920; x += 12) {
+              const y = 190 + line * 38 + Math.sin(x * 0.012 + line * 1.8) * (18 + line * 2);
+              if (x === 40) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+          }
+          ctx.fillStyle = "rgba(18,50,70,0.52)";
+          ctx.beginPath();
+          ctx.moveTo(0, 446);
+          ctx.bezierCurveTo(170, 410, 260, 500, 410, 446);
+          ctx.bezierCurveTo(560, 395, 710, 500, 960, 438);
+          ctx.lineTo(960, 540); ctx.lineTo(0, 540); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = "rgba(157,252,92,0.06)";
+          ctx.beginPath(); ctx.arc(W / 2, 278, 174, 0, TAU); ctx.fill();
+          ctx.strokeStyle = "rgba(157,252,92,0.15)";
+          [72, 118, 174].forEach((radius) => {
+            ctx.beginPath(); ctx.arc(W / 2, 278, radius, 0, TAU); ctx.stroke();
+          });
+        }
+        function extendBearingLine(antenna) {
+          const length = 760;
+          return {
+            x2: antenna.x + Math.cos(antenna.bearing) * length,
+            y2: antenna.y + Math.sin(antenna.bearing) * length,
+          };
+        }
+        function drawAntenna(antenna, index, params) {
+          const reading = readingFor(index, params);
+          const line = extendBearingLine(antenna);
+          const selected = state.selected === index;
+          ctx.save();
+          ctx.strokeStyle = selected ? COLORS.phosphor : "rgba(157,252,92,0.55)";
+          ctx.lineWidth = selected ? 3 : 2;
+          ctx.setLineDash(selected ? [] : [9, 8]);
+          ctx.beginPath(); ctx.moveTo(antenna.x, antenna.y); ctx.lineTo(line.x2, line.y2); ctx.stroke();
+          ctx.setLineDash([]);
+          const handleX = antenna.x + Math.cos(antenna.bearing) * 92;
+          const handleY = antenna.y + Math.sin(antenna.bearing) * 92;
+          ctx.fillStyle = selected ? COLORS.phosphor : COLORS.mist;
+          ctx.beginPath(); ctx.arc(handleX, handleY, selected ? 9 : 7, 0, TAU); ctx.fill();
+
+          ctx.translate(antenna.x, antenna.y);
+          ctx.fillStyle = COLORS.slate;
+          ctx.strokeStyle = selected ? COLORS.phosphor : "rgba(215,230,220,0.7)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(0, -19); ctx.lineTo(-15, 16); ctx.lineTo(15, 16); ctx.closePath();
+          ctx.fill(); ctx.stroke();
+          ctx.beginPath(); ctx.arc(0, -20, 8, 0, TAU); ctx.fillStyle = COLORS.amber; ctx.fill();
+
+          const arcStart = -Math.PI * 0.85;
+          const arcLength = Math.PI * 1.7 * reading.strength;
+          ctx.lineWidth = 5;
+          ctx.strokeStyle = reading.jammerPeak > reading.mainPeak ? COLORS.amber : COLORS.phosphor;
+          ctx.beginPath(); ctx.arc(0, 0, 32, arcStart, arcStart + arcLength); ctx.stroke();
+          ctx.fillStyle = COLORS.mist;
+          ctx.font = "800 14px IBM Plex Mono, monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(antenna.label, 0, 5);
+          ctx.fillStyle = "rgba(215,230,220,0.72)";
+          ctx.font = "700 11px IBM Plex Mono, monospace";
+          ctx.fillText(`${reading.delay.toFixed(2)}ms · ${Math.round(reading.strength * 99)}`, 0, 48);
+          ctx.restore();
+        }
+        function drawEstimate(params) {
+          if (!state.estimate.stable) return;
+          const x = clamp(state.estimate.x, 12, W - 12);
+          const y = clamp(state.estimate.y, 76, H - 12);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(Math.PI / 4);
+          ctx.strokeStyle = COLORS.amber;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(-10, -10, 20, 20);
+          ctx.fillStyle = "rgba(255,156,66,0.16)"; ctx.fillRect(-10, -10, 20, 20);
+          ctx.restore();
+          ctx.fillStyle = COLORS.amber;
+          ctx.font = "800 11px IBM Plex Mono, monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(`EST ±${Math.round(params.confirmTolerance)}m`, x, y - 20);
+          ctx.textAlign = "left";
+        }
+        function drawJammers(params) {
+          if (!params.jammerCount) return;
+          ctx.save();
+          ctx.strokeStyle = "rgba(255,156,66,0.25)";
+          ctx.setLineDash([4, 12]);
+          ctx.lineWidth = 2;
+          for (let jammer = 0; jammer < params.jammerCount; jammer += 1) {
+            const angle = state.elapsed * (0.18 + jammer * 0.04) + jammer * 2.4;
+            const x = W / 2 + Math.cos(angle) * (240 + jammer * 62);
+            const y = 278 + Math.sin(angle * 1.3) * (110 + jammer * 24);
+            ctx.beginPath(); ctx.arc(x, y, 18 + Math.sin(state.pulse * 3) * 4, 0, TAU); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x - 28, y); ctx.lineTo(x + 28, y); ctx.stroke();
+          }
+          ctx.setLineDash([]);
+          ctx.restore();
+        }
+        function drawReveal() {
+          if (!state.reveal || state.revealTimer <= 0) return;
+          const alpha = clamp(state.revealTimer * 1.4, 0, 1);
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle = state.reveal.success ? COLORS.phosphor : COLORS.amber;
+          ctx.fillStyle = state.reveal.success ? "rgba(157,252,92,0.22)" : "rgba(255,156,66,0.2)";
+          ctx.lineWidth = 4;
+          ctx.beginPath(); ctx.arc(state.reveal.x, state.reveal.y, 18 + (1 - alpha) * 32, 0, TAU); ctx.fill(); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(state.reveal.x - 26, state.reveal.y); ctx.lineTo(state.reveal.x + 26, state.reveal.y); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(state.reveal.x, state.reveal.y - 26); ctx.lineTo(state.reveal.x, state.reveal.y + 26); ctx.stroke();
+          ctx.restore();
+        }
+        function drawHud(params) {
+          const entries = [
+            ["송신기", `${state.found}/5`, COLORS.phosphor],
+            ["오판", `${state.wrong}/3`, state.wrong ? COLORS.amber : COLORS.mist],
+            ["남은 시간", `${Math.max(0, DURATION - state.elapsed).toFixed(1)}초`, COLORS.mist],
+            ["교란", params.jammerCount ? `${Math.round(params.jammerStrength * 100)}%` : "OFF", params.jammerCount ? COLORS.amber : COLORS.phosphor],
+          ];
+          entries.forEach(([label, value, color], index) => {
+            const x = 24 + index * 229;
+            roundedRect(x, 15, 209, 46, 8);
+            ctx.fillStyle = "rgba(7,26,38,0.9)"; ctx.fill();
+            ctx.strokeStyle = "rgba(157,252,92,0.2)"; ctx.stroke();
+            ctx.fillStyle = "rgba(215,230,220,0.58)";
+            ctx.font = "700 10px IBM Plex Mono, monospace"; ctx.fillText(label, x + 12, 33);
+            ctx.fillStyle = color; ctx.font = "800 16px IBM Plex Mono, monospace";
+            ctx.textAlign = "right"; ctx.fillText(value, x + 196, 44); ctx.textAlign = "left";
+          });
+        }
+        function drawConfirm(params) {
+          const stable = state.estimate.stable;
+          roundedRect(CONFIRM.x, CONFIRM.y, CONFIRM.width, CONFIRM.height, 10);
+          ctx.fillStyle = stable ? COLORS.phosphor : "rgba(215,230,220,0.28)"; ctx.fill();
+          ctx.strokeStyle = COLORS.night; ctx.lineWidth = 2; ctx.stroke();
+          ctx.fillStyle = COLORS.night;
+          ctx.font = "900 17px IBM Plex Mono, monospace";
+          ctx.textAlign = "center"; ctx.fillText("교차점 확정", W / 2, 498); ctx.textAlign = "left";
+          ctx.fillStyle = state.feedbackTimer > 0 ? COLORS.amber : "rgba(215,230,220,0.62)";
+          ctx.font = "700 12px IBM Plex Mono, monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(state.feedback, W / 2, 448);
+          ctx.textAlign = "left";
+        }
+        function wrapText(text, centerX, startY, maxWidth, lineHeight) {
+          const words = text.split(" ");
+          let line = "";
+          let y = startY;
+          words.forEach((word) => {
+            const test = line ? `${line} ${word}` : word;
+            if (line && ctx.measureText(test).width > maxWidth) {
+              ctx.fillText(line, centerX, y); line = word; y += lineHeight;
+            } else line = test;
+          });
+          if (line) ctx.fillText(line, centerX, y);
+        }
+        function drawCard(kind) {
+          ctx.fillStyle = COLORS.night; ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(157,252,92,0.12)";
+          for (let radius = 80; radius < 540; radius += 70) {
+            ctx.beginPath(); ctx.arc(W / 2, 290, radius, Math.PI * 1.08, Math.PI * 1.92); ctx.stroke();
+          }
+          roundedRect(125, 70, 710, 400, 16);
+          ctx.fillStyle = "rgba(18,50,70,0.96)"; ctx.fill();
+          ctx.strokeStyle = kind === "failed" ? COLORS.amber : COLORS.phosphor;
+          ctx.lineWidth = 2; ctx.stroke();
+          ctx.textAlign = "center";
+          ctx.fillStyle = kind === "failed" ? COLORS.amber : COLORS.phosphor;
+          ctx.font = "800 13px IBM Plex Mono, monospace";
+          ctx.fillText("CAPE HAEWOL LISTENING POST · 03:17 KST", W / 2, 108);
+          ctx.fillStyle = COLORS.mist;
+          ctx.font = "900 46px IBM Plex Mono, monospace";
+          ctx.fillText(kind === "menu" ? META.title : kind === "failed" ? "신호 소실" : "유령망 해독", W / 2, 165);
+          ctx.fillStyle = "rgba(215,230,220,0.78)";
+          ctx.font = "600 19px Pretendard, sans-serif";
+          if (kind === "menu") {
+            wrapText("세 안테나의 방향선을 돌리며 신호가 가장 강해지는 bearing을 찾으세요. 지연값이 가까운 세 선의 교차점을 확정합니다.", W / 2, 210, 600, 29);
+            ctx.fillStyle = COLORS.phosphor; ctx.font = "700 17px Pretendard, sans-serif";
+            ctx.fillText(`조작 · ${META.controls}`, W / 2, 286);
+            ctx.fillStyle = "rgba(215,230,220,0.72)"; ctx.font = "600 16px Pretendard, sans-serif";
+            ctx.fillText(`클리어 · ${META.clearCondition}`, W / 2, 326);
+            ctx.fillText(`실패 · ${META.failCondition}`, W / 2, 354);
+            ctx.fillStyle = COLORS.amber; ctx.font = "800 18px Pretendard, sans-serif";
+            ctx.fillText("화면을 터치하거나 Enter로 감청 시작", W / 2, 414);
+          } else if (kind === "failed") {
+            ctx.fillText(state.failReason || META.failCondition, W / 2, 230);
+            ctx.fillStyle = COLORS.amber; ctx.font = "900 24px IBM Plex Mono, monospace";
+            ctx.fillText(`LOCK ${state.found}/5 · MISREAD ${state.wrong}/3`, W / 2, 288);
+            ctx.fillStyle = "rgba(215,230,220,0.62)"; ctx.font = "600 16px Pretendard, sans-serif";
+            ctx.fillText("공유 주파수 창이 닫혔습니다.", W / 2, 342);
+          } else {
+            ctx.fillText("다섯 송신기의 위상이 해월곶 지도 위에 고정되었습니다.", W / 2, 230);
+            ctx.fillStyle = COLORS.phosphor; ctx.font = "900 24px IBM Plex Mono, monospace";
+            ctx.fillText(`${state.lastRunTime.toFixed(1)}s · 5 VERIFIED`, W / 2, 288);
+            ctx.fillStyle = "rgba(215,230,220,0.62)"; ctx.font = "600 16px Pretendard, sans-serif";
+            ctx.fillText(META.clearCondition, W / 2, 342);
+          }
+          ctx.textAlign = "left";
+        }
+        function render() {
+          if (state.mode === "menu") { drawCard("menu"); return; }
+          if (state.mode === "failed") { drawCard("failed"); return; }
+          if (state.mode === "cleared") { drawCard("cleared"); return; }
+          const params = difficultyAt(state.elapsed);
+          drawMap();
+          drawJammers(params);
+          state.antennas.forEach((antenna, index) => drawAntenna(antenna, index, params));
+          drawEstimate(params);
+          drawReveal();
+          drawHud(params);
+          drawConfirm(params);
+          if (state.elapsed < 5) {
+            ctx.fillStyle = "rgba(215,230,220,0.7)";
+            ctx.font = "700 12px IBM Plex Mono, monospace";
+            ctx.textAlign = "center";
+            ctx.fillText("CALIBRATION · 첫 5초는 넓은 오차 범위, jammer OFF", W / 2, 84);
+            ctx.textAlign = "left";
+          }
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const readings = state.antennas.map((antenna, index) => readingFor(index, params));
+          return JSON.stringify({
+            coordinate_system: "960x540 coastal RDF map; origin top-left",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            found_transmitters: state.found,
+            wrong_confirms: state.wrong,
+            selected_antenna: state.selected,
+            bearings: state.antennas.map((antenna) => Number(antenna.bearing.toFixed(4))),
+            true_bearings: readings.map((reading) => Number(reading.truth.toFixed(4))),
+            signal_strengths: readings.map((reading) => Number(reading.strength.toFixed(3))),
+            delays_ms: readings.map((reading) => Number(reading.delay.toFixed(3))),
+            estimate: {
+              x: Math.round(state.estimate.x), y: Math.round(state.estimate.y), stable: state.estimate.stable,
+            },
+            beam_width: Number(params.beamWidth.toFixed(3)),
+            confirm_tolerance: Number(params.confirmTolerance.toFixed(2)),
+            signal_noise: Number(params.signalNoise.toFixed(3)),
+            delay_noise_ms: Number(params.delayNoiseMs.toFixed(3)),
+            jammer_strength: Number(params.jammerStrength.toFixed(3)),
+            jammer_count: params.jammerCount,
+            result: window.relayStageResult.status,
+          });
+        }
+        function pointerPosition(event) {
+          const rect = canvas.getBoundingClientRect();
+          const scale = Math.min(rect.width / W, rect.height / H);
+          const contentWidth = W * scale;
+          const contentHeight = H * scale;
+          const contentLeft = rect.left + (rect.width - contentWidth) / 2;
+          const contentTop = rect.top + (rect.height - contentHeight) / 2;
+          return {
+            x: clamp((event.clientX - contentLeft) * (W / contentWidth), 0, W),
+            y: clamp((event.clientY - contentTop) * (H / contentHeight), 0, H),
+          };
+        }
+        function pointInside(point, rect) {
+          return point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height;
+        }
+        function setBearingFromPoint(index, point) {
+          const antenna = state.antennas[index];
+          antenna.bearing = Math.atan2(point.y - antenna.y, point.x - antenna.x);
+          state.selected = index;
+          state.estimate = calculateEstimate();
+        }
+        function onPointerDown(event) {
+          event.preventDefault(); canvas.focus();
+          if (state.mode === "menu") { startStage(); return; }
+          if (state.mode !== "running") return;
+          const point = pointerPosition(event);
+          if (pointInside(point, CONFIRM)) { confirmEstimate(); return; }
+          let nearest = -1;
+          let nearestDistance = Infinity;
+          state.antennas.forEach((antenna, index) => {
+            const value = distance(point, antenna);
+            if (value < nearestDistance) { nearestDistance = value; nearest = index; }
+          });
+          if (nearest >= 0 && nearestDistance <= 145) {
+            state.dragging = nearest;
+            canvas.setPointerCapture?.(event.pointerId);
+            setBearingFromPoint(nearest, point);
+          }
+        }
+        function onPointerMove(event) {
+          if (state.dragging < 0 || state.mode !== "running") return;
+          event.preventDefault(); setBearingFromPoint(state.dragging, pointerPosition(event));
+        }
+        function onPointerUp(event) {
+          state.dragging = -1;
+          canvas.releasePointerCapture?.(event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode === "menu") {
+            event.preventDefault(); startStage(); return;
+          }
+          if (state.mode !== "running") return;
+          if (["Digit1", "Digit2", "Digit3"].includes(event.code)) {
+            event.preventDefault(); state.selected = Number(event.code.slice(-1)) - 1; return;
+          }
+          if (event.code === "ArrowUp") {
+            event.preventDefault(); state.selected = (state.selected + 2) % 3; return;
+          }
+          if (event.code === "ArrowDown") {
+            event.preventDefault(); state.selected = (state.selected + 1) % 3; return;
+          }
+          if (event.code === "Enter" || event.code === "Space") {
+            event.preventDefault(); confirmEstimate(); return;
+          }
+          if (["ArrowLeft", "ArrowRight", "KeyA", "KeyD"].includes(event.code)) {
+            event.preventDefault(); state.keys.add(event.code);
+          }
+        }
+        function onKeyUp(event) { state.keys.delete(event.code); }
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt); render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "running" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } state.found = 5; clearStage(); render(); },
+          forceFail() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } state.wrong = 3; failStage("debug_force_fail"); render(); },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          setBearings(values) {
+            values.slice(0, 3).forEach((value, index) => { state.antennas[index].bearing = wrapAngle(Number(value)); });
+            state.estimate = calculateEstimate();
+          },
+          confirm() { confirmEstimate(); render(); },
+        };
+
+        canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
+        canvas.addEventListener("pointermove", onPointerMove, { passive: false });
+        canvas.addEventListener("pointerup", onPointerUp);
+        canvas.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => state.keys.clear());
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

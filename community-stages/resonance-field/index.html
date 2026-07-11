@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>공명 역상</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: #052e31;
+        font-family: "DIN Alternate", "Avenir Next", "Pretendard", sans-serif;
+      }
+      body { display: grid; place-items: center; }
+      .skip-link {
+        position: fixed; z-index: 4; top: 12px; left: 12px;
+        width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%);
+        border-radius: 999px; background: #77f2c1; color: #052e31;
+        text-decoration: none; font-weight: 800;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; padding: 11px 16px; overflow: visible; clip-path: none;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block;
+        width: min(100vw, calc(100vh * 16 / 9));
+        height: min(100vh, calc(100vw * 9 / 16));
+        min-height: min(220px, 100vh);
+        max-width: 100vw; max-height: 100vh;
+        object-fit: contain; background: #052e31; touch-action: none; -webkit-tap-highlight-color: transparent;
+      }
+      canvas:focus-visible { outline: 4px solid #77f2c1; outline-offset: -7px; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">공명 역상. 화면 터치 드래그로 위상·진폭 조절. 35초 동안 충격파 12개를 상쇄. 핵심 공명도가 한계에 닿으면 실패. 캔버스를 터치하거나 Enter로 시작합니다. 모바일에서는 파형 화면을 터치하고 드래그합니다. 키보드는 방향키로 위상과 진폭을 조절합니다.</p>
+    <canvas id="game" width="960" height="540" tabindex="0" aria-label="공명 역상" aria-describedby="stage-instructions"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.querySelector("#game");
+        const ctx = canvas.getContext("2d");
+        const W = canvas.width;
+        const H = canvas.height;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 35;
+        const TAU = Math.PI * 2;
+        const CONTROL = { x: 86, y: 122, width: 788, height: 300 };
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "resonance-field",
+          title: "공명 역상",
+          description: "파형의 위상과 진폭을 맞춰 충격파를 상쇄하세요.",
+          creator: "jungcollin",
+          genre: "Wave physics puzzle",
+          clearCondition: "35초 동안 충격파 12개를 상쇄",
+          failCondition: "핵심 공명도가 한계에 닿으면 실패",
+          controls: "화면 터치 드래그로 위상·진폭 조절",
+        };
+        const COLORS = {
+          deep: "#052e31",
+          panel: "#0b4847",
+          mint: "#77f2c1",
+          coral: "#ff765f",
+          frost: "#edf8e9",
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          cancelled: 0,
+          pulsesSeen: 0,
+          core: 0.12,
+          controlPhase: Math.PI,
+          controlAmplitude: 0.72,
+          incomingPhase: 0,
+          incomingAmplitude: 0.72,
+          cycleElapsed: 0,
+          lastCancellation: 0,
+          currentCancellation: 0,
+          dragging: false,
+          keys: new Set(),
+          impactFlash: 0,
+          goodFlash: 0,
+          failReason: "",
+          particles: [],
+        };
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+
+        function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function wrapAngle(value) {
+          let angle = value;
+          while (angle > Math.PI) angle -= TAU;
+          while (angle < -Math.PI) angle += TAU;
+          return angle;
+        }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            pulseInterval: lerp(2.75, 2.2, difficulty),
+            waveFrequency: lerp(1.05, 1.85, difficulty),
+            phaseDrift: lerp(0.035, 0.34, difficulty),
+            cancellationThreshold: lerp(0.57, 0.79, difficulty),
+            harmonicNoise: lerp(0.015, 0.16, difficulty),
+            missDamage: lerp(0.10, 0.22, difficulty),
+          };
+        }
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.parent.RelayHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.parent.RelayHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function setIncomingForPulse(index) {
+          state.incomingPhase = wrapAngle(-2.65 + index * 2.173 + Math.sin(index * 1.7) * 0.32);
+          state.incomingAmplitude = 0.55 + ((index * 37) % 61) / 100;
+          state.cycleElapsed = 0;
+        }
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.cancelled = 0;
+          state.pulsesSeen = 0;
+          state.core = 0.12;
+          state.controlPhase = Math.PI;
+          state.controlAmplitude = 0.72;
+          state.lastCancellation = 0;
+          state.currentCancellation = 0;
+          state.dragging = false;
+          state.keys.clear();
+          state.impactFlash = 0;
+          state.goodFlash = 0;
+          state.failReason = "";
+          state.particles = [];
+          hostClearReported = false;
+          hostFailReported = false;
+          setIncomingForPulse(0);
+        }
+        function startStage() {
+          if (state.mode !== "menu") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+        }
+        function clearStage() {
+          if (state.mode === "cleared") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          emitParticles(W / 2, H / 2, 30, COLORS.mint);
+          reportClear();
+        }
+        function failStage(reason) {
+          if (state.mode === "failed") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          reportFail(reason);
+        }
+        function emitParticles(x, y, count, color) {
+          const amount = reducedMotion ? Math.min(count, 4) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (index / amount) * TAU;
+            const speed = 55 + (index % 7) * 12;
+            state.particles.push({
+              x, y,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed,
+              life: 0.65 + (index % 4) * 0.1,
+              color,
+            });
+          }
+        }
+        function cancellationAt(params) {
+          const incomingX = Math.cos(state.incomingPhase) * state.incomingAmplitude;
+          const incomingY = Math.sin(state.incomingPhase) * state.incomingAmplitude;
+          const controlX = Math.cos(state.controlPhase) * state.controlAmplitude;
+          const controlY = Math.sin(state.controlPhase) * state.controlAmplitude;
+          const residual = Math.hypot(incomingX + controlX, incomingY + controlY);
+          const normalized = residual / Math.max(0.5, state.incomingAmplitude + 0.38);
+          const harmonicPenalty = params.harmonicNoise * Math.abs(Math.sin(state.elapsed * 3.7 + state.pulsesSeen));
+          return clamp(1 - normalized - harmonicPenalty, 0, 1);
+        }
+        function resolvePulse(params) {
+          state.pulsesSeen += 1;
+          state.lastCancellation = state.currentCancellation;
+          if (state.currentCancellation >= params.cancellationThreshold) {
+            state.cancelled += 1;
+            state.core = Math.max(0.04, state.core - 0.055);
+            state.goodFlash = 0.48;
+            emitParticles(W / 2, 268, 12, COLORS.mint);
+          } else {
+            const tutorialScale = state.elapsed < 5 ? 0.22 : 1;
+            state.core = clamp(state.core + params.missDamage * tutorialScale, 0, 1.2);
+            state.impactFlash = 0.55;
+            emitParticles(W / 2, 268, 10, COLORS.coral);
+          }
+          if (state.cancelled >= 12) {
+            clearStage();
+            return;
+          }
+          if (state.core >= 1) {
+            failStage("핵심 공명도 한계 초과");
+            return;
+          }
+          setIncomingForPulse(state.pulsesSeen);
+        }
+        function updateControls(dt) {
+          const phaseSpeed = 1.7;
+          const amplitudeSpeed = 0.62;
+          if (state.keys.has("ArrowLeft") || state.keys.has("KeyA")) state.controlPhase -= phaseSpeed * dt;
+          if (state.keys.has("ArrowRight") || state.keys.has("KeyD")) state.controlPhase += phaseSpeed * dt;
+          if (state.keys.has("ArrowUp") || state.keys.has("KeyW")) state.controlAmplitude += amplitudeSpeed * dt;
+          if (state.keys.has("ArrowDown") || state.keys.has("KeyS")) state.controlAmplitude -= amplitudeSpeed * dt;
+          state.controlPhase = wrapAngle(state.controlPhase);
+          state.controlAmplitude = clamp(state.controlAmplitude, 0.15, 1.25);
+        }
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.vx *= 0.982;
+            particle.vy *= 0.982;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+        function update(dt) {
+          updateParticles(dt);
+          state.impactFlash = Math.max(0, state.impactFlash - dt);
+          state.goodFlash = Math.max(0, state.goodFlash - dt);
+          if (state.mode !== "running") return;
+
+          state.elapsed += dt;
+          state.cycleElapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateControls(dt);
+          state.incomingPhase = wrapAngle(state.incomingPhase + params.phaseDrift * dt);
+          state.currentCancellation = cancellationAt(params);
+          if (state.cycleElapsed >= params.pulseInterval) resolvePulse(params);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("35초 제한 시간 초과");
+        }
+
+        function roundedRect(x, y, width, height, radius) {
+          ctx.beginPath(); ctx.roundRect(x, y, width, height, radius);
+        }
+        function drawLab() {
+          ctx.fillStyle = COLORS.deep;
+          ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "rgba(119,242,193,0.045)";
+          for (let x = 0; x < W; x += 96) ctx.fillRect(x, 0, 1, H);
+          ctx.strokeStyle = "rgba(237,248,233,0.12)";
+          ctx.lineWidth = 2;
+          for (let index = 0; index < 7; index += 1) {
+            const y = 82 + index * 63;
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(26, y + 10); ctx.lineTo(46, y); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(W, y); ctx.lineTo(W - 26, y + 10); ctx.lineTo(W - 46, y); ctx.stroke();
+          }
+          roundedRect(CONTROL.x - 18, CONTROL.y - 20, CONTROL.width + 36, CONTROL.height + 40, 24);
+          ctx.fillStyle = "rgba(11,72,71,0.72)"; ctx.fill();
+          ctx.strokeStyle = "rgba(119,242,193,0.25)"; ctx.lineWidth = 2; ctx.stroke();
+          ctx.save();
+          roundedRect(CONTROL.x, CONTROL.y, CONTROL.width, CONTROL.height, 12);
+          ctx.clip();
+          ctx.strokeStyle = "rgba(237,248,233,0.09)";
+          ctx.lineWidth = 1;
+          for (let x = CONTROL.x; x <= CONTROL.x + CONTROL.width; x += CONTROL.width / 8) {
+            ctx.beginPath(); ctx.moveTo(x, CONTROL.y); ctx.lineTo(x, CONTROL.y + CONTROL.height); ctx.stroke();
+          }
+          for (let y = CONTROL.y; y <= CONTROL.y + CONTROL.height; y += CONTROL.height / 6) {
+            ctx.beginPath(); ctx.moveTo(CONTROL.x, y); ctx.lineTo(CONTROL.x + CONTROL.width, y); ctx.stroke();
+          }
+          ctx.restore();
+        }
+        function waveY(xRatio, amplitude, phase, frequency, centerY, scale, harmonic = 0) {
+          const angle = xRatio * TAU * frequency + phase + state.elapsed * 1.7;
+          return centerY + Math.sin(angle) * amplitude * scale + Math.sin(angle * 2.03 + 0.7) * harmonic * scale;
+        }
+        function drawWave(color, width, valueAt, alpha = 1) {
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = alpha;
+          ctx.lineWidth = width;
+          ctx.lineJoin = "round";
+          ctx.beginPath();
+          const samples = reducedMotion ? 72 : 150;
+          for (let index = 0; index <= samples; index += 1) {
+            const ratio = index / samples;
+            const x = CONTROL.x + ratio * CONTROL.width;
+            const y = valueAt(ratio);
+            if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+        function drawWaveField(params) {
+          const centerY = CONTROL.y + CONTROL.height / 2;
+          const scale = 104;
+          drawWave(COLORS.coral, 4, (ratio) => waveY(
+            ratio, state.incomingAmplitude, state.incomingPhase,
+            params.waveFrequency, centerY, scale, params.harmonicNoise
+          ), 0.86);
+          drawWave(COLORS.mint, 4, (ratio) => waveY(
+            ratio, state.controlAmplitude, state.controlPhase,
+            params.waveFrequency, centerY, scale, 0
+          ), 0.9);
+          drawWave(COLORS.frost, 2, (ratio) => {
+            const incoming = waveY(ratio, state.incomingAmplitude, state.incomingPhase, params.waveFrequency, 0, scale, params.harmonicNoise);
+            const control = waveY(ratio, state.controlAmplitude, state.controlPhase, params.waveFrequency, 0, scale, 0);
+            return centerY + (incoming + control) * 0.54;
+          }, 0.52);
+
+          const markerX = CONTROL.x + ((state.controlPhase + Math.PI) / TAU) * CONTROL.width;
+          const markerY = CONTROL.y + ((1.25 - state.controlAmplitude) / 1.1) * CONTROL.height;
+          ctx.strokeStyle = "rgba(119,242,193,0.35)";
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(markerX, CONTROL.y); ctx.lineTo(markerX, CONTROL.y + CONTROL.height); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(CONTROL.x, markerY); ctx.lineTo(CONTROL.x + CONTROL.width, markerY); ctx.stroke();
+          ctx.fillStyle = COLORS.mint;
+          ctx.beginPath(); ctx.arc(markerX, markerY, 8, 0, TAU); ctx.fill();
+          ctx.strokeStyle = COLORS.frost; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(markerX, markerY, 14, 0, TAU); ctx.stroke();
+
+          const ratio = clamp(state.cycleElapsed / params.pulseInterval, 0, 1);
+          const impactX = CONTROL.x + CONTROL.width * ratio;
+          ctx.fillStyle = `rgba(255,118,95,${0.12 + ratio * 0.26})`;
+          ctx.fillRect(impactX - 2, CONTROL.y, 4, CONTROL.height);
+          ctx.fillStyle = COLORS.frost;
+          ctx.font = "700 12px DIN Alternate, sans-serif";
+          ctx.fillText("INCOMING", CONTROL.x + 12, CONTROL.y + 20);
+          ctx.fillStyle = COLORS.mint;
+          ctx.fillText("COUNTER FIELD", CONTROL.x + 100, CONTROL.y + 20);
+        }
+        function drawHud(params) {
+          const entries = [
+            ["상쇄", `${state.cancelled}/12`, COLORS.mint],
+            ["핵심 공명", `${Math.round(state.core * 100)}%`, state.core > 0.72 ? COLORS.coral : COLORS.frost],
+            ["남은 시간", `${Math.max(0, DURATION - state.elapsed).toFixed(1)}초`, COLORS.frost],
+            ["상쇄율", `${Math.round(state.currentCancellation * 100)}%`, state.currentCancellation >= params.cancellationThreshold ? COLORS.mint : COLORS.coral],
+          ];
+          entries.forEach(([label, value, color], index) => {
+            const x = 24 + index * 229;
+            roundedRect(x, 16, 209, 46, 10);
+            ctx.fillStyle = "rgba(5,46,49,0.88)"; ctx.fill();
+            ctx.strokeStyle = "rgba(119,242,193,0.22)"; ctx.stroke();
+            ctx.fillStyle = "rgba(237,248,233,0.58)";
+            ctx.font = "700 11px DIN Alternate, sans-serif";
+            ctx.fillText(label, x + 12, 34);
+            ctx.fillStyle = color;
+            ctx.font = "800 16px DIN Alternate, sans-serif";
+            ctx.textAlign = "right"; ctx.fillText(value, x + 196, 44); ctx.textAlign = "left";
+          });
+        }
+        function drawControlLegend(params) {
+          ctx.fillStyle = "rgba(237,248,233,0.66)";
+          ctx.font = "700 13px DIN Alternate, sans-serif";
+          ctx.fillText("← 위상 지연", CONTROL.x, 454);
+          ctx.textAlign = "right";
+          ctx.fillText("위상 선행 →", CONTROL.x + CONTROL.width, 454);
+          ctx.textAlign = "center";
+          ctx.fillStyle = COLORS.mint;
+          ctx.font = "800 15px DIN Alternate, sans-serif";
+          ctx.fillText(`진폭 ${state.controlAmplitude.toFixed(2)} · 목표 ${state.incomingAmplitude.toFixed(2)} · 요구 ${Math.round(params.cancellationThreshold * 100)}%`, W / 2, 480);
+          ctx.fillStyle = "rgba(237,248,233,0.55)";
+          ctx.font = "600 12px DIN Alternate, sans-serif";
+          ctx.fillText("드래그: 가로 위상 · 세로 진폭   |   키보드: 방향키 / WASD", W / 2, 505);
+          ctx.textAlign = "left";
+        }
+        function wrapText(text, centerX, startY, maxWidth, lineHeight) {
+          const words = text.split(" ");
+          let line = "";
+          let y = startY;
+          words.forEach((word) => {
+            const test = line ? `${line} ${word}` : word;
+            if (line && ctx.measureText(test).width > maxWidth) {
+              ctx.fillText(line, centerX, y); line = word; y += lineHeight;
+            } else line = test;
+          });
+          if (line) ctx.fillText(line, centerX, y);
+        }
+        function drawCard(kind) {
+          ctx.fillStyle = COLORS.deep; ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(119,242,193,0.12)";
+          for (let index = -3; index < 13; index += 1) {
+            ctx.beginPath();
+            for (let x = 0; x <= W; x += 12) {
+              const y = 80 + index * 42 + Math.sin(x * 0.018 + index) * 10;
+              if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+          }
+          roundedRect(125, 70, 710, 400, 22);
+          ctx.fillStyle = "rgba(11,72,71,0.95)"; ctx.fill();
+          ctx.strokeStyle = kind === "failed" ? COLORS.coral : COLORS.mint;
+          ctx.lineWidth = 2; ctx.stroke();
+          ctx.textAlign = "center";
+          ctx.fillStyle = kind === "failed" ? COLORS.coral : COLORS.mint;
+          ctx.font = "800 14px DIN Alternate, sans-serif";
+          ctx.fillText("GLACIAL RESONANCE LAB · CHAMBER B", W / 2, 109);
+          ctx.fillStyle = COLORS.frost;
+          ctx.font = "800 48px DIN Alternate, sans-serif";
+          ctx.fillText(kind === "menu" ? META.title : kind === "failed" ? "공명 임계 초과" : "완전 역상", W / 2, 165);
+          ctx.fillStyle = "rgba(237,248,233,0.78)";
+          ctx.font = "600 20px Avenir Next, sans-serif";
+          if (kind === "menu") {
+            wrapText("산 아래로 밀려오는 연속 파형과 정반대의 파를 만드세요. 좌우 드래그는 위상, 위아래 드래그는 진폭을 바꿉니다.", W / 2, 211, 590, 29);
+            ctx.fillStyle = COLORS.mint; ctx.font = "700 18px Avenir Next, sans-serif";
+            ctx.fillText(`조작 · ${META.controls}`, W / 2, 286);
+            ctx.fillStyle = "rgba(237,248,233,0.72)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText(`클리어 · ${META.clearCondition}`, W / 2, 326);
+            ctx.fillText(`실패 · ${META.failCondition}`, W / 2, 354);
+            ctx.fillStyle = COLORS.coral; ctx.font = "800 18px Avenir Next, sans-serif";
+            ctx.fillText("화면을 터치하거나 Enter로 실험 시작", W / 2, 414);
+          } else if (kind === "failed") {
+            ctx.fillText(state.failReason || META.failCondition, W / 2, 229);
+            ctx.fillStyle = COLORS.coral; ctx.font = "800 24px DIN Alternate, sans-serif";
+            ctx.fillText(`상쇄 ${state.cancelled} / 12 · 공명 ${Math.round(state.core * 100)}%`, W / 2, 286);
+            ctx.fillStyle = "rgba(237,248,233,0.62)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText("빙하 핵심부 보호 절차가 종료되었습니다.", W / 2, 342);
+          } else {
+            ctx.fillText("열두 충격파의 벡터 합이 영점으로 수렴했습니다.", W / 2, 229);
+            ctx.fillStyle = COLORS.mint; ctx.font = "800 25px DIN Alternate, sans-serif";
+            ctx.fillText(`${state.lastRunTime.toFixed(1)}초 · 핵심 공명 ${Math.round(state.core * 100)}%`, W / 2, 288);
+            ctx.fillStyle = "rgba(237,248,233,0.62)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText(META.clearCondition, W / 2, 342);
+          }
+          ctx.textAlign = "left";
+        }
+        function render() {
+          if (state.mode === "menu") { drawCard("menu"); return; }
+          if (state.mode === "failed") { drawCard("failed"); return; }
+          if (state.mode === "cleared") { drawCard("cleared"); return; }
+          const params = difficultyAt(state.elapsed);
+          drawLab();
+          drawWaveField(params);
+          drawHud(params);
+          drawControlLegend(params);
+          state.particles.forEach((particle) => {
+            ctx.globalAlpha = clamp(particle.life, 0, 1);
+            ctx.fillStyle = particle.color;
+            ctx.fillRect(particle.x - 2, particle.y - 2, 4, 4);
+          });
+          ctx.globalAlpha = 1;
+          if (state.elapsed < 5) {
+            ctx.fillStyle = "rgba(237,248,233,0.72)";
+            ctx.font = "700 13px DIN Alternate, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("CALIBRATION · 첫 5초의 충격은 핵심 손상이 크게 감소합니다", W / 2, 91);
+            ctx.textAlign = "left";
+          }
+          if (state.impactFlash > 0) {
+            ctx.fillStyle = `rgba(255,118,95,${state.impactFlash * 0.24})`; ctx.fillRect(0, 0, W, H);
+          } else if (state.goodFlash > 0) {
+            ctx.fillStyle = `rgba(119,242,193,${state.goodFlash * 0.14})`; ctx.fillRect(0, 0, W, H);
+          }
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "960x540 waveform lab; phase control maps -pi..pi left-to-right",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            cancelled_pulses: state.cancelled,
+            pulses_seen: state.pulsesSeen,
+            core_resonance: Number(state.core.toFixed(3)),
+            control_phase: Number(state.controlPhase.toFixed(4)),
+            control_amplitude: Number(state.controlAmplitude.toFixed(3)),
+            incoming_phase: Number(state.incomingPhase.toFixed(4)),
+            incoming_amplitude: Number(state.incomingAmplitude.toFixed(3)),
+            cancellation: Number(state.currentCancellation.toFixed(3)),
+            cancellation_threshold: Number(params.cancellationThreshold.toFixed(3)),
+            pulse_interval: Number(params.pulseInterval.toFixed(3)),
+            wave_frequency: Number(params.waveFrequency.toFixed(3)),
+            phase_drift: Number(params.phaseDrift.toFixed(3)),
+            harmonic_noise: Number(params.harmonicNoise.toFixed(3)),
+            result: window.relayStageResult.status,
+          });
+        }
+        function pointerPosition(event) {
+          const rect = canvas.getBoundingClientRect();
+          const scale = Math.min(rect.width / W, rect.height / H);
+          const contentWidth = W * scale;
+          const contentHeight = H * scale;
+          const contentLeft = rect.left + (rect.width - contentWidth) / 2;
+          const contentTop = rect.top + (rect.height - contentHeight) / 2;
+          return {
+            x: clamp((event.clientX - contentLeft) * (W / contentWidth), 0, W),
+            y: clamp((event.clientY - contentTop) * (H / contentHeight), 0, H),
+          };
+        }
+        function setControlFromPoint(point) {
+          const ratioX = clamp((point.x - CONTROL.x) / CONTROL.width, 0, 1);
+          const ratioY = clamp((point.y - CONTROL.y) / CONTROL.height, 0, 1);
+          state.controlPhase = wrapAngle(-Math.PI + ratioX * TAU);
+          state.controlAmplitude = clamp(1.25 - ratioY * 1.1, 0.15, 1.25);
+        }
+        function onPointerDown(event) {
+          event.preventDefault(); canvas.focus();
+          if (state.mode === "menu") { startStage(); return; }
+          if (state.mode !== "running") return;
+          state.dragging = true;
+          canvas.setPointerCapture?.(event.pointerId);
+          setControlFromPoint(pointerPosition(event));
+        }
+        function onPointerMove(event) {
+          if (!state.dragging || state.mode !== "running") return;
+          event.preventDefault(); setControlFromPoint(pointerPosition(event));
+        }
+        function onPointerUp(event) {
+          state.dragging = false;
+          canvas.releasePointerCapture?.(event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode === "menu") {
+            event.preventDefault(); startStage(); return;
+          }
+          if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) {
+            event.preventDefault(); state.keys.add(event.code);
+          }
+        }
+        function onKeyUp(event) { state.keys.delete(event.code); }
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt); render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "running" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } state.cancelled = 12; clearStage(); render(); },
+          forceFail() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } state.core = 1; failStage("debug_force_fail"); render(); },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          setControls(phase, amplitude) {
+            state.controlPhase = wrapAngle(Number(phase));
+            state.controlAmplitude = clamp(Number(amplitude), 0.15, 1.25);
+          },
+        };
+
+        canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
+        canvas.addEventListener("pointermove", onPointerMove, { passive: false });
+        canvas.addEventListener("pointerup", onPointerUp);
+        canvas.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => state.keys.clear());
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

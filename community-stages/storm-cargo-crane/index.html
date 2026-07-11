@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>폭풍 항만 크레인</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+      body { display: grid; place-items: center; background: #071015; color: #a7d7c5; font-family: "Trebuchet MS", "Segoe UI", sans-serif; }
+      .skip-link { position: fixed; top: 12px; left: 12px; z-index: 20; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); background: #a7d7c5; color: #101a24; font-weight: 800; }
+      .skip-link:focus-visible { width: auto; height: auto; padding: 10px 14px; clip-path: none; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+      .stage { position: relative; width: min(100vw, calc(100svh * 16 / 9)); height: min(100svh, max(min(220px, 100svh), calc(100vw * 9 / 16))); max-width: 100%; max-height: 100%; }
+      canvas { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; aspect-ratio: 16 / 9; background: #101a24; touch-action: none; -webkit-tap-highlight-color: transparent; }
+      canvas:focus-visible { outline: 3px solid #e5a84d; outline-offset: -5px; }
+      .controls { position: absolute; left: 0; right: 0; bottom: 10px; z-index: 5; display: flex; justify-content: center; gap: 8px; padding: 0 10px; pointer-events: none; }
+      .control { pointer-events: auto; min-width: 58px; min-height: 48px; padding: 0 13px; border: 1px solid rgba(167,215,197,.5); border-radius: 7px; background: rgba(16,26,36,.92); color: #a7d7c5; font: 800 14px/1 "Trebuchet MS", sans-serif; touch-action: none; }
+      .control--drop { min-width: 88px; border-color: #e5a84d; background: #e5a84d; color: #101a24; }
+      .control[data-active="true"] { transform: translateY(1px); filter: brightness(1.15); }
+      @media (hover: hover) and (pointer: fine) { .controls { opacity: .44; } }
+      @media (max-width: 520px) { .controls { bottom: 5px; gap: 5px; padding: 0 5px; } .control { min-width: 44px; min-height: 44px; padding: 0 8px; font-size: 12px; } .control--drop { min-width: 68px; } }
+      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">폭풍 항만 크레인. 화면 터치 드래그로 크레인 이동, 놓아서 화물 투하. 키보드는 좌우 방향키로 트롤리를 움직이고 아래 방향키로 제동하며 Space로 화물을 놓습니다.</p>
+    <main class="stage" aria-label="폭풍 항만 크레인 게임 영역">
+      <canvas id="game" width="960" height="540" tabindex="0" aria-label="폭풍 항만 크레인" aria-describedby="stage-instructions"></canvas>
+      <div class="controls" aria-label="항만 크레인 조작">
+        <button class="control" type="button" data-control="left" aria-label="트롤리 왼쪽 이동">← MOVE</button>
+        <button class="control" type="button" data-control="brake" aria-label="트롤리와 진자 제동">BRAKE</button>
+        <button class="control control--drop" type="button" data-control="drop" aria-label="화물 투하">RELEASE</button>
+        <button class="control" type="button" data-control="right" aria-label="트롤리 오른쪽 이동">MOVE →</button>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+        const canvas = document.querySelector("#game"), ctx = canvas.getContext("2d");
+        const W = 960, H = 540, FIXED_DT = 1 / 60, MAX_DT = 1 / 20, LIMIT = 40;
+        const COLORS = { storm: "#101a24", foam: "#a7d7c5", cargo: "#e5a84d" };
+        const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const relayContext = window.RelayRuntime?.readContext("storm-cargo-crane") || { history: [], clearCount: 0, previousStageId: null };
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const lerp = (a, b, t) => a + (b - a) * t;
+        const targetSlots = [610, 748, 670, 824, 560];
+        let animationFrame = 0, lastTimestamp = 0, hostFailedReported = false, hostClearedReported = false;
+        const input = { left: false, right: false, brake: false, pointerDrive: false, pointerX: 0, dragStartX: 0, dragStartTime: 0 };
+        const state = {
+          mode: "menu", elapsed: 0, lastRunTime: 0, loaded: 0, broken: 0, reason: "",
+          trolleyX: 220, trolleyV: 0, trolleyA: 0, theta: 0.1, omega: 0, cableLength: 232,
+          cargo: null, respawn: 0, flash: 0, deckBob: 0, wind: 0, landed: [], particles: [],
+        };
+
+        function phaseAt(seconds) { return seconds < 11 ? "HARBOR BREEZE" : seconds < 26 ? "CROSSWIND" : "SQUALL LINE"; }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(seconds / LIMIT, 0, 1);
+          return {
+            difficulty, phase: phaseAt(seconds),
+            windAmplitude: lerp(16, 74, difficulty),
+            gustFrequency: lerp(0.55, 1.55, difficulty),
+            targetHalfWidth: lerp(70, 38, difficulty),
+            brakeDrag: lerp(8.5, 4.2, difficulty),
+            safeHorizontalSpeed: lerp(120, 65, difficulty),
+            cableLength: lerp(224, 278, difficulty),
+          };
+        }
+        function targetX() { return targetSlots[state.loaded] ?? targetSlots[targetSlots.length - 1]; }
+        function deckY() { return 444 + Math.sin(state.elapsed * 0.85) * (2 + difficultyAt(state.elapsed).difficulty * 5); }
+        function attachedPosition() { return { x: state.trolleyX + Math.sin(state.theta) * state.cableLength, y: 94 + Math.cos(state.theta) * state.cableLength }; }
+        function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch (_) { return false; } }
+        function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+        function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: "storm-cargo-crane", stageTitle: "폭풍 항만 크레인", reason, durationSec: +state.lastRunTime.toFixed(1) }); }
+        function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: "storm-cargo-crane", stageTitle: "폭풍 항만 크레인", clearCountAfter: relayContext.clearCount + 1, durationSec: +state.lastRunTime.toFixed(1) }); }
+        function spawnCargo() {
+          state.theta = (state.loaded % 2 ? -1 : 1) * 0.1; state.omega = 0; state.cableLength = difficultyAt(state.elapsed).cableLength;
+          const p = attachedPosition(); state.cargo = { attached: true, x: p.x, y: p.y, vx: 0, vy: 0, rotation: 0 };
+        }
+        function startStage() {
+          Object.assign(state, { mode: "running", elapsed: 0, lastRunTime: 0, loaded: 0, broken: 0, reason: "", trolleyX: 220, trolleyV: 0, trolleyA: 0, theta: 0.1, omega: 0, cableLength: 232, cargo: null, respawn: 0, flash: 0, wind: 0, landed: [], particles: [] });
+          Object.assign(input, { left: false, right: false, brake: false, pointerDrive: false }); spawnCargo();
+          window.relayStageResult.status = "running"; hostFailedReported = false; hostClearedReported = false;
+        }
+        function failStage(reason) { if (state.mode !== "running") return; state.mode = "failed"; state.reason = reason; state.lastRunTime = state.elapsed; window.relayStageResult.status = "failed"; reportFailed(reason); }
+        function clearStage() { if (state.mode !== "running") return; state.mode = "cleared"; state.lastRunTime = state.elapsed; window.relayStageResult.status = "cleared"; reportCleared(); }
+        function releaseCargo() {
+          if (state.mode !== "running" || !state.cargo?.attached || state.respawn > 0) return false;
+          const p = attachedPosition();
+          state.cargo = { attached: false, x: p.x, y: p.y, vx: state.trolleyV + state.omega * state.cableLength * Math.cos(state.theta), vy: -state.omega * state.cableLength * Math.sin(state.theta), rotation: state.theta };
+          return true;
+        }
+        function sparks(x, y) {
+          const count = reducedMotion ? 4 : 14;
+          for (let i = 0; i < count; i += 1) state.particles.push({ x, y, vx: (i - count / 2) * 10, vy: -30 - (i % 4) * 14, life: 1 });
+        }
+        function resolveLanding() {
+          const c = state.cargo, settings = difficultyAt(state.elapsed);
+          const offset = Math.abs(c.x - targetX());
+          const safe = offset <= settings.targetHalfWidth && Math.abs(c.vx) <= settings.safeHorizontalSpeed && Math.abs(c.rotation) <= 0.62;
+          if (safe) {
+            state.loaded += 1; state.flash = 1; state.landed.push({ x: targetX(), y: deckY() - 19, rotation: c.rotation }); sparks(c.x, deckY());
+            state.cargo = null;
+            if (state.loaded >= 5) { clearStage(); return; }
+            state.respawn = 0.72;
+          } else {
+            if (state.elapsed >= 5) state.broken += 1;
+            state.flash = -1; sparks(c.x, deckY()); state.cargo = null;
+            if (state.broken >= 3) { failStage("cargo_damage"); return; }
+            state.respawn = 0.75;
+          }
+        }
+        function update(dt) {
+          if (state.mode !== "running") return;
+          state.elapsed += dt; if (state.elapsed >= LIMIT) { failStage("time_limit"); return; }
+          const settings = difficultyAt(state.elapsed);
+          state.wind = Math.sin(state.elapsed * settings.gustFrequency) * settings.windAmplitude + Math.sin(state.elapsed * 2.77) * settings.windAmplitude * 0.22;
+          if (state.respawn > 0) { state.respawn -= dt; if (state.respawn <= 0 && state.loaded < 5) spawnCargo(); }
+          let drive = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+          if (input.pointerDrive) drive = clamp((input.pointerX - state.trolleyX) / 90, -1, 1);
+          const previousV = state.trolleyV;
+          state.trolleyA = drive * 620;
+          state.trolleyV += state.trolleyA * dt;
+          state.trolleyV *= Math.pow(input.brake ? Math.exp(-settings.brakeDrag) : 0.91, dt);
+          state.trolleyV = clamp(state.trolleyV, -285, 285);
+          state.trolleyX += state.trolleyV * dt;
+          if (state.trolleyX < 92 || state.trolleyX > 872) { state.trolleyX = clamp(state.trolleyX, 92, 872); state.trolleyV *= -0.2; }
+          state.trolleyA = (state.trolleyV - previousV) / dt;
+          if (state.cargo?.attached) {
+            state.cableLength += (settings.cableLength - state.cableLength) * dt * 0.45;
+            const gravity = 760;
+            const angularA = -(gravity / state.cableLength) * Math.sin(state.theta) - (state.trolleyA / state.cableLength) * Math.cos(state.theta) + (state.wind / state.cableLength) * Math.cos(state.theta) - state.omega * (input.brake ? 1.15 : 0.085);
+            state.omega += angularA * dt; state.omega = clamp(state.omega, -3.4, 3.4); state.theta += state.omega * dt;
+            const p = attachedPosition(); Object.assign(state.cargo, { x: p.x, y: p.y, vx: state.trolleyV + state.omega * state.cableLength * Math.cos(state.theta), vy: -state.omega * state.cableLength * Math.sin(state.theta), rotation: state.theta });
+          } else if (state.cargo) {
+            const c = state.cargo; c.vx += state.wind * 0.28 * dt; c.vy += 760 * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.rotation += c.vx * dt * 0.0018;
+            if (c.y + 18 >= deckY()) resolveLanding();
+            else if (c.x < -60 || c.x > W + 60 || c.y > H + 60) resolveLanding();
+          }
+          state.flash += state.flash > 0 ? -dt * 2.8 : state.flash < 0 ? dt * 2.8 : 0;
+          if (Math.abs(state.flash) < 0.02) state.flash = 0;
+          state.particles.forEach((p) => { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 160 * dt; p.life -= dt * 1.5; }); state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+        function drawBackground() {
+          ctx.fillStyle = COLORS.storm; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "rgba(167,215,197,.07)"; ctx.beginPath(); ctx.moveTo(0, 310); ctx.bezierCurveTo(220, 278, 390, 338, 600, 304); ctx.bezierCurveTo(760, 278, 868, 318, 960, 290); ctx.lineTo(960, 540); ctx.lineTo(0, 540); ctx.fill();
+          ctx.strokeStyle = "rgba(167,215,197,.16)"; ctx.lineWidth = 2;
+          for (let i = 0; i < 8; i += 1) { const y = 372 + i * 16; ctx.beginPath(); ctx.moveTo(0, y); ctx.bezierCurveTo(220, y - 7, 480, y + 9, 960, y - 3); ctx.stroke(); }
+          ctx.fillStyle = "rgba(167,215,197,.09)"; ctx.fillRect(0, 0, 960, 64);
+          if (!reducedMotion) { ctx.strokeStyle = "rgba(167,215,197,.18)"; ctx.lineWidth = 1; for (let i = 0; i < 38; i += 1) { const x = (i * 79 + state.elapsed * 170) % 1100 - 70; ctx.beginPath(); ctx.moveTo(x, 28 + (i * 41) % 390); ctx.lineTo(x - 18, 54 + (i * 41) % 390); ctx.stroke(); } }
+        }
+        function drawCrane() {
+          ctx.strokeStyle = COLORS.foam; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(48, 94); ctx.lineTo(910, 94); ctx.stroke();
+          ctx.fillStyle = COLORS.cargo; roundRect(state.trolleyX - 30, 76, 60, 34, 5); ctx.fill();
+          if (state.cargo?.attached) {
+            const p = attachedPosition(); ctx.strokeStyle = COLORS.foam; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(state.trolleyX, 102); ctx.lineTo(p.x, p.y); ctx.stroke();
+            const tension = Math.abs(state.omega) * state.cableLength;
+            ctx.strokeStyle = `rgba(229,168,77,${clamp(tension / 500, .1, .8)})`; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(state.trolleyX + 5, 102); ctx.lineTo(p.x + 5, p.y); ctx.stroke();
+          }
+        }
+        function drawContainer(c, alpha = 1) {
+          ctx.save(); ctx.globalAlpha = alpha; ctx.translate(c.x, c.y); ctx.rotate(c.rotation || 0);
+          ctx.fillStyle = COLORS.cargo; roundRect(-34, -18, 68, 36, 4); ctx.fill();
+          ctx.strokeStyle = COLORS.storm; ctx.lineWidth = 3; ctx.strokeRect(-24, -17, 1, 34); ctx.strokeRect(-2, -17, 1, 34); ctx.strokeRect(20, -17, 1, 34);
+          ctx.restore();
+        }
+        function drawDeck() {
+          const y = deckY(); ctx.fillStyle = "rgba(167,215,197,.15)"; ctx.fillRect(492, y, 468, H - y);
+          ctx.strokeStyle = COLORS.foam; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(492, y); ctx.lineTo(960, y); ctx.stroke();
+          const settings = difficultyAt(state.elapsed), x = targetX();
+          ctx.fillStyle = "rgba(229,168,77,.16)"; ctx.fillRect(x - settings.targetHalfWidth, y - 7, settings.targetHalfWidth * 2, 7);
+          ctx.strokeStyle = COLORS.cargo; ctx.lineWidth = 2; ctx.strokeRect(x - settings.targetHalfWidth, y - 42, settings.targetHalfWidth * 2, 42);
+          state.landed.forEach((c, i) => drawContainer({ x: c.x, y: y - 19 - i * 2, rotation: c.rotation }, .72));
+        }
+        function drawHud() {
+          const settings = difficultyAt(state.elapsed);
+          const labels = [["TIME", Math.max(0, LIMIT - state.elapsed).toFixed(1)], ["LOADED", `${state.loaded}/5`], ["DAMAGE", `${state.broken}/3`], ["WIND", `${Math.round(Math.abs(state.wind))}`]];
+          ctx.fillStyle = "rgba(7,16,21,.78)"; ctx.fillRect(18, 18, 580, 60);
+          labels.forEach(([label, value], i) => { const x = 32 + i * 140; ctx.fillStyle = "rgba(167,215,197,.58)"; ctx.font = "700 11px Trebuchet MS"; ctx.fillText(label, x, 38); ctx.fillStyle = i === 2 && state.broken > 1 ? COLORS.cargo : COLORS.foam; ctx.font = "800 24px Trebuchet MS"; ctx.fillText(value, x, 64); });
+          ctx.textAlign = "right"; ctx.fillStyle = COLORS.cargo; ctx.font = "800 13px Trebuchet MS"; ctx.fillText(settings.phase, 934, 38); ctx.fillStyle = "rgba(167,215,197,.6)"; ctx.font = "600 12px Trebuchet MS"; ctx.fillText(`ZONE ±${Math.round(settings.targetHalfWidth)} · SAFE VX ${Math.round(settings.safeHorizontalSpeed)}`, 934, 61); ctx.textAlign = "left";
+        }
+        function drawCard(title, lines, accent = COLORS.cargo) {
+          drawBackground(); ctx.fillStyle = "rgba(7,16,21,.92)"; roundRect(128, 92, 704, 356, 10); ctx.fill(); ctx.strokeStyle = accent; ctx.lineWidth = 3; roundRect(128, 92, 704, 356, 10); ctx.stroke();
+          ctx.textAlign = "center"; ctx.fillStyle = accent; ctx.font = "800 40px Trebuchet MS"; ctx.fillText(title, 480, 157); ctx.fillStyle = COLORS.foam; ctx.font = "600 20px Trebuchet MS"; lines.forEach((line, i) => ctx.fillText(line, 480, 214 + i * 35)); ctx.fillStyle = "rgba(167,215,197,.55)"; ctx.font = "700 14px Trebuchet MS"; ctx.fillText("TOUCH OR ENTER", 480, 414); ctx.textAlign = "left";
+        }
+        function render() {
+          if (state.mode === "menu") { drawCard("폭풍 항만 크레인", ["바람과 진자 운동을 읽어 화물을 정확히 적재하세요.", "화면 터치 드래그로 크레인 이동, 놓아서 화물 투하", "흔들리는 화물 5개를 안전 구역에 적재", "화물 3개 파손 또는 40초 초과 시 실패", "트롤리 제동으로 진자 속도를 먼저 죽이세요."]); return; }
+          if (state.mode === "failed") { drawCard("CARGO LOST", ["화물 3개 파손 또는 40초 초과 시 실패", `원인: ${state.reason}`, `안전 적재: ${state.loaded}/5`, "터치 또는 Enter로 재시작"], COLORS.foam); return; }
+          if (state.mode === "cleared") { drawCard("DECK SECURED", ["흔들리는 화물 5개를 안전 구역에 적재", `기록 ${state.lastRunTime.toFixed(1)}초 · 파손 ${state.broken}`, "폭풍 속 진자 운동을 제어했습니다.", "터치 또는 Enter로 다시 작업"], COLORS.cargo); return; }
+          drawBackground(); drawDeck(); drawCrane(); if (state.cargo) drawContainer(state.cargo); drawHud();
+          state.particles.forEach((p) => { ctx.globalAlpha = p.life; ctx.fillStyle = COLORS.cargo; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }); ctx.globalAlpha = 1;
+          if (state.respawn > 0) { ctx.textAlign = "center"; ctx.fillStyle = COLORS.cargo; ctx.font = "800 20px Trebuchet MS"; ctx.fillText("NEXT LOAD", 480, 132); ctx.textAlign = "left"; }
+          if (state.flash) { ctx.fillStyle = state.flash > 0 ? `rgba(229,168,77,${state.flash * .12})` : `rgba(167,215,197,${-state.flash * .11})`; ctx.fillRect(0, 0, W, H); }
+        }
+
+        function pointerPoint(event) {
+          const rect = canvas.getBoundingClientRect(), boxRatio = rect.width / rect.height, ratio = W / H;
+          const contentWidth = boxRatio > ratio ? rect.height * ratio : rect.width, contentHeight = boxRatio > ratio ? rect.height : rect.width / ratio;
+          const offsetX = rect.left + (rect.width - contentWidth) / 2, offsetY = rect.top + (rect.height - contentHeight) / 2;
+          return { x: clamp((event.clientX - offsetX) * W / contentWidth, 0, W), y: clamp((event.clientY - offsetY) * H / contentHeight, 0, H) };
+        }
+        canvas.addEventListener("pointerdown", (event) => { event.preventDefault(); canvas.focus(); if (state.mode !== "running") { startStage(); return; } const p = pointerPoint(event); input.pointerDrive = true; input.pointerX = p.x; input.dragStartX = p.x; input.dragStartTime = performance.now(); canvas.setPointerCapture?.(event.pointerId); });
+        canvas.addEventListener("pointermove", (event) => { if (!input.pointerDrive) return; event.preventDefault(); input.pointerX = pointerPoint(event).x; });
+        function releasePointer(event) { if (!input.pointerDrive) return; event.preventDefault(); const p = pointerPoint(event); const shouldDrop = Math.abs(p.x - input.dragStartX) > 8 || performance.now() - input.dragStartTime > 100; input.pointerDrive = false; if (shouldDrop) releaseCargo(); }
+        canvas.addEventListener("pointerup", releasePointer); canvas.addEventListener("pointercancel", (event) => { event.preventDefault(); input.pointerDrive = false; });
+        function setHold(name, active) { if (name in input) input[name] = active; }
+        document.querySelectorAll("[data-control]").forEach((button) => {
+          const name = button.dataset.control;
+          const release = (event) => { event.preventDefault(); button.dataset.active = "false"; if (name !== "drop") setHold(name, false); };
+          button.addEventListener("pointerdown", (event) => { event.preventDefault(); canvas.focus(); if (state.mode !== "running") startStage(); button.dataset.active = "true"; if (name === "drop") releaseCargo(); else setHold(name, true); button.setPointerCapture?.(event.pointerId); });
+          button.addEventListener("pointerup", release); button.addEventListener("pointercancel", release); button.addEventListener("lostpointercapture", release);
+        });
+        const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right", ArrowDown: "brake", KeyS: "brake" };
+        window.addEventListener("keydown", (event) => { if (event.key === "Enter" && state.mode !== "running") { event.preventDefault(); startStage(); return; } if (event.code === "Space") { event.preventDefault(); if (state.mode !== "running") startStage(); else releaseCargo(); return; } const name = keyMap[event.code] || keyMap[event.key]; if (name) { event.preventDefault(); setHold(name, true); } });
+        window.addEventListener("keyup", (event) => { const name = keyMap[event.code] || keyMap[event.key]; if (name) { event.preventDefault(); setHold(name, false); } });
+
+        function renderGameToText() {
+          const settings = difficultyAt(state.elapsed); return JSON.stringify({ coordinate_system: "960x540 canvas; trolley rail y=94; +y down", mode: state.mode, elapsed: +state.elapsed.toFixed(2), difficulty: +settings.difficulty.toFixed(3), phase: settings.phase,
+            actual_difficulty_parameters: { wind_amplitude: +settings.windAmplitude.toFixed(2), gust_frequency: +settings.gustFrequency.toFixed(3), target_half_width: +settings.targetHalfWidth.toFixed(2), brake_drag: +settings.brakeDrag.toFixed(2), safe_horizontal_speed: +settings.safeHorizontalSpeed.toFixed(2), cable_length: +settings.cableLength.toFixed(2) },
+            loaded: state.loaded, broken: state.broken, target_x: targetX(), trolley: { x: +state.trolleyX.toFixed(1), vx: +state.trolleyV.toFixed(1) }, pendulum: { angle: +state.theta.toFixed(3), omega: +state.omega.toFixed(3), wind: +state.wind.toFixed(1) }, cargo: state.cargo ? { attached: state.cargo.attached, x: +state.cargo.x.toFixed(1), y: +state.cargo.y.toFixed(1), vx: +state.cargo.vx.toFixed(1), vy: +state.cargo.vy.toFixed(1) } : null, result: window.relayStageResult.status });
+        }
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => { const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < steps; i += 1) update(FIXED_DT); render(); return renderGameToText(); };
+        window.relayStageMeta = { id: "storm-cargo-crane", title: "폭풍 항만 크레인", creator: "jungcollin", genre: "Pendulum cargo", description: "바람과 진자 운동을 읽어 화물을 정확히 적재하세요.", controls: "화면 터치 드래그로 크레인 이동, 놓아서 화물 투하", clearCondition: "흔들리는 화물 5개를 안전 구역에 적재", failCondition: "화물 3개 파손 또는 40초 초과 시 실패" };
+        window.relayStageResult = { status: "menu" };
+        window.relayStageDebug = {
+          forceClear() { startStage(); state.loaded = 5; clearStage(); render(); },
+          forceFail() { startStage(); state.elapsed = 6; state.broken = 3; failStage("debug_force_fail"); render(); },
+          difficultyAt,
+          prepareSafeDrop() { startStage(); state.elapsed = 6; const settings = difficultyAt(state.elapsed); state.trolleyX = targetX(); state.trolleyV = 0; state.theta = 0; state.omega = 0; state.cableLength = deckY() - 94 - 22; const p = attachedPosition(); Object.assign(state.cargo, { attached: true, x: p.x, y: p.y, vx: 0, vy: 0, rotation: 0 }); render(); return JSON.parse(renderGameToText()); },
+        };
+        function frame(timestamp) { const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT; lastTimestamp = timestamp; update(dt); render(); animationFrame = requestAnimationFrame(frame); }
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+        reportReady(); render(); animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

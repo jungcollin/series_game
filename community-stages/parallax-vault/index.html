@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>시차 금고</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; width: 100%; height: 100%; overflow: hidden;
+      background: #120b24; font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+    }
+    body { display: grid; place-items: center; }
+    .skip-link {
+      position: fixed; z-index: 5; top: 8px; left: 8px; padding: 10px 14px;
+      color: #120b24; background: #62efff; border-radius: 999px;
+      transform: translateY(-160%); transition: transform .15s ease;
+    }
+    .skip-link:focus, .skip-link:focus-visible { transform: translateY(0); }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+    canvas {
+      display: block;
+      width: min(100vw, calc(100vh * 16 / 9));
+      height: min(100vh, calc(100vw * 9 / 16));
+      min-height: min(220px, 100vh);
+      max-width: 100vw; max-height: 100vh;
+      aspect-ratio: 16 / 9; object-fit: contain;
+      background: #120b24; touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    canvas:focus-visible { outline: 4px solid #62efff; outline-offset: -6px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important; scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#game">게임으로 건너뛰기</a>
+  <p id="stage-instructions" class="sr-only">시차 금고. 화면 터치 드래그로 깊이 판을 정렬, 탭으로 확정. 시차 문양 5개를 완성해 금고 해제. 오정렬 3회 또는 40초 초과 시 실패. 모바일은 하단 심도 버튼을 선택하고 화면을 드래그합니다. 키보드는 숫자와 방향키, Space를 사용합니다.</p>
+  <canvas id="game" width="960" height="540" tabindex="0" aria-label="시차 금고" aria-describedby="stage-instructions"></canvas>
+  <script src="../relay-runtime.js"></script>
+  <script src="../registry.js"></script>
+  <script>
+  (() => {
+    "use strict";
+    const canvas = document.querySelector("#game");
+    const ctx = canvas.getContext("2d");
+    const W=960,H=540,DT=1/60,LIMIT=40;
+    const COLORS={ ink:"#120b24", violet:"#a979ff", cyan:"#62efff", frost:"#eefcff" };
+    const META={
+      id:"parallax-vault", title:"시차 금고", creator:"jungcollin",
+      genre:"Parallax alignment", clearCondition:"시차 문양 5개를 완성해 금고 해제"
+    };
+    const COPY={
+      description:"서로 다른 깊이의 판을 움직여 숨은 열쇠 문양을 맞추세요.",
+      controls:"화면 터치 드래그로 깊이 판을 정렬, 탭으로 확정",
+      clear:"시차 문양 5개를 완성해 금고 해제",
+      fail:"오정렬 3회 또는 40초 초과 시 실패"
+    };
+    const relayContext=window.RelayRuntime?.readContext(META.id)||{history:[],clearCount:0};
+    const ROUND_DEPTHS=[3,4,4,5,6];
+    const state={
+      mode:"menu",elapsed:0,lastRunTime:0,round:0,misses:0,layers:[],selected:0,
+      dragging:false,lastPointer:null,transition:0,message:"",messageTime:0,
+      flash:0,lastAction:"none",confirmations:0
+    };
+    let raf=0,lastStamp=0,hostClearSent=false,hostFailSent=false;
+
+    const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+    const smooth=t=>t*t*(3-2*t);
+    function difficultyAt(seconds){ return smooth(clamp((Number(seconds)-5)/(LIMIT-5),0,1)); }
+    function phaseAt(d){ return d<.2?"DISCOVER":d<.48?"REFRACT":d<.76?"CONVERGE":"PARALLAX STORM"; }
+    function paramsAt(seconds=state.elapsed){
+      const difficulty=difficultyAt(seconds);
+      return {
+        difficulty,phase:phaseAt(difficulty),
+        tolerance:Number((30-difficulty*15).toFixed(2)),
+        driftAmplitude:Number((1+difficulty*10).toFixed(2)),
+        driftSpeed:Number((.32+difficulty*.72).toFixed(3)),
+        desiredLayers:Math.min(6,3+Math.floor(difficulty*3.001))
+      };
+    }
+    function inHost(){try{return window.parent&&window.parent!==window&&window.parent.RelayHost;}catch(_){return false;}}
+    function sendReady(){if(inHost())window.parent.RelayHost.onStageReady?.(META);}
+    function sendFail(reason){
+      if(!inHost()||hostFailSent)return;hostFailSent=true;
+      window.parent.RelayHost.onStageFailed?.({stageId:META.id,stageTitle:META.title,reason,durationSec:+state.lastRunTime.toFixed(1)});
+    }
+    function sendClear(){
+      if(!inHost()||hostClearSent)return;hostClearSent=true;
+      window.parent.RelayHost.onStageCleared?.({stageId:META.id,stageTitle:META.title,clearCountAfter:(relayContext.clearCount||0)+1,durationSec:+state.lastRunTime.toFixed(1)});
+    }
+    function seededOffset(round,index,axis){
+      const n=Math.sin((round+1)*19.17+(index+1)*31.73+axis*7.31)*43758.5453;
+      const unit=n-Math.floor(n);
+      const sign=(round+index+axis)%2?1:-1;
+      return sign*(62+unit*92);
+    }
+    function makeLayer(index){
+      return {
+        id:index,depth:(index+1)/7,
+        x:seededOffset(state.round,index,0),y:seededOffset(state.round,index,1)*.55,
+        hue:index%2, born:state.elapsed
+      };
+    }
+    function requiredLayerCount(){
+      return Math.max(ROUND_DEPTHS[Math.min(state.round,4)],paramsAt().desiredLayers);
+    }
+    function setupRound(){
+      const count=requiredLayerCount();state.layers=[];
+      for(let i=0;i<count;i++)state.layers.push(makeLayer(i));
+      state.selected=0;state.dragging=false;state.lastPointer=null;
+      state.message=`문양 ${state.round+1} · ${count}개 심도`;state.messageTime=1.4;
+      state.lastAction="round_ready";
+    }
+    function ensureLayerCount(){
+      const desired=requiredLayerCount();
+      while(state.layers.length<desired){
+        state.layers.push(makeLayer(state.layers.length));
+        state.message="새 심도 판이 개방되었습니다";state.messageTime=1.2;
+        state.lastAction="depth_added";
+      }
+    }
+    function startStage(){
+      state.mode="running";state.elapsed=0;state.lastRunTime=0;state.round=0;state.misses=0;
+      state.transition=0;state.flash=0;state.confirmations=0;state.lastAction="stage_started";
+      hostClearSent=false;hostFailSent=false;window.relayStageResult.status="running";setupRound();
+    }
+    function failStage(reason){
+      if(state.mode!=="running")return;state.mode="failed";state.lastRunTime=state.elapsed;
+      state.dragging=false;state.lastAction=reason;window.relayStageResult.status="failed";sendFail(reason);
+    }
+    function clearStage(){
+      if(state.mode!=="running")return;state.mode="cleared";state.lastRunTime=state.elapsed;
+      state.dragging=false;state.lastAction="vault_opened";window.relayStageResult.status="cleared";sendClear();
+    }
+    function effectiveOffset(layer,seconds=state.elapsed){
+      const p=paramsAt(seconds);
+      const depthBias=(layer.id-(state.layers.length-1)/2)/Math.max(1,state.layers.length-1);
+      const sway=Math.sin(seconds*p.driftSpeed+layer.id*1.37)*p.driftAmplitude*depthBias;
+      const lift=Math.cos(seconds*p.driftSpeed*.83+layer.id*.91)*p.driftAmplitude*depthBias*.55;
+      return {x:layer.x+sway,y:layer.y+lift};
+    }
+    function alignmentSnapshot(){
+      const p=paramsAt();
+      const distances=state.layers.map(layer=>{const o=effectiveOffset(layer);return Math.hypot(o.x,o.y);});
+      return {distances,max:distances.length?Math.max(...distances):999,mean:distances.reduce((a,b)=>a+b,0)/Math.max(1,distances.length),tolerance:p.tolerance};
+    }
+    function confirmAlignment(){
+      if(state.mode!=="running"||state.transition>0)return;
+      state.confirmations+=1;const snap=alignmentSnapshot();
+      if(snap.max<=snap.tolerance){
+        state.lastAction="alignment_correct";state.flash=.7;state.round+=1;state.transition=.72;
+        state.message="문양 동기화 성공";state.messageTime=1;
+        if(state.round>=5)clearStage();
+      }else{
+        state.lastAction="alignment_wrong";
+        if(state.elapsed<5){state.message="보정 중 · 빛 조각을 중앙에 모으세요";state.messageTime=1.2;return;}
+        state.misses+=1;state.flash=.35;state.message=`오정렬 · 최대 편차 ${Math.round(snap.max)}`;state.messageTime=1.2;
+        if(state.misses>=3)failStage("three_misalignments");
+      }
+    }
+    function update(dt){
+      state.flash=Math.max(0,state.flash-dt);state.messageTime=Math.max(0,state.messageTime-dt);
+      if(state.mode!=="running")return;
+      state.elapsed+=dt;if(state.elapsed>=LIMIT){failStage("time_limit");return;}
+      if(state.transition>0){state.transition-=dt;if(state.transition<=0&&state.round<5)setupRound();return;}
+      ensureLayerCount();
+    }
+
+    function roundRect(x,y,w,h,r,fill,stroke,line=2){
+      ctx.beginPath();ctx.roundRect(x,y,w,h,r);if(fill){ctx.fillStyle=fill;ctx.fill();}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=line;ctx.stroke();}
+    }
+    function text(value,x,y,size,color=COLORS.frost,align="left",weight=700){
+      ctx.fillStyle=color;ctx.font=`${weight} ${size}px Trebuchet MS, Segoe UI, sans-serif`;ctx.textAlign=align;ctx.textBaseline="middle";ctx.fillText(value,x,y);
+    }
+    function drawBackground(){
+      ctx.fillStyle=COLORS.ink;ctx.fillRect(0,0,W,H);
+      const g=ctx.createRadialGradient(480,270,20,480,270,510);g.addColorStop(0,"rgba(169,121,255,.18)");g.addColorStop(.55,"rgba(98,239,255,.045)");g.addColorStop(1,"rgba(18,11,36,0)");ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+      ctx.save();ctx.globalAlpha=.11;ctx.strokeStyle=COLORS.cyan;ctx.lineWidth=1;
+      for(let r=90;r<530;r+=52){ctx.beginPath();ctx.arc(480,260,r,0,Math.PI*2);ctx.stroke();}
+      ctx.restore();
+    }
+    function drawHud(){
+      const p=paramsAt();text("PARALLAX VAULT",22,24,16,COLORS.cyan,"left",900);text(p.phase,22,48,11,COLORS.violet,"left",900);
+      const values=[["TIME",`${Math.max(0,LIMIT-state.elapsed).toFixed(1)}s`],["SEALS",`${Math.min(state.round,5)}/5`],["DEPTHS",String(state.layers.length)],["ERRORS",`${state.misses}/3`]];
+      values.forEach((v,i)=>{const x=340+i*145;text(v[0],x,24,10,COLORS.violet,"left",900);text(v[1],x,49,21,COLORS.frost,"left",900);});
+    }
+    function drawGhostKey(){
+      const p=paramsAt(),r=p.tolerance;
+      ctx.save();ctx.translate(480,254);ctx.strokeStyle="rgba(98,239,255,.3)";ctx.lineWidth=2;ctx.setLineDash([8,7]);ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);
+      ctx.strokeStyle="rgba(238,252,255,.13)";ctx.lineWidth=10;ctx.beginPath();ctx.arc(-40,0,34,0,Math.PI*2);ctx.moveTo(-7,0);ctx.lineTo(92,0);ctx.lineTo(92,30);ctx.moveTo(52,0);ctx.lineTo(52,24);ctx.stroke();ctx.restore();
+    }
+    function drawKeyFragment(layer,index,count){
+      const o=effectiveOffset(layer),x=480+o.x,y=254+o.y;
+      ctx.save();ctx.translate(x,y);ctx.strokeStyle=layer.hue?COLORS.violet:COLORS.cyan;ctx.fillStyle=ctx.strokeStyle;ctx.lineWidth=8;ctx.lineCap="round";ctx.lineJoin="round";
+      const slot=index%6;
+      if(slot===0){ctx.beginPath();ctx.arc(-40,0,34,-Math.PI*.15,Math.PI*.82);ctx.stroke();}
+      else if(slot===1){ctx.beginPath();ctx.arc(-40,0,34,Math.PI*.82,Math.PI*1.85);ctx.stroke();}
+      else if(slot===2){ctx.beginPath();ctx.moveTo(-7,0);ctx.lineTo(35,0);ctx.stroke();}
+      else if(slot===3){ctx.beginPath();ctx.moveTo(33,0);ctx.lineTo(68,0);ctx.lineTo(68,23);ctx.stroke();}
+      else if(slot===4){ctx.beginPath();ctx.moveTo(65,0);ctx.lineTo(94,0);ctx.lineTo(94,29);ctx.stroke();}
+      else {ctx.beginPath();ctx.moveTo(-45,-12);ctx.lineTo(-33,0);ctx.lineTo(-45,12);ctx.stroke();}
+      ctx.globalAlpha=.4;ctx.beginPath();ctx.arc(0,0,5,0,Math.PI*2);ctx.fill();ctx.restore();
+    }
+    function drawLayers(){
+      const p=paramsAt();roundRect(18,82,924,320,26,"rgba(238,252,255,.025)","rgba(98,239,255,.24)");
+      ctx.save();ctx.beginPath();ctx.roundRect(20,84,920,316,24);ctx.clip();
+      state.layers.forEach((layer,index)=>{
+        const o=effectiveOffset(layer),depth=(index+1)/(state.layers.length+1),w=690-depth*150,h=226-depth*34;
+        ctx.save();ctx.translate(480+o.x*(.12+depth*.12),254+o.y*(.1+depth*.12));
+        ctx.globalAlpha=index===state.selected?.22:.07;ctx.fillStyle=layer.hue?COLORS.violet:COLORS.cyan;ctx.fillRect(-w/2,-h/2,w,h);
+        ctx.globalAlpha=index===state.selected?.78:.2;ctx.strokeStyle=layer.hue?COLORS.violet:COLORS.cyan;ctx.lineWidth=index===state.selected?3:1;ctx.strokeRect(-w/2,-h/2,w,h);ctx.restore();
+        drawKeyFragment(layer,index,state.layers.length);
+      });ctx.restore();drawGhostKey();
+      const snap=alignmentSnapshot();const quality=clamp(1-snap.max/190,0,1);
+      roundRect(744,98,176,48,14,"rgba(18,11,36,.76)",quality>.9?COLORS.cyan:"rgba(169,121,255,.55)");
+      text("ALIGNMENT",758,114,9,COLORS.violet,"left",900);text(`${Math.round(quality*100)}%`,902,128,18,COLORS.frost,"right",900);
+      if(state.elapsed<5){roundRect(40,98,218,42,13,"rgba(18,11,36,.8)",COLORS.cyan);text("5초 보정 · 오답 보호",149,120,13,COLORS.cyan,"center",900);}
+    }
+    function drawControls(){
+      const count=state.layers.length,gap=8,start=20,tabW=100;
+      for(let i=0;i<6;i++){
+        const active=i===state.selected,available=i<count,x=start+i*(tabW+gap);
+        roundRect(x,416,tabW,104,18,active?COLORS.violet:"rgba(169,121,255,.08)",available?(active?COLORS.violet:"rgba(169,121,255,.38)"):"rgba(169,121,255,.1)",2);
+        text(`D${i+1}`,x+tabW/2,449,22,available?(active?COLORS.ink:COLORS.violet):"rgba(238,252,255,.18)","center",900);
+        text(available?(active?"선택됨":"심도 판"):"잠김",x+tabW/2,486,12,available?COLORS.frost:"rgba(238,252,255,.18)","center",800);
+      }
+      roundRect(676,416,264,104,18,COLORS.cyan,COLORS.cyan,2);text("ALIGN",808,452,23,COLORS.ink,"center",900);text("탭으로 확정",808,487,13,COLORS.ink,"center",900);
+    }
+    function drawMessage(){
+      if(state.messageTime<=0)return;ctx.globalAlpha=clamp(state.messageTime*2,0,1);roundRect(290,356,380,38,12,"rgba(18,11,36,.92)",COLORS.violet);text(state.message,480,376,15,COLORS.frost,"center",900);ctx.globalAlpha=1;
+    }
+    function drawCard(title,subtitle,accent,lines){
+      drawBackground();roundRect(128,55,704,430,30,"rgba(18,11,36,.93)",accent,3);text("DEPTH-LOCK PROTOCOL",480,94,12,accent,"center",900);text(title,480,145,44,COLORS.frost,"center",900);text(subtitle,480,191,17,accent,"center",800);
+      lines.forEach((line,i)=>text(line,480,245+i*39,17,COLORS.frost,"center",700));roundRect(292,406,376,54,16,accent,null);text(state.mode==="menu"?"터치 또는 Enter로 시작":"릴레이 결과",480,434,17,COLORS.ink,"center",900);
+    }
+    function render(){
+      if(state.mode==="menu"){drawCard("시차 금고",COPY.description,COLORS.cyan,[`조작 · ${COPY.controls}`,`클리어 · ${COPY.clear}`,`실패 · ${COPY.fail}`,"D1–D6 판을 골라 빛 조각을 중앙에 모으세요"]);return;}
+      if(state.mode==="failed"){drawCard("금고 봉인",state.lastAction==="time_limit"?"정렬 시간이 끝났습니다":"오정렬 허용치를 초과했습니다",COLORS.violet,[COPY.fail,`완성 문양 ${state.round} / 5`,`정렬 판정 ${state.confirmations}회`]);return;}
+      if(state.mode==="cleared"){drawCard("VAULT OPEN",COPY.clear,COLORS.cyan,[`${state.lastRunTime.toFixed(1)}초 · 오정렬 ${state.misses}회`,`서로 다른 깊이의 조각이 하나의 열쇠가 되었습니다`,"다음 릴레이 스테이지가 이어집니다"]);return;}
+      drawBackground();drawHud();drawLayers();drawControls();drawMessage();
+      if(state.flash>0){ctx.fillStyle=`rgba(98,239,255,${state.flash*.18})`;ctx.fillRect(0,0,W,H);}
+      if(state.transition>0){ctx.fillStyle=`rgba(18,11,36,${clamp(state.transition,.18,.78)})`;ctx.fillRect(18,82,924,320);text(`SEAL ${Math.min(state.round+1,5)}`,480,244,48,COLORS.cyan,"center",900);}
+    }
+
+    function contentPoint(event){
+      const r=canvas.getBoundingClientRect(),scale=Math.min(r.width/W,r.height/H),cw=W*scale,ch=H*scale;
+      const left=r.left+(r.width-cw)/2,top=r.top+(r.height-ch)/2;
+      const x=(event.clientX-left)/scale,y=(event.clientY-top)/scale;
+      return{x,y,inside:x>=0&&x<=W&&y>=0&&y<=H};
+    }
+    function pointerDown(event){
+      event.preventDefault();canvas.focus();const p=contentPoint(event);if(!p.inside)return;
+      if(state.mode==="menu"){startStage();return;}if(state.mode!=="running"||state.transition>0)return;
+      if(p.y>=416){
+        for(let i=0;i<Math.min(6,state.layers.length);i++){const x=20+i*108;if(p.x>=x&&p.x<=x+100){state.selected=i;state.lastAction=`selected_depth_${i+1}`;return;}}
+        if(p.x>=676){confirmAlignment();return;}
+      }
+      if(p.y>=82&&p.y<=402){state.dragging=true;state.lastPointer=p;canvas.setPointerCapture?.(event.pointerId);state.lastAction="drag_started";}
+    }
+    function pointerMove(event){
+      if(!state.dragging||state.mode!=="running")return;event.preventDefault();const p=contentPoint(event);if(!p.inside||!state.lastPointer)return;
+      const layer=state.layers[state.selected];if(!layer)return;
+      const factor=.58+layer.depth*.72;layer.x+=(p.x-state.lastPointer.x)/factor;layer.y+=(p.y-state.lastPointer.y)/factor;
+      layer.x=clamp(layer.x,-230,230);layer.y=clamp(layer.y,-130,130);state.lastPointer=p;state.lastAction="plate_dragged";
+    }
+    function pointerUp(event){
+      if(state.dragging){event.preventDefault();state.dragging=false;state.lastPointer=null;state.lastAction="drag_finished";}
+    }
+    function keyDown(event){
+      if(event.key==="Enter"&&state.mode==="menu"){event.preventDefault();startStage();return;}if(state.mode!=="running")return;
+      const number=Number(event.key);if(number>=1&&number<=state.layers.length){event.preventDefault();state.selected=number-1;state.lastAction=`selected_depth_${number}`;return;}
+      if(event.code==="Space"){event.preventDefault();confirmAlignment();return;}
+      const layer=state.layers[state.selected];if(!layer)return;const step=event.shiftKey?12:5;
+      if(event.key==="ArrowLeft")layer.x-=step;else if(event.key==="ArrowRight")layer.x+=step;else if(event.key==="ArrowUp")layer.y-=step;else if(event.key==="ArrowDown")layer.y+=step;else return;
+      event.preventDefault();state.lastAction="keyboard_plate_move";
+    }
+    function renderGameToText(){
+      const p=paramsAt(),snap=alignmentSnapshot();return JSON.stringify({
+        mode:state.mode,elapsed:+state.elapsed.toFixed(2),difficulty:+p.difficulty.toFixed(4),phase:p.phase,
+        actual_difficulty:{layer_count:state.layers.length,tolerance_px:p.tolerance,drift_amplitude_px:p.driftAmplitude,drift_speed:p.driftSpeed,learning_grace:state.elapsed<5},
+        seal:state.round+1,completed_seals:state.round,errors:state.misses,selected_depth:state.selected+1,
+        alignment:{max_error:+snap.max.toFixed(2),mean_error:+snap.mean.toFixed(2)},last_action:state.lastAction,result:window.relayStageResult.status
+      });
+    }
+    function advanceTime(ms=16.67){const steps=Math.max(1,Math.round(Number(ms)/(DT*1000)));for(let i=0;i<steps;i++)update(DT);render();return renderGameToText();}
+    function frame(stamp){const elapsed=lastStamp?Math.min((stamp-lastStamp)/1000,.05):DT;lastStamp=stamp;const steps=Math.max(1,Math.round(elapsed/DT));for(let i=0;i<steps;i++)update(DT);render();raf=requestAnimationFrame(frame);}
+    window.relayStageMeta=META;window.relayStageResult={status:"running"};window.render_game_to_text=renderGameToText;window.advanceTime=advanceTime;
+    window.relayStageDebug={
+      forceClear(){if(state.mode!=="running")startStage();clearStage();render();},
+      forceFail(){if(state.mode!=="running")startStage();failStage("debug_force_fail");render();},
+      difficultyAt(seconds){return difficultyAt(seconds);}
+    };
+    canvas.addEventListener("pointerdown",pointerDown,{passive:false});canvas.addEventListener("pointermove",pointerMove,{passive:false});canvas.addEventListener("pointerup",pointerUp,{passive:false});canvas.addEventListener("pointercancel",pointerUp,{passive:false});
+    canvas.addEventListener("touchstart",event=>event.preventDefault(),{passive:false});window.addEventListener("keydown",keyDown);window.addEventListener("beforeunload",()=>cancelAnimationFrame(raf));
+    render();sendReady();raf=requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

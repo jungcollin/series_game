@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>암호 폭우</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+      body { display: grid; place-items: center; background: #04050a; color: #c8ff5a; font-family: "Trebuchet MS", "Segoe UI", sans-serif; }
+      .skip-link { position: fixed; top: 12px; left: 12px; z-index: 20; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); color: #10131a; background: #c8ff5a; font-weight: 800; }
+      .skip-link:focus-visible { width: auto; height: auto; padding: 10px 14px; clip-path: none; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+      .stage { position: relative; width: min(100vw, calc(100svh * 16 / 9)); height: min(100svh, max(min(220px, 100svh), calc(100vw * 9 / 16))); max-width: 100%; max-height: 100%; }
+      canvas { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; aspect-ratio: 16 / 9; background: #10131a; touch-action: none; -webkit-tap-highlight-color: transparent; }
+      canvas:focus-visible { outline: 3px solid #8c7cff; outline-offset: -5px; }
+      .answers { position: absolute; left: 0; right: 0; bottom: 10px; z-index: 5; display: grid; grid-template-columns: repeat(4, minmax(44px, 88px)); justify-content: center; gap: 8px; padding: 0 10px; }
+      .answer { min-width: 44px; min-height: 48px; border: 1px solid rgba(200,255,90,.48); border-radius: 8px; background: rgba(16,19,26,.94); color: #c8ff5a; font: 900 22px/1 "Trebuchet MS", sans-serif; touch-action: manipulation; }
+      .answer:hover { border-color: #8c7cff; }
+      .answer:focus-visible { outline: 3px solid #8c7cff; outline-offset: 2px; }
+      .answer[data-active="true"] { color: #10131a; background: #c8ff5a; transform: translateY(1px); }
+      .answer small { display: block; margin-top: 3px; font-size: 9px; font-weight: 800; opacity: .72; }
+      @media (max-width: 520px) { .answers { bottom: 5px; gap: 5px; padding: 0 5px; grid-template-columns: repeat(4, minmax(44px, 72px)); } .answer { min-height: 44px; font-size: 18px; } .answer small { display: none; } }
+      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">암호 폭우. 떨어지는 기호를 터치해 해독 키를 선택. 화면 하단의 위, 오른쪽, 아래, 왼쪽 답 버튼을 누르거나 키보드 1부터 4를 사용합니다.</p>
+    <main class="stage" aria-label="암호 폭우 게임 영역">
+      <canvas id="game" width="960" height="540" tabindex="0" aria-label="암호 폭우" aria-describedby="stage-instructions"></canvas>
+      <div class="answers" role="group" aria-label="해독 방향 선택">
+        <button class="answer" type="button" data-answer="0" aria-label="1번 위쪽"><span>↑</span><small>1 · UP</small></button>
+        <button class="answer" type="button" data-answer="1" aria-label="2번 오른쪽"><span>→</span><small>2 · RIGHT</small></button>
+        <button class="answer" type="button" data-answer="2" aria-label="3번 아래쪽"><span>↓</span><small>3 · DOWN</small></button>
+        <button class="answer" type="button" data-answer="3" aria-label="4번 왼쪽"><span>←</span><small>4 · LEFT</small></button>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+        const canvas = document.querySelector("#game"), ctx = canvas.getContext("2d");
+        const W = 960, H = 540, FIXED_DT = 1 / 60, MAX_DT = 1 / 20, LIMIT = 35;
+        const COLORS = { ink: "#10131a", acid: "#c8ff5a", violet: "#8c7cff" };
+        const GLYPHS = ["△", "▷", "▽", "◁"], ARROWS = ["↑", "→", "↓", "←"];
+        const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const relayContext = window.RelayRuntime?.readContext("cipher-rain") || { history: [], clearCount: 0, previousStageId: null };
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const lerp = (a, b, t) => a + (b - a) * t;
+        let animationFrame = 0, lastTimestamp = 0, hostFailedReported = false, hostClearedReported = false;
+        const state = { mode: "menu", elapsed: 0, lastRunTime: 0, solved: 0, errors: 0, reason: "", questionNo: 0, question: null, questionTimer: 0, questionY: 220, nextQuestion: 0, seed: 0x51f15e, drops: [], dropTimer: 0, flash: 0, feedback: "", feedbackTimer: 0 };
+
+        function phaseAt(seconds) { return seconds < 12 ? "ROTATION" : seconds < 24 ? "MIRROR" : "COMPOSITE"; }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(seconds / LIMIT, 0, 1);
+          return {
+            difficulty, phase: phaseAt(seconds),
+            answerWindow: lerp(4.8, 1.85, difficulty),
+            fallSpeed: lerp(54, 172, difficulty),
+            exampleCount: difficulty < 0.42 ? 3 : 2,
+            glitchRate: lerp(0, 0.42, difficulty),
+            composite: seconds >= 24,
+            mirror: seconds >= 12,
+          };
+        }
+        function random() { state.seed = (Math.imul(state.seed, 1664525) + 1013904223) >>> 0; return state.seed / 4294967296; }
+        function mapDirection(base, rule) {
+          let value = (base + rule.rotation) % 4;
+          if (rule.mirrorAxis === "horizontal") value = [0, 3, 2, 1][value];
+          if (rule.mirrorAxis === "vertical") value = [2, 1, 0, 3][value];
+          return value;
+        }
+        function answerFor(tokens, rule) {
+          const first = mapDirection(tokens[0], rule);
+          if (tokens.length === 1) return first;
+          return (first + mapDirection(tokens[1], rule)) % 4;
+        }
+        function buildRule(settings) {
+          const rotation = (state.questionNo + Math.floor(state.elapsed / 7) + 1) % 4;
+          const mirrorAxis = settings.mirror ? ((Math.floor(state.questionNo / 2) + Math.floor(state.elapsed / 6)) % 2 ? "horizontal" : "vertical") : null;
+          return { rotation, mirrorAxis, composite: settings.composite };
+        }
+        function makeTokens(composite) {
+          if (!composite) return [Math.floor(random() * 4)];
+          return [Math.floor(random() * 4), Math.floor(random() * 4)];
+        }
+        function newQuestion() {
+          if (state.mode !== "running") return;
+          const settings = difficultyAt(state.elapsed), rule = buildRule(settings), examples = [];
+          const usedSingles = [], usedTokenKeys = new Set();
+          const uniqueCompositeTokens = () => {
+            let tokens = makeTokens(true), key = tokens.join("");
+            for (let attempt = 0; usedTokenKeys.has(key) && attempt < 12; attempt += 1) { tokens = makeTokens(true); key = tokens.join(""); }
+            usedTokenKeys.add(key); return tokens;
+          };
+          for (let i = 0; i < settings.exampleCount; i += 1) {
+            let tokens;
+            if (settings.composite) tokens = uniqueCompositeTokens();
+            else { let base = (i + state.questionNo + 1) % 4; while (usedSingles.includes(base)) base = (base + 1) % 4; usedSingles.push(base); tokens = [base]; }
+            examples.push({ tokens, answer: answerFor(tokens, rule) });
+          }
+          let query = settings.composite ? uniqueCompositeTokens() : makeTokens(false);
+          if (!settings.composite && usedSingles.length >= 3) query = [[0,1,2,3].find((v) => !usedSingles.includes(v)) ?? Math.floor(random() * 4)];
+          state.question = { rule, examples, query, answer: answerFor(query, rule) };
+          state.questionTimer = 0; state.questionY = 220; state.questionNo += 1; state.nextQuestion = 0;
+        }
+        function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch (_) { return false; } }
+        function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+        function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: "cipher-rain", stageTitle: "암호 폭우", reason, durationSec: +state.lastRunTime.toFixed(1) }); }
+        function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: "cipher-rain", stageTitle: "암호 폭우", clearCountAfter: relayContext.clearCount + 1, durationSec: +state.lastRunTime.toFixed(1) }); }
+        function startStage() {
+          Object.assign(state, { mode: "running", elapsed: 0, lastRunTime: 0, solved: 0, errors: 0, reason: "", questionNo: 0, question: null, questionTimer: 0, questionY: 220, nextQuestion: 0, seed: 0x51f15e, drops: [], dropTimer: 0, flash: 0, feedback: "", feedbackTimer: 0 });
+          window.relayStageResult.status = "running"; hostFailedReported = false; hostClearedReported = false; newQuestion();
+        }
+        function failStage(reason) { if (state.mode !== "running") return; state.mode = "failed"; state.reason = reason; state.lastRunTime = state.elapsed; window.relayStageResult.status = "failed"; reportFailed(reason); }
+        function clearStage() { if (state.mode !== "running") return; state.mode = "cleared"; state.lastRunTime = state.elapsed; window.relayStageResult.status = "cleared"; reportCleared(); }
+        function markWrong(reason) {
+          if (state.elapsed >= 5) state.errors += 1;
+          state.feedback = state.elapsed < 5 ? "GRACE · RULE UPDATED" : reason === "timeout" ? "SIGNAL LOST" : "WRONG KEY";
+          state.feedbackTimer = 0.48; state.flash = -1; state.question = null; state.nextQuestion = 0.25;
+          if (state.errors >= 3) failStage("three_errors");
+        }
+        function chooseAnswer(index) {
+          if (state.mode !== "running" || !state.question) return false;
+          if (index === state.question.answer) {
+            state.solved += 1; state.feedback = "DECODED"; state.feedbackTimer = 0.38; state.flash = 1; state.question = null; state.nextQuestion = 0.22;
+            if (state.solved >= 18) clearStage();
+            return true;
+          }
+          markWrong("wrong"); return false;
+        }
+        function spawnDrop() {
+          const base = Math.floor(random() * 4);
+          state.drops.push({ x: 34 + random() * 892, y: -24, glyph: GLYPHS[base], drift: (random() - .5) * 26, alpha: .12 + random() * .22, scale: .7 + random() * .8 });
+        }
+        function update(dt) {
+          if (state.mode !== "running") return;
+          state.elapsed += dt; if (state.elapsed >= LIMIT) { failStage("time_limit"); return; }
+          const settings = difficultyAt(state.elapsed);
+          state.dropTimer -= dt;
+          if (state.dropTimer <= 0) { spawnDrop(); state.dropTimer = lerp(.36, .11, settings.difficulty); }
+          state.drops.forEach((drop, i) => { const jitter = Math.sin(state.elapsed * 11 + i * 2.1) * settings.glitchRate; drop.y += settings.fallSpeed * (0.58 + drop.scale * .3 + jitter * .12) * dt; drop.x += drop.drift * dt; });
+          state.drops = state.drops.filter((drop) => drop.y < H + 40);
+          if (state.question) {
+            state.questionTimer += dt; state.questionY += settings.fallSpeed * 0.65 * dt;
+            if (state.questionTimer >= settings.answerWindow || state.questionY >= 398) markWrong("timeout");
+          } else if (state.nextQuestion > 0 && state.mode === "running") { state.nextQuestion -= dt; if (state.nextQuestion <= 0) newQuestion(); }
+          state.feedbackTimer = Math.max(0, state.feedbackTimer - dt); state.flash += state.flash > 0 ? -dt * 3.2 : state.flash < 0 ? dt * 3.2 : 0; if (Math.abs(state.flash) < .03) state.flash = 0;
+        }
+
+        function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+        function tokenText(tokens) { return tokens.map((value) => GLYPHS[value]).join(" ⊕ "); }
+        function drawBackground() {
+          ctx.fillStyle = COLORS.ink; ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(140,124,255,.09)"; ctx.lineWidth = 1;
+          for (let x = 40; x < W; x += 64) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+          state.drops.forEach((drop) => { ctx.globalAlpha = drop.alpha; ctx.fillStyle = COLORS.violet; ctx.font = `${Math.round(22 * drop.scale)}px Trebuchet MS`; ctx.textAlign = "center"; ctx.fillText(drop.glyph, drop.x, drop.y); }); ctx.globalAlpha = 1; ctx.textAlign = "left";
+          ctx.fillStyle = "rgba(200,255,90,.035)"; ctx.fillRect(0, 0, W, 88);
+        }
+        function drawHud() {
+          const settings = difficultyAt(state.elapsed);
+          const labels = [["TIME", Math.max(0, LIMIT - state.elapsed).toFixed(1)], ["SOLVED", `${state.solved}/18`], ["ERRORS", `${state.errors}/3`], ["WINDOW", `${settings.answerWindow.toFixed(1)}s`]];
+          ctx.fillStyle = "rgba(4,5,10,.8)"; ctx.fillRect(18, 18, 580, 60);
+          labels.forEach(([label, value], i) => { const x = 32 + i * 140; ctx.fillStyle = "rgba(200,255,90,.5)"; ctx.font = "700 11px Trebuchet MS"; ctx.fillText(label, x, 38); ctx.fillStyle = i === 2 && state.errors > 1 ? COLORS.violet : COLORS.acid; ctx.font = "800 24px Trebuchet MS"; ctx.fillText(value, x, 64); });
+          ctx.textAlign = "right"; ctx.fillStyle = COLORS.violet; ctx.font = "800 13px Trebuchet MS"; ctx.fillText(settings.phase, 934, 38); ctx.fillStyle = "rgba(200,255,90,.56)"; ctx.font = "600 12px Trebuchet MS"; ctx.fillText(settings.composite ? "TURN + TURN · MOD 4" : settings.mirror ? "INFER MIRROR AXIS" : "INFER QUARTER TURN", 934, 61); ctx.textAlign = "left";
+        }
+        function drawExamples() {
+          if (!state.question) return; const settings = difficultyAt(state.elapsed), examples = state.question.examples;
+          const totalW = examples.length * 174 + (examples.length - 1) * 12, startX = (W - totalW) / 2;
+          const glitchActive = !reducedMotion && ((state.elapsed * 7.3) % 1) < settings.glitchRate * .16;
+          ctx.textAlign = "center";
+          examples.forEach((example, i) => {
+            const x = startX + i * 186; ctx.fillStyle = "rgba(4,5,10,.76)"; roundRect(x, 102, 174, 64, 6); ctx.fill(); ctx.strokeStyle = "rgba(140,124,255,.45)"; ctx.lineWidth = 1; roundRect(x, 102, 174, 64, 6); ctx.stroke();
+            ctx.globalAlpha = glitchActive && i === examples.length - 1 ? .2 : 1; ctx.fillStyle = COLORS.acid; ctx.font = "800 28px Trebuchet MS"; ctx.fillText(tokenText(example.tokens), x + 66, 143); ctx.fillStyle = COLORS.violet; ctx.font = "900 28px Trebuchet MS"; ctx.fillText(ARROWS[example.answer], x + 136, 143); ctx.globalAlpha = 1;
+          }); ctx.textAlign = "left";
+        }
+        function drawQuestion() {
+          if (!state.question) return; const settings = difficultyAt(state.elapsed), progress = clamp(state.questionTimer / settings.answerWindow, 0, 1);
+          ctx.textAlign = "center"; ctx.fillStyle = "rgba(4,5,10,.88)"; roundRect(332, state.questionY - 42, 296, 84, 10); ctx.fill(); ctx.strokeStyle = COLORS.acid; ctx.lineWidth = 2; roundRect(332, state.questionY - 42, 296, 84, 10); ctx.stroke();
+          ctx.fillStyle = COLORS.acid; ctx.font = state.question.query.length > 1 ? "900 43px Trebuchet MS" : "900 50px Trebuchet MS"; ctx.fillText(tokenText(state.question.query), 480, state.questionY + 16);
+          ctx.fillStyle = "rgba(200,255,90,.14)"; ctx.fillRect(332, state.questionY + 48, 296, 5); ctx.fillStyle = progress > .75 ? COLORS.violet : COLORS.acid; ctx.fillRect(332, state.questionY + 48, 296 * (1 - progress), 5); ctx.textAlign = "left";
+        }
+        function drawFeedback() { if (state.feedbackTimer <= 0) return; ctx.textAlign = "center"; ctx.fillStyle = state.feedback === "DECODED" ? COLORS.acid : COLORS.violet; ctx.font = "900 24px Trebuchet MS"; ctx.fillText(state.feedback, 480, 304); ctx.textAlign = "left"; }
+        function drawCard(title, lines, accent = COLORS.violet) {
+          drawBackground(); ctx.fillStyle = "rgba(4,5,10,.93)"; roundRect(128, 92, 704, 356, 9); ctx.fill(); ctx.strokeStyle = accent; ctx.lineWidth = 3; roundRect(128, 92, 704, 356, 9); ctx.stroke();
+          ctx.textAlign = "center"; ctx.fillStyle = accent; ctx.font = "800 42px Trebuchet MS"; ctx.fillText(title, 480, 157); ctx.fillStyle = COLORS.acid; ctx.font = "600 20px Trebuchet MS"; lines.forEach((line, i) => ctx.fillText(line, 480, 214 + i * 35)); ctx.fillStyle = "rgba(200,255,90,.52)"; ctx.font = "700 14px Trebuchet MS"; ctx.fillText("TOUCH OR ENTER", 480, 414); ctx.textAlign = "left";
+        }
+        function render() {
+          if (state.mode === "menu") { drawCard("암호 폭우", ["변하는 치환 규칙을 추론해 기호 폭우를 해독하세요.", "떨어지는 기호를 터치해 해독 키를 선택", "규칙이 바뀌는 암호 18개를 연속 해독", "오답 3회 또는 35초 초과 시 실패", "예시의 회전·거울·합성 규칙을 읽고 1–4로 답하세요."]); return; }
+          if (state.mode === "failed") { drawCard("CIPHER COLLAPSED", ["오답 3회 또는 35초 초과 시 실패", `원인: ${state.reason}`, `해독: ${state.solved}/18 · 오답 ${state.errors}`, "터치 또는 Enter로 재시작"], COLORS.acid); return; }
+          if (state.mode === "cleared") { drawCard("KEY STREAM OPEN", ["규칙이 바뀌는 암호 18개를 연속 해독", `기록 ${state.lastRunTime.toFixed(1)}초 · 오답 ${state.errors}`, "회전, 거울, 두 기호 합성을 모두 해독했습니다.", "터치 또는 Enter로 다시 분석"], COLORS.violet); return; }
+          drawBackground(); drawHud(); drawExamples(); drawQuestion(); drawFeedback();
+          if (state.elapsed < 5) { ctx.fillStyle = "rgba(200,255,90,.68)"; ctx.font = "800 12px Trebuchet MS"; ctx.fillText("GRACE ANALYSIS · ERRORS DISABLED", 28, 96); }
+          if (state.flash) { ctx.fillStyle = state.flash > 0 ? `rgba(200,255,90,${state.flash * .08})` : `rgba(140,124,255,${-state.flash * .12})`; ctx.fillRect(0, 0, W, H); }
+        }
+
+        canvas.addEventListener("pointerdown", (event) => { event.preventDefault(); canvas.focus(); if (state.mode !== "running") startStage(); });
+        document.querySelectorAll("[data-answer]").forEach((button) => {
+          button.addEventListener("pointerdown", (event) => { event.preventDefault(); canvas.focus(); if (state.mode !== "running") startStage(); button.dataset.active = "true"; chooseAnswer(Number(button.dataset.answer)); button.setPointerCapture?.(event.pointerId); });
+          const release = (event) => { event.preventDefault(); button.dataset.active = "false"; };
+          button.addEventListener("pointerup", release); button.addEventListener("pointercancel", release); button.addEventListener("lostpointercapture", release);
+        });
+        window.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && state.mode !== "running") { event.preventDefault(); startStage(); return; }
+          if (/^[1-4]$/.test(event.key)) { event.preventDefault(); if (state.mode !== "running") startStage(); else chooseAnswer(Number(event.key) - 1); }
+        });
+
+        function renderGameToText() {
+          const settings = difficultyAt(state.elapsed); return JSON.stringify({ coordinate_system: "960x540 canvas; query descends toward answer row", mode: state.mode, elapsed: +state.elapsed.toFixed(2), difficulty: +settings.difficulty.toFixed(3), phase: settings.phase,
+            actual_difficulty_parameters: { answer_window_sec: +settings.answerWindow.toFixed(3), fall_speed: +settings.fallSpeed.toFixed(2), example_count: settings.exampleCount, glitch_rate: +settings.glitchRate.toFixed(3), mirror_rule: settings.mirror, composite_rule: settings.composite },
+            solved: state.solved, errors: state.errors, grace_active: state.elapsed < 5, question: state.question ? { examples: state.question.examples.map((e) => ({ glyphs: tokenText(e.tokens), answer_index: e.answer + 1 })), glyphs: tokenText(state.question.query), correct_answer_index: state.question.answer + 1, timer: +state.questionTimer.toFixed(2), y: +state.questionY.toFixed(1), rotation_quarters: state.question.rule.rotation, mirror_axis: state.question.rule.mirrorAxis } : null, result: window.relayStageResult.status });
+        }
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => { const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < steps; i += 1) update(FIXED_DT); render(); return renderGameToText(); };
+        window.relayStageMeta = { id: "cipher-rain", title: "암호 폭우", creator: "jungcollin", genre: "Cipher deduction", description: "변하는 치환 규칙을 추론해 기호 폭우를 해독하세요.", controls: "떨어지는 기호를 터치해 해독 키를 선택", clearCondition: "규칙이 바뀌는 암호 18개를 연속 해독", failCondition: "오답 3회 또는 35초 초과 시 실패" };
+        window.relayStageResult = { status: "menu" };
+        window.relayStageDebug = {
+          forceClear() { startStage(); state.solved = 18; clearStage(); render(); },
+          forceFail() { startStage(); state.elapsed = 6; state.errors = 3; failStage("debug_force_fail"); render(); },
+          difficultyAt,
+          currentAnswer() { return state.question ? state.question.answer + 1 : null; },
+          prepareKnownQuestion(seconds = 6) { startStage(); state.elapsed = clamp(seconds, 0, LIMIT - 1); state.questionNo = Math.floor(seconds); newQuestion(); render(); return JSON.parse(renderGameToText()); },
+        };
+        function frame(timestamp) { const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT; lastTimestamp = timestamp; update(dt); render(); animationFrame = requestAnimationFrame(frame); }
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+        reportReady(); render(); animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

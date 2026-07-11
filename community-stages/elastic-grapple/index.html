@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>탄성 궤도</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+      body { display: grid; place-items: center; background: #02040a; color: #6ee7e0; font-family: "Trebuchet MS", "Segoe UI", sans-serif; }
+      .skip-link { position: fixed; left: 12px; top: 12px; z-index: 20; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); color: #090d18; background: #6ee7e0; font-weight: 800; }
+      .skip-link:focus-visible { width: auto; height: auto; padding: 10px 14px; clip-path: none; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+      .stage { position: relative; width: min(100vw, calc(100svh * 16 / 9)); height: min(100svh, max(min(220px, 100svh), calc(100vw * 9 / 16))); max-width: 100%; max-height: 100%; }
+      canvas { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; aspect-ratio: 16 / 9; background: #090d18; touch-action: none; -webkit-tap-highlight-color: transparent; }
+      canvas:focus-visible { outline: 3px solid #f05c8f; outline-offset: -5px; }
+      .controls { position: absolute; left: 0; right: 0; bottom: 10px; z-index: 5; display: flex; justify-content: center; gap: 8px; padding: 0 10px; pointer-events: none; }
+      .control { pointer-events: auto; min-width: 58px; min-height: 48px; padding: 0 13px; border: 1px solid rgba(110,231,224,.48); border-radius: 999px; color: #6ee7e0; background: rgba(9,13,24,.91); font: 800 13px/1 "Trebuchet MS", sans-serif; touch-action: none; }
+      .control--grapple { min-width: 92px; border-color: #f05c8f; background: #f05c8f; color: #090d18; }
+      .control[data-active="true"] { transform: scale(.96); filter: brightness(1.15); }
+      @media (hover: hover) and (pointer: fine) { .controls { opacity: .42; } }
+      @media (max-width: 520px) { .controls { bottom: 5px; gap: 5px; padding: 0 5px; } .control { min-width: 44px; min-height: 44px; padding: 0 9px; font-size: 11px; } .control--grapple { min-width: 72px; } }
+      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">탄성 궤도. 앵커를 터치 드래그해 장력을 정하고 놓아 발사. 키보드는 Q와 E로 앵커 선택, Space로 연결 또는 해제, 위아래 방향키로 로프 길이를 조절합니다.</p>
+    <main class="stage" aria-label="탄성 궤도 게임 영역">
+      <canvas id="game" width="960" height="540" tabindex="0" aria-label="탄성 궤도" aria-describedby="stage-instructions"></canvas>
+      <div class="controls" aria-label="그래플 조작">
+        <button class="control" type="button" data-control="previous" aria-label="이전 앵커 선택">ANCHOR −</button>
+        <button class="control control--grapple" type="button" data-control="grapple" aria-label="선택 앵커 연결 또는 해제">GRAPPLE</button>
+        <button class="control" type="button" data-control="next" aria-label="다음 앵커 선택">ANCHOR +</button>
+        <button class="control" type="button" data-control="reel" aria-label="로프 감기">REEL</button>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+        const canvas = document.querySelector("#game"), ctx = canvas.getContext("2d");
+        const W = 960, H = 540, FIXED_DT = 1 / 60, MAX_DT = 1 / 20, LIMIT = 35;
+        const COLORS = { void: "#090d18", cyan: "#6ee7e0", pink: "#f05c8f" };
+        const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const relayContext = window.RelayRuntime?.readContext("elastic-grapple") || { history: [], clearCount: 0, previousStageId: null };
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const lerp = (a, b, t) => a + (b - a) * t;
+        const ringY = [268, 358, 182, 312, 214, 374, 168, 294, 386, 206, 330, 244];
+        const rings = ringY.map((y, i) => ({ x: 330 + i * 210, y }));
+        const anchorY = [126, 392, 116, 372, 150, 405, 112, 362, 142, 402, 118, 348, 160, 390];
+        const anchors = anchorY.map((y, i) => ({ x: 218 + i * 205, baseY: y }));
+        let animationFrame = 0, lastTimestamp = 0, hostFailedReported = false, hostClearedReported = false;
+        const input = { pointerActive: false, pointerId: null, dragX: 0, dragY: 0, reel: false };
+        const state = {
+          mode: "menu", elapsed: 0, lastRunTime: 0, rings: 0, reason: "", cameraX: 0,
+          player: { x: 108, y: 272, vx: 142, vy: -8, r: 13 },
+          selectedAnchor: 0, attached: null, tension: 0, overload: 0, flash: 0, trail: [], particles: [],
+        };
+
+        function phaseAt(seconds) { return seconds < 10 ? "LOOSE LINE" : seconds < 23 ? "MOVING RIG" : "REDLINE"; }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(seconds / LIMIT, 0, 1);
+          return {
+            difficulty, phase: phaseAt(seconds),
+            gravity: lerp(158, 248, difficulty),
+            ringRadius: lerp(39, 24, difficulty),
+            anchorDrift: lerp(2, 34, difficulty),
+            windAmplitude: lerp(4, 72, difficulty),
+            maxTension: lerp(1160, 760, difficulty),
+            baseSpring: lerp(7.2, 10.8, difficulty),
+          };
+        }
+        function anchorAt(index, seconds = state.elapsed) {
+          const base = anchors[clamp(index, 0, anchors.length - 1)], settings = difficultyAt(seconds);
+          return { x: base.x, y: base.baseY + Math.sin(seconds * (0.55 + settings.difficulty * 0.75) + index * 1.31) * settings.anchorDrift };
+        }
+        function nearestForwardAnchor() {
+          let best = 0, score = Infinity;
+          anchors.forEach((_, i) => { const a = anchorAt(i); const dx = a.x - state.player.x; if (dx < -120 || dx > 520) return; const s = Math.abs(dx - 180) + Math.abs(a.y - state.player.y) * 0.25; if (s < score) { score = s; best = i; } });
+          return best;
+        }
+        function inRelayHost() { try { return window.parent && window.parent !== window && window.parent.RelayHost; } catch (_) { return false; } }
+        function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+        function reportFailed(reason) { if (!inRelayHost() || hostFailedReported) return; hostFailedReported = true; window.parent.RelayHost.onStageFailed?.({ stageId: "elastic-grapple", stageTitle: "탄성 궤도", reason, durationSec: +state.lastRunTime.toFixed(1) }); }
+        function reportCleared() { if (!inRelayHost() || hostClearedReported) return; hostClearedReported = true; window.parent.RelayHost.onStageCleared?.({ stageId: "elastic-grapple", stageTitle: "탄성 궤도", clearCountAfter: relayContext.clearCount + 1, durationSec: +state.lastRunTime.toFixed(1) }); }
+        function startStage() {
+          Object.assign(state, { mode: "running", elapsed: 0, lastRunTime: 0, rings: 0, reason: "", cameraX: 0, player: { x: 108, y: 272, vx: 142, vy: -8, r: 13 }, selectedAnchor: 0, attached: null, tension: 0, overload: 0, flash: 0, trail: [], particles: [] });
+          Object.assign(input, { pointerActive: false, pointerId: null, reel: false }); state.selectedAnchor = nearestForwardAnchor();
+          window.relayStageResult.status = "running"; hostFailedReported = false; hostClearedReported = false;
+        }
+        function failStage(reason) { if (state.mode !== "running") return; state.mode = "failed"; state.reason = reason; state.lastRunTime = state.elapsed; window.relayStageResult.status = "failed"; reportFailed(reason); }
+        function clearStage() { if (state.mode !== "running") return; state.mode = "cleared"; state.lastRunTime = state.elapsed; window.relayStageResult.status = "cleared"; reportCleared(); }
+        function attach(index, restLength = null, stiffness = null) {
+          const a = anchorAt(index), distance = Math.hypot(a.x - state.player.x, a.y - state.player.y);
+          state.selectedAnchor = index;
+          state.attached = { index, restLength: restLength ?? clamp(distance * 0.76, 78, 238), stiffness: stiffness ?? difficultyAt(state.elapsed).baseSpring };
+          state.overload = 0; return true;
+        }
+        function detach() { if (!state.attached) return false; state.attached = null; state.tension = 0; state.overload = 0; return true; }
+        function toggleGrapple() { if (state.mode !== "running") { startStage(); return; } if (state.attached) detach(); else attach(state.selectedAnchor); }
+        function selectAnchor(direction) {
+          if (state.mode !== "running") { startStage(); return; }
+          let next = state.selectedAnchor + direction; next = clamp(next, 0, anchors.length - 1); state.selectedAnchor = next;
+          if (state.attached) attach(next);
+        }
+        function burst(x, y) { const count = reducedMotion ? 5 : 16; for (let i = 0; i < count; i += 1) { const a = i / count * Math.PI * 2; state.particles.push({ x, y, vx: Math.cos(a) * 72, vy: Math.sin(a) * 72, life: 1 }); } }
+        function wallCollision() {
+          const p = state.player;
+          if (state.elapsed < 5) { p.y = clamp(p.y, 76, 464); p.vy *= -0.52; p.vx = Math.max(88, p.vx * 0.82); state.flash = 0.35; }
+          else failStage("wall_collision");
+        }
+        function update(dt) {
+          if (state.mode !== "running") return;
+          state.elapsed += dt; if (state.elapsed >= LIMIT) { failStage("closing_wall"); return; }
+          const settings = difficultyAt(state.elapsed), p = state.player;
+          let ax = Math.sin(state.elapsed * 1.37) * settings.windAmplitude, ay = settings.gravity;
+          if (state.attached) {
+            const a = anchorAt(state.attached.index), dx = a.x - p.x, dy = a.y - p.y, distance = Math.max(1, Math.hypot(dx, dy));
+            if (input.reel) state.attached.restLength = Math.max(68, state.attached.restLength - 74 * dt);
+            const extension = Math.max(0, distance - state.attached.restLength), nx = dx / distance, ny = dy / distance;
+            state.tension = extension * state.attached.stiffness;
+            const radialVelocity = p.vx * nx + p.vy * ny;
+            if (extension > 0) { const springAccel = state.tension - radialVelocity * 0.72; ax += nx * springAccel; ay += ny * springAccel; }
+            if (state.tension > settings.maxTension && state.elapsed >= 5) state.overload += dt; else state.overload = Math.max(0, state.overload - dt * 2.4);
+            if (state.overload > 0.22) { failStage("rope_overload"); return; }
+          } else { state.tension = 0; state.overload = 0; }
+          p.vx += ax * dt; p.vy += ay * dt; p.vx *= Math.pow(0.9985, dt * 60); p.vy *= Math.pow(0.999, dt * 60);
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          if (p.y - p.r < 56 || p.y + p.r > 488) wallCollision();
+          if (p.x < state.cameraX - 70) { if (state.elapsed < 5) { p.x = state.cameraX + 20; p.vx = 100; } else failStage("wall_collision"); }
+          const ring = rings[state.rings];
+          if (ring && Math.hypot(p.x - ring.x, p.y - ring.y) <= settings.ringRadius + p.r) {
+            state.rings += 1; state.flash = 1; burst(ring.x, ring.y); state.selectedAnchor = nearestForwardAnchor();
+            if (state.rings >= rings.length) { clearStage(); return; }
+          }
+          state.cameraX += (clamp(p.x - 250, 0, rings[rings.length - 1].x - 620) - state.cameraX) * Math.min(1, dt * 4.5);
+          if (!state.attached && Math.abs(anchorAt(state.selectedAnchor).x - p.x) > 560) state.selectedAnchor = nearestForwardAnchor();
+          state.trail.push({ x: p.x, y: p.y, life: 1 }); if (state.trail.length > (reducedMotion ? 5 : 22)) state.trail.shift();
+          state.trail.forEach((t) => { t.life -= dt * 2.2; }); state.trail = state.trail.filter((t) => t.life > 0);
+          state.flash = Math.max(0, state.flash - dt * 2.8);
+          state.particles.forEach((q) => { q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt * 1.5; }); state.particles = state.particles.filter((q) => q.life > 0);
+        }
+
+        function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+        function sx(worldX) { return worldX - state.cameraX; }
+        function drawBackground() {
+          ctx.fillStyle = COLORS.void; ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(110,231,224,.08)"; ctx.lineWidth = 1;
+          const start = -state.cameraX % 80;
+          for (let x = start; x < W; x += 80) { ctx.beginPath(); ctx.moveTo(x, 56); ctx.lineTo(x, 488); ctx.stroke(); }
+          for (let y = 92; y < 488; y += 66) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+          ctx.fillStyle = "rgba(240,92,143,.12)"; ctx.fillRect(0, 44, W, 12); ctx.fillRect(0, 488, W, 12);
+          ctx.strokeStyle = COLORS.pink; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, 56); ctx.lineTo(W, 56); ctx.moveTo(0, 488); ctx.lineTo(W, 488); ctx.stroke();
+        }
+        function drawWorld() {
+          const settings = difficultyAt(state.elapsed);
+          rings.forEach((ring, i) => { const x = sx(ring.x); if (x < -80 || x > W + 80) return; const current = i === state.rings; const passed = i < state.rings; ctx.globalAlpha = passed ? .18 : current ? 1 : .35; ctx.strokeStyle = current ? COLORS.pink : COLORS.cyan; ctx.lineWidth = current ? 7 : 3; ctx.beginPath(); ctx.arc(x, ring.y, settings.ringRadius, 0, Math.PI * 2); ctx.stroke(); if (current) { ctx.fillStyle = COLORS.pink; ctx.font = "800 12px Trebuchet MS"; ctx.textAlign = "center"; ctx.fillText(`${i + 1}`, x, ring.y + 4); } ctx.globalAlpha = 1; });
+          anchors.forEach((_, i) => { const a = anchorAt(i), x = sx(a.x); if (x < -60 || x > W + 60) return; const selected = i === state.selectedAnchor, linked = state.attached?.index === i; ctx.strokeStyle = selected ? COLORS.pink : "rgba(110,231,224,.48)"; ctx.lineWidth = selected ? 3 : 2; ctx.beginPath(); ctx.arc(x, a.y, selected ? 16 : 10, 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = linked ? COLORS.pink : COLORS.cyan; ctx.beginPath(); ctx.arc(x, a.y, 4, 0, Math.PI * 2); ctx.fill(); });
+        }
+        function drawRopeAndPlayer() {
+          const p = state.player, px = sx(p.x);
+          if (state.attached) { const a = anchorAt(state.attached.index), ax = sx(a.x); ctx.strokeStyle = state.tension > difficultyAt(state.elapsed).maxTension * .82 ? COLORS.pink : COLORS.cyan; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(ax, a.y); ctx.lineTo(px, p.y); ctx.stroke(); const ratio = clamp(state.tension / difficultyAt(state.elapsed).maxTension, 0, 1); ctx.strokeStyle = "rgba(240,92,143,.35)"; ctx.lineWidth = 1 + ratio * 5; ctx.beginPath(); ctx.moveTo(ax, a.y); ctx.lineTo(px, p.y); ctx.stroke(); }
+          state.trail.forEach((t) => { ctx.globalAlpha = t.life * .34; ctx.fillStyle = COLORS.cyan; ctx.beginPath(); ctx.arc(sx(t.x), t.y, 3, 0, Math.PI * 2); ctx.fill(); }); ctx.globalAlpha = 1;
+          ctx.save(); ctx.translate(px, p.y); const heading = Math.atan2(p.vy, p.vx); ctx.rotate(heading); ctx.fillStyle = COLORS.cyan; ctx.beginPath(); ctx.moveTo(19, 0); ctx.lineTo(-10, -12); ctx.lineTo(-5, 0); ctx.lineTo(-10, 12); ctx.closePath(); ctx.fill(); ctx.fillStyle = COLORS.void; ctx.beginPath(); ctx.arc(1, 0, 5, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = COLORS.pink; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-8, -9); ctx.lineTo(-8, 9); ctx.stroke(); ctx.restore();
+        }
+        function drawDragGuide() {
+          if (!input.pointerActive) return; const a = anchorAt(state.selectedAnchor); ctx.strokeStyle = "rgba(240,92,143,.75)"; ctx.setLineDash([6, 5]); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(sx(a.x), a.y); ctx.lineTo(input.dragX, input.dragY); ctx.stroke(); ctx.setLineDash([]);
+        }
+        function drawHud() {
+          const settings = difficultyAt(state.elapsed), speed = Math.hypot(state.player.vx, state.player.vy);
+          const labels = [["TIME", Math.max(0, LIMIT - state.elapsed).toFixed(1)], ["RINGS", `${state.rings}/12`], ["TENSION", `${Math.round(state.tension)}`], ["SPEED", `${Math.round(speed)}`]];
+          ctx.fillStyle = "rgba(2,4,10,.76)"; ctx.fillRect(18, 18, 580, 60);
+          labels.forEach(([label, value], i) => { const x = 32 + i * 140; ctx.fillStyle = "rgba(110,231,224,.58)"; ctx.font = "700 11px Trebuchet MS"; ctx.fillText(label, x, 38); ctx.fillStyle = i === 2 && state.tension > settings.maxTension * .82 ? COLORS.pink : COLORS.cyan; ctx.font = "800 24px Trebuchet MS"; ctx.fillText(value, x, 64); });
+          ctx.textAlign = "right"; ctx.fillStyle = COLORS.pink; ctx.font = "800 13px Trebuchet MS"; ctx.fillText(settings.phase, 934, 38); ctx.fillStyle = "rgba(110,231,224,.56)"; ctx.font = "600 12px Trebuchet MS"; ctx.fillText(`RING ${Math.round(settings.ringRadius)} · LIMIT ${Math.round(settings.maxTension)}`, 934, 61); ctx.textAlign = "left";
+        }
+        function drawCard(title, lines, accent = COLORS.pink) {
+          drawBackground(); ctx.fillStyle = "rgba(2,4,10,.92)"; roundRect(128, 92, 704, 356, 18); ctx.fill(); ctx.strokeStyle = accent; ctx.lineWidth = 3; roundRect(128, 92, 704, 356, 18); ctx.stroke();
+          ctx.textAlign = "center"; ctx.fillStyle = accent; ctx.font = "800 42px Trebuchet MS"; ctx.fillText(title, 480, 157); ctx.fillStyle = COLORS.cyan; ctx.font = "600 20px Trebuchet MS"; lines.forEach((line, i) => ctx.fillText(line, 480, 214 + i * 35)); ctx.fillStyle = "rgba(110,231,224,.55)"; ctx.font = "700 14px Trebuchet MS"; ctx.fillText("TOUCH OR ENTER", 480, 414); ctx.textAlign = "left";
+        }
+        function render() {
+          if (state.mode === "menu") { drawCard("탄성 궤도", ["탄성 로프의 장력과 관성으로 움직이는 앵커를 넘으세요.", "앵커를 터치 드래그해 장력을 정하고 놓아 발사", "35초 안에 에너지 링 12개 통과", "벽 충돌 또는 로프 장력 초과 시 실패", "접선 속도는 해제 뒤에도 그대로 보존됩니다."]); return; }
+          if (state.mode === "failed") { drawCard("LINE BROKEN", ["벽 충돌 또는 로프 장력 초과 시 실패", `원인: ${state.reason}`, `통과 링: ${state.rings}/12`, "터치 또는 Enter로 재시작"], COLORS.cyan); return; }
+          if (state.mode === "cleared") { drawCard("ORBIT COMPLETE", ["35초 안에 에너지 링 12개 통과", `기록 ${state.lastRunTime.toFixed(1)}초`, "로프 장력과 운동량을 끝까지 연결했습니다.", "터치 또는 Enter로 다시 활강"], COLORS.pink); return; }
+          drawBackground(); drawWorld(); drawRopeAndPlayer(); drawDragGuide(); drawHud();
+          state.particles.forEach((p) => { ctx.globalAlpha = p.life; ctx.fillStyle = COLORS.pink; ctx.fillRect(sx(p.x) - 2, p.y - 2, 4, 4); }); ctx.globalAlpha = 1;
+          if (state.flash > 0) { ctx.fillStyle = `rgba(240,92,143,${state.flash * .12})`; ctx.fillRect(0, 0, W, H); }
+        }
+
+        function pointerPoint(event) {
+          const rect = canvas.getBoundingClientRect(), boxRatio = rect.width / rect.height, ratio = W / H;
+          const contentWidth = boxRatio > ratio ? rect.height * ratio : rect.width, contentHeight = boxRatio > ratio ? rect.height : rect.width / ratio;
+          const offsetX = rect.left + (rect.width - contentWidth) / 2, offsetY = rect.top + (rect.height - contentHeight) / 2;
+          return { x: clamp((event.clientX - offsetX) * W / contentWidth, 0, W), y: clamp((event.clientY - offsetY) * H / contentHeight, 0, H) };
+        }
+        canvas.addEventListener("pointerdown", (event) => {
+          event.preventDefault(); canvas.focus(); if (state.mode !== "running") { startStage(); return; }
+          const p = pointerPoint(event); let best = -1, bestDistance = 54;
+          anchors.forEach((_, i) => { const a = anchorAt(i), d = Math.hypot(sx(a.x) - p.x, a.y - p.y); if (d < bestDistance) { best = i; bestDistance = d; } });
+          if (best < 0) return; input.pointerActive = true; input.pointerId = event.pointerId; input.dragX = p.x; input.dragY = p.y; state.selectedAnchor = best; attach(best, 230, difficultyAt(state.elapsed).baseSpring); canvas.setPointerCapture?.(event.pointerId);
+        });
+        canvas.addEventListener("pointermove", (event) => {
+          if (!input.pointerActive || event.pointerId !== input.pointerId || !state.attached) return; event.preventDefault(); const p = pointerPoint(event); input.dragX = p.x; input.dragY = p.y; const a = anchorAt(state.attached.index); const drag = Math.hypot(sx(a.x) - p.x, a.y - p.y); state.attached.restLength = clamp(232 - drag * .72, 68, 232); state.attached.stiffness = lerp(difficultyAt(state.elapsed).baseSpring, 14.5, clamp(drag / 180, 0, 1));
+        });
+        function releasePointer(event) { if (!input.pointerActive || event.pointerId !== input.pointerId) return; event.preventDefault(); input.pointerActive = false; input.pointerId = null; detach(); }
+        canvas.addEventListener("pointerup", releasePointer); canvas.addEventListener("pointercancel", releasePointer);
+        document.querySelectorAll("[data-control]").forEach((button) => {
+          const name = button.dataset.control;
+          const release = (event) => { event.preventDefault(); button.dataset.active = "false"; if (name === "reel") input.reel = false; };
+          button.addEventListener("pointerdown", (event) => { event.preventDefault(); canvas.focus(); if (state.mode !== "running") startStage(); button.dataset.active = "true"; if (name === "previous") selectAnchor(-1); else if (name === "next") selectAnchor(1); else if (name === "grapple") toggleGrapple(); else if (name === "reel") input.reel = true; button.setPointerCapture?.(event.pointerId); });
+          button.addEventListener("pointerup", release); button.addEventListener("pointercancel", release); button.addEventListener("lostpointercapture", release);
+        });
+        window.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && state.mode !== "running") { event.preventDefault(); startStage(); return; }
+          if (event.code === "KeyQ") { event.preventDefault(); selectAnchor(-1); }
+          else if (event.code === "KeyE") { event.preventDefault(); selectAnchor(1); }
+          else if (event.code === "Space") { event.preventDefault(); toggleGrapple(); }
+          else if (event.code === "ArrowUp") { event.preventDefault(); input.reel = true; }
+          else if (event.code === "ArrowDown" && state.attached) { event.preventDefault(); state.attached.restLength = Math.min(260, state.attached.restLength + 12); }
+        });
+        window.addEventListener("keyup", (event) => { if (event.code === "ArrowUp") { event.preventDefault(); input.reel = false; } });
+
+        function renderGameToText() {
+          const settings = difficultyAt(state.elapsed), a = state.attached ? anchorAt(state.attached.index) : anchorAt(state.selectedAnchor);
+          return JSON.stringify({ coordinate_system: "world x scrolls right; canvas y 0..540; camera_x subtracts from world x", mode: state.mode, elapsed: +state.elapsed.toFixed(2), difficulty: +settings.difficulty.toFixed(3), phase: settings.phase,
+            actual_difficulty_parameters: { gravity: +settings.gravity.toFixed(2), ring_radius: +settings.ringRadius.toFixed(2), anchor_drift: +settings.anchorDrift.toFixed(2), wind_amplitude: +settings.windAmplitude.toFixed(2), max_tension: +settings.maxTension.toFixed(2), base_spring: +settings.baseSpring.toFixed(2) },
+            rings: state.rings, player: { x: +state.player.x.toFixed(1), y: +state.player.y.toFixed(1), vx: +state.player.vx.toFixed(1), vy: +state.player.vy.toFixed(1) }, grapple: { attached: Boolean(state.attached), anchor_index: state.attached?.index ?? state.selectedAnchor, anchor_x: +a.x.toFixed(1), anchor_y: +a.y.toFixed(1), rest_length: state.attached ? +state.attached.restLength.toFixed(1) : null, tension: +state.tension.toFixed(1) }, camera_x: +state.cameraX.toFixed(1), result: window.relayStageResult.status });
+        }
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => { const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < steps; i += 1) update(FIXED_DT); render(); return renderGameToText(); };
+        window.relayStageMeta = { id: "elastic-grapple", title: "탄성 궤도", creator: "jungcollin", genre: "Grapple physics", description: "탄성 로프의 장력과 관성으로 움직이는 앵커를 넘으세요.", controls: "앵커를 터치 드래그해 장력을 정하고 놓아 발사", clearCondition: "35초 안에 에너지 링 12개 통과", failCondition: "벽 충돌 또는 로프 장력 초과 시 실패" };
+        window.relayStageResult = { status: "menu" };
+        window.relayStageDebug = {
+          forceClear() { startStage(); state.rings = 12; clearStage(); render(); },
+          forceFail() { startStage(); state.elapsed = 6; failStage("debug_force_fail"); render(); },
+          difficultyAt,
+          prepareRingApproach() { startStage(); state.elapsed = 6; const ring = rings[0]; Object.assign(state.player, { x: ring.x - 62, y: ring.y, vx: 96, vy: 0 }); state.selectedAnchor = nearestForwardAnchor(); state.cameraX = 0; render(); return JSON.parse(renderGameToText()); },
+        };
+        function frame(timestamp) { const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT; lastTimestamp = timestamp; update(dt); render(); animationFrame = requestAnimationFrame(frame); }
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+        reportReady(); render(); animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

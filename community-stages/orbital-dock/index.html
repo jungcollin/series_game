@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>궤도 도킹</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+      body {
+        display: grid;
+        place-items: center;
+        background: #030a12;
+        color: #d9f6ff;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      }
+      .skip-link {
+        position: fixed; left: 12px; top: 12px; z-index: 30;
+        width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+        color: #071524; background: #d9f6ff; font-weight: 800;
+      }
+      .skip-link:focus-visible { width: auto; height: auto; padding: 10px 14px; clip-path: none; }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      .stage {
+        position: relative;
+        width: min(100vw, calc(100svh * 16 / 9));
+        height: min(100svh, max(min(220px, 100svh), calc(100vw * 9 / 16)));
+        max-width: 100%; max-height: 100%;
+      }
+      canvas {
+        display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%;
+        object-fit: contain; aspect-ratio: 16 / 9; background: #071524;
+        touch-action: none; -webkit-tap-highlight-color: transparent;
+      }
+      canvas:focus-visible { outline: 3px solid #ffb84d; outline-offset: -5px; }
+      .controls {
+        position: absolute; left: 0; right: 0; bottom: 10px; z-index: 5;
+        display: flex; justify-content: center; gap: 8px; padding: 0 10px;
+        pointer-events: none;
+      }
+      .control {
+        pointer-events: auto; min-width: 54px; min-height: 48px; padding: 0 13px;
+        border: 1px solid rgba(217,246,255,.48); border-radius: 8px;
+        color: #d9f6ff; background: rgba(7,21,36,.9);
+        font: 800 14px/1 "Trebuchet MS", sans-serif; letter-spacing: .02em;
+        touch-action: none;
+      }
+      .control--thrust { color: #071524; border-color: #ffb84d; background: #ffb84d; min-width: 86px; }
+      .control[data-active="true"] { transform: translateY(1px); filter: brightness(1.2); }
+      @media (hover: hover) and (pointer: fine) { .controls { opacity: .42; } }
+      @media (max-width: 520px) {
+        .controls { bottom: 5px; gap: 5px; padding: 0 5px; }
+        .control { min-width: 44px; min-height: 44px; padding: 0 8px; font-size: 12px; }
+        .control--thrust { min-width: 68px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation: none !important; transition: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">궤도 도킹. 화면 터치 드래그로 기체 회전, 추진 버튼으로 가속. 키보드는 좌우 방향키로 회전하고 위 방향키 또는 Space로 추진하며 아래 방향키로 제동합니다.</p>
+    <main class="stage" aria-label="궤도 도킹 게임 영역">
+      <canvas id="game" width="960" height="540" tabindex="0" aria-label="궤도 도킹" aria-describedby="stage-instructions"></canvas>
+      <div class="controls" aria-label="기체 조작">
+        <button class="control" type="button" data-control="left" aria-label="왼쪽 회전">ROT −</button>
+        <button class="control control--thrust" type="button" data-control="thrust" aria-label="주 추진기">THRUST</button>
+        <button class="control" type="button" data-control="right" aria-label="오른쪽 회전">ROT +</button>
+        <button class="control" type="button" data-control="brake" aria-label="관성 제동">BRAKE</button>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+        const canvas = document.querySelector("#game");
+        const ctx = canvas.getContext("2d");
+        const W = 960, H = 540, FIXED_DT = 1 / 60, MAX_DT = 1 / 20, LIMIT = 40;
+        const COLORS = { space: "#071524", ink: "#d9f6ff", amber: "#ffb84d" };
+        const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const relayContext = window.RelayRuntime?.readContext("orbital-dock") || { history: [], clearCount: 0, previousStageId: null };
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const lerp = (a, b, t) => a + (b - a) * t;
+        const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+        let animationFrame = 0, lastTimestamp = 0;
+        let hostFailedReported = false, hostClearedReported = false;
+        const input = { left: false, right: false, thrust: false, brake: false, dragging: false, lastX: 0 };
+        const state = {
+          mode: "menu", elapsed: 0, lastRunTime: 0, docks: 0, fuel: 100,
+          transition: 0, flash: 0, reason: "", particles: [],
+          ship: { x: 128, y: 270, vx: 28, vy: 0, angle: 0, av: 0 },
+        };
+
+        function phaseAt(seconds) { return seconds < 10 ? "CALIBRATION" : seconds < 25 ? "ORBITAL DRIFT" : "FINAL APPROACH"; }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(seconds / LIMIT, 0, 1);
+          return {
+            difficulty,
+            phase: phaseAt(seconds),
+            portSpeed: lerp(0.55, 1.55, difficulty),
+            portTravel: lerp(18, 64, difficulty),
+            safeImpactSpeed: lerp(112, 68, difficulty),
+            angleToleranceDeg: lerp(36, 17, difficulty),
+            fuelBurn: lerp(6.5, 10.5, difficulty),
+          };
+        }
+        function portAt(index = state.docks, seconds = state.elapsed) {
+          const d = difficultyAt(seconds);
+          const bases = [[744, 182], [760, 354], [730, 258]];
+          const base = bases[index] || bases[2];
+          const phase = index * 1.91;
+          return {
+            x: base[0] + Math.sin(seconds * d.portSpeed * 0.41 + phase) * d.portTravel * 0.28,
+            y: base[1] + Math.sin(seconds * d.portSpeed + phase) * d.portTravel,
+            vy: Math.cos(seconds * d.portSpeed + phase) * d.portTravel * d.portSpeed,
+            requiredAngle: Math.sin(seconds * d.portSpeed * 0.57 + phase) * 0.18 * d.difficulty,
+          };
+        }
+        function resetShip(index = state.docks) {
+          const startY = [270, 308, 228][index] ?? 270;
+          Object.assign(state.ship, { x: 128, y: startY, vx: 30, vy: 0, angle: 0, av: 0 });
+        }
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+          catch (_) { return false; }
+        }
+        function reportReady() { if (inRelayHost()) window.parent.RelayHost.onStageReady?.(window.relayStageMeta); }
+        function reportFailed(reason) {
+          if (!inRelayHost() || hostFailedReported) return;
+          hostFailedReported = true;
+          window.parent.RelayHost.onStageFailed?.({ stageId: "orbital-dock", stageTitle: "궤도 도킹", reason, durationSec: +state.lastRunTime.toFixed(1) });
+        }
+        function reportCleared() {
+          if (!inRelayHost() || hostClearedReported) return;
+          hostClearedReported = true;
+          window.parent.RelayHost.onStageCleared?.({ stageId: "orbital-dock", stageTitle: "궤도 도킹", clearCountAfter: relayContext.clearCount + 1, durationSec: +state.lastRunTime.toFixed(1) });
+        }
+        function startStage() {
+          Object.assign(state, { mode: "running", elapsed: 0, lastRunTime: 0, docks: 0, fuel: 100, transition: 0, flash: 0, reason: "", particles: [] });
+          resetShip(0);
+          Object.keys(input).forEach((key) => { if (typeof input[key] === "boolean") input[key] = false; });
+          window.relayStageResult.status = "running";
+          hostFailedReported = false; hostClearedReported = false;
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed"; state.reason = reason; state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "failed"; reportFailed(reason);
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared"; state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared"; reportCleared();
+        }
+        function burst(x, y) {
+          const count = reducedMotion ? 5 : 18;
+          for (let i = 0; i < count; i += 1) {
+            const a = i / count * Math.PI * 2;
+            state.particles.push({ x, y, vx: Math.cos(a) * (35 + i * 2), vy: Math.sin(a) * (35 + i * 2), life: 1 });
+          }
+        }
+        function collisionOrGrace(reason) {
+          const s = state.ship;
+          if (state.elapsed < 5) {
+            s.vx *= -0.3; s.vy *= -0.3; s.x = clamp(s.x, 30, 900); s.y = clamp(s.y, 74, 470);
+            state.fuel = Math.max(18, state.fuel - 4); state.flash = 0.35;
+          } else failStage(reason);
+        }
+        function completeDock(port) {
+          state.docks += 1; state.transition = 1.05; state.flash = 1; burst(port.x, port.y);
+          state.ship.vx = 0; state.ship.vy = 0; state.ship.av = 0;
+          if (state.docks >= 3) clearStage();
+        }
+        function update(dt) {
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const settings = difficultyAt(state.elapsed);
+          const s = state.ship;
+          if (state.elapsed >= LIMIT) { failStage("time_limit"); return; }
+          if (state.transition > 0) {
+            state.transition -= dt;
+            if (state.transition <= 0 && state.docks < 3) resetShip(state.docks);
+          } else {
+            const turn = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+            s.av += turn * 4.5 * dt;
+            s.av *= Math.pow(input.brake ? 0.15 : 0.72, dt);
+            s.angle = wrapAngle(s.angle + s.av * dt);
+            if (input.thrust && state.fuel > 0) {
+              const thrust = 178;
+              s.vx += Math.cos(s.angle) * thrust * dt;
+              s.vy += Math.sin(s.angle) * thrust * dt;
+              state.fuel = Math.max(0, state.fuel - settings.fuelBurn * dt);
+            }
+            if (input.brake && state.fuel > 0) {
+              const damping = Math.pow(0.12, dt);
+              s.vx *= damping; s.vy *= damping;
+              state.fuel = Math.max(0, state.fuel - settings.fuelBurn * 0.44 * dt);
+            }
+            s.vx *= Math.pow(0.998, dt * 60); s.vy *= Math.pow(0.998, dt * 60);
+            s.x += s.vx * dt; s.y += s.vy * dt;
+            const port = portAt();
+            const dx = s.x - port.x, dy = s.y - port.y;
+            const distance = Math.hypot(dx, dy);
+            const relativeSpeed = Math.hypot(s.vx, s.vy - port.vy);
+            const angleError = Math.abs(wrapAngle(s.angle - port.requiredAngle));
+            if (distance < 31) {
+              if (relativeSpeed <= settings.safeImpactSpeed && angleError <= settings.angleToleranceDeg * Math.PI / 180 && s.x < port.x + 8) completeDock(port);
+              else collisionOrGrace(relativeSpeed > settings.safeImpactSpeed ? "hard_dock" : "alignment_error");
+            } else if (s.x > port.x + 28 && Math.abs(s.y - port.y) < 86) collisionOrGrace("station_collision");
+            if (s.x < 18 || s.x > 944 || s.y < 62 || s.y > 508) collisionOrGrace("hull_collision");
+            if (state.fuel <= 0 && Math.hypot(s.vx, s.vy) < 14) failStage("fuel_depleted");
+          }
+          state.flash = Math.max(0, state.flash - dt * 2.6);
+          state.particles.forEach((p) => { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt * 1.2; });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+        function drawBackground() {
+          ctx.fillStyle = COLORS.space; ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(217,246,255,.08)"; ctx.lineWidth = 1;
+          for (let x = 40; x < W; x += 80) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x - 130, H); ctx.stroke(); }
+          for (let i = 0; i < 34; i += 1) {
+            const x = (i * 173 + 31) % W, y = (i * 97 + 43) % H;
+            ctx.fillStyle = i % 5 === 0 ? COLORS.amber : "rgba(217,246,255,.44)";
+            ctx.fillRect(x, y, i % 5 === 0 ? 2 : 1, i % 5 === 0 ? 2 : 1);
+          }
+          ctx.strokeStyle = "rgba(255,184,77,.14)"; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(780, 270, 232, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+        }
+        function drawPort(port) {
+          ctx.fillStyle = "rgba(217,246,255,.08)"; ctx.fillRect(port.x + 32, port.y - 86, W - port.x, 172);
+          ctx.strokeStyle = COLORS.ink; ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.arc(port.x, port.y, 30, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+          ctx.strokeStyle = COLORS.amber; ctx.lineWidth = 7;
+          ctx.beginPath(); ctx.arc(port.x, port.y, 30, Math.PI * .62, Math.PI * 1.38); ctx.stroke();
+          ctx.save(); ctx.translate(port.x, port.y); ctx.rotate(port.requiredAngle);
+          ctx.strokeStyle = "rgba(217,246,255,.55)"; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(-108, 0); ctx.lineTo(-38, 0); ctx.stroke();
+          ctx.fillStyle = COLORS.amber; ctx.fillRect(-42, -3, 14, 6); ctx.restore();
+        }
+        function drawShip() {
+          const s = state.ship;
+          ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.angle);
+          if (input.thrust && state.fuel > 0 && !reducedMotion) {
+            ctx.fillStyle = COLORS.amber; ctx.beginPath(); ctx.moveTo(-23, -7); ctx.lineTo(-42 - Math.random() * 11, 0); ctx.lineTo(-23, 7); ctx.fill();
+          }
+          ctx.fillStyle = COLORS.ink; ctx.beginPath(); ctx.moveTo(24, 0); ctx.lineTo(-15, -14); ctx.lineTo(-22, 0); ctx.lineTo(-15, 14); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = COLORS.space; ctx.fillRect(-10, -5, 14, 10);
+          ctx.strokeStyle = COLORS.amber; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(14, -7); ctx.lineTo(14, 7); ctx.stroke();
+          ctx.restore();
+        }
+        function drawHud() {
+          const settings = difficultyAt(state.elapsed), port = portAt();
+          const relativeSpeed = Math.hypot(state.ship.vx, state.ship.vy - port.vy);
+          const labels = [
+            ["TIME", Math.max(0, LIMIT - state.elapsed).toFixed(1)], ["PORTS", `${state.docks}/3`],
+            ["FUEL", `${Math.ceil(state.fuel)}%`], ["REL SPEED", Math.round(relativeSpeed)],
+          ];
+          ctx.fillStyle = "rgba(3,10,18,.72)"; ctx.fillRect(18, 18, 604, 62);
+          labels.forEach(([label, value], i) => {
+            const x = 34 + i * 146;
+            ctx.fillStyle = "rgba(217,246,255,.56)"; ctx.font = "700 11px Trebuchet MS"; ctx.fillText(label, x, 38);
+            ctx.fillStyle = i === 2 && state.fuel < 20 ? COLORS.amber : COLORS.ink; ctx.font = "800 24px Trebuchet MS"; ctx.fillText(value, x, 65);
+          });
+          ctx.textAlign = "right"; ctx.fillStyle = COLORS.amber; ctx.font = "800 13px Trebuchet MS"; ctx.fillText(settings.phase, 932, 38);
+          ctx.fillStyle = "rgba(217,246,255,.55)"; ctx.font = "600 12px Trebuchet MS";
+          ctx.fillText(`SAFE ≤ ${Math.round(settings.safeImpactSpeed)} · ALIGN ±${Math.round(settings.angleToleranceDeg)}°`, 932, 61); ctx.textAlign = "left";
+        }
+        function drawCard(title, lines, accent = COLORS.amber) {
+          drawBackground();
+          ctx.fillStyle = "rgba(3,10,18,.91)"; roundRect(128, 92, 704, 356, 12); ctx.fill();
+          ctx.strokeStyle = accent; ctx.lineWidth = 3; roundRect(128, 92, 704, 356, 12); ctx.stroke();
+          ctx.textAlign = "center"; ctx.fillStyle = accent; ctx.font = "800 42px Trebuchet MS"; ctx.fillText(title, 480, 157);
+          ctx.fillStyle = COLORS.ink; ctx.font = "600 20px Trebuchet MS";
+          lines.forEach((line, i) => ctx.fillText(line, 480, 214 + i * 35));
+          ctx.fillStyle = "rgba(217,246,255,.55)"; ctx.font = "700 14px Trebuchet MS"; ctx.fillText("TOUCH OR ENTER", 480, 414); ctx.textAlign = "left";
+        }
+        function render() {
+          if (state.mode === "menu") {
+            drawCard("궤도 도킹", [
+              "관성과 회전을 읽고 이동 정거장에 정밀 도킹하세요.",
+              "화면 터치 드래그로 기체 회전, 추진 버튼으로 가속",
+              "40초 안에 도킹 링 3곳에 정밀 결합",
+              "선체 충돌 또는 연료 소진 시 실패",
+              "속도와 기수 각도를 동시에 맞추세요.",
+            ]); return;
+          }
+          if (state.mode === "failed") { drawCard("DOCK ABORTED", ["선체 충돌 또는 연료 소진 시 실패", `원인: ${state.reason}`, `완료 도킹: ${state.docks}/3`, "터치 또는 Enter로 재시작"], "#d9f6ff"); return; }
+          if (state.mode === "cleared") { drawCard("HARD CAPTURE", ["40초 안에 도킹 링 3곳에 정밀 결합", `기록 ${state.lastRunTime.toFixed(1)}초`, "세 도킹 포트의 궤도와 회전을 모두 정렬했습니다.", "터치 또는 Enter로 다시 비행"], COLORS.amber); return; }
+          drawBackground(); const port = portAt(); drawPort(port); drawShip();
+          state.particles.forEach((p) => { ctx.globalAlpha = p.life; ctx.fillStyle = COLORS.amber; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }); ctx.globalAlpha = 1;
+          if (state.transition > 0) { ctx.textAlign = "center"; ctx.fillStyle = COLORS.amber; ctx.font = "800 28px Trebuchet MS"; ctx.fillText(`PORT ${state.docks} CAPTURED`, 480, 124); ctx.textAlign = "left"; }
+          drawHud();
+          if (state.flash > 0) { ctx.fillStyle = `rgba(255,184,77,${state.flash * .16})`; ctx.fillRect(0, 0, W, H); }
+        }
+
+        function pointerPoint(event) {
+          const rect = canvas.getBoundingClientRect();
+          const boxRatio = rect.width / rect.height, contentRatio = W / H;
+          const contentWidth = boxRatio > contentRatio ? rect.height * contentRatio : rect.width;
+          const contentHeight = boxRatio > contentRatio ? rect.height : rect.width / contentRatio;
+          const offsetX = rect.left + (rect.width - contentWidth) / 2;
+          const offsetY = rect.top + (rect.height - contentHeight) / 2;
+          return { x: clamp((event.clientX - offsetX) * W / contentWidth, 0, W), y: clamp((event.clientY - offsetY) * H / contentHeight, 0, H) };
+        }
+        function onPointerDown(event) {
+          event.preventDefault(); canvas.focus();
+          if (state.mode !== "running") { startStage(); return; }
+          const p = pointerPoint(event); input.dragging = true; input.lastX = p.x; canvas.setPointerCapture?.(event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault(); const p = pointerPoint(event); const dx = p.x - input.lastX;
+          state.ship.av = clamp(state.ship.av + dx * 0.012, -3.2, 3.2); input.lastX = p.x;
+        }
+        function releasePointer(event) { if (input.dragging) event.preventDefault(); input.dragging = false; }
+        function setControl(name, active) { if (name in input) input[name] = active; }
+        document.querySelectorAll("[data-control]").forEach((button) => {
+          const name = button.dataset.control;
+          const release = (event) => { event.preventDefault(); button.dataset.active = "false"; setControl(name, false); };
+          button.addEventListener("pointerdown", (event) => { event.preventDefault(); canvas.focus(); if (state.mode !== "running") startStage(); button.dataset.active = "true"; setControl(name, true); button.setPointerCapture?.(event.pointerId); });
+          button.addEventListener("pointerup", release); button.addEventListener("pointercancel", release); button.addEventListener("lostpointercapture", release);
+        });
+        const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right", ArrowUp: "thrust", KeyW: "thrust", Space: "thrust", ArrowDown: "brake", KeyS: "brake" };
+        window.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && state.mode !== "running") { event.preventDefault(); startStage(); return; }
+          const name = keyMap[event.code] || keyMap[event.key]; if (name) { event.preventDefault(); setControl(name, true); }
+        });
+        window.addEventListener("keyup", (event) => { const name = keyMap[event.code] || keyMap[event.key]; if (name) { event.preventDefault(); setControl(name, false); } });
+        canvas.addEventListener("pointerdown", onPointerDown); canvas.addEventListener("pointermove", onPointerMove); canvas.addEventListener("pointerup", releasePointer); canvas.addEventListener("pointercancel", releasePointer);
+
+        function renderGameToText() {
+          const settings = difficultyAt(state.elapsed), port = portAt();
+          return JSON.stringify({
+            coordinate_system: "960x540 canvas; +x right, +y down; radians clockwise",
+            mode: state.mode, elapsed: +state.elapsed.toFixed(2), difficulty: +settings.difficulty.toFixed(3), phase: settings.phase,
+            actual_difficulty_parameters: { port_speed: +settings.portSpeed.toFixed(3), port_travel: +settings.portTravel.toFixed(2), safe_impact_speed: +settings.safeImpactSpeed.toFixed(2), angle_tolerance_deg: +settings.angleToleranceDeg.toFixed(2), fuel_burn_per_sec: +settings.fuelBurn.toFixed(2) },
+            docks: state.docks, fuel: +state.fuel.toFixed(1), ship: { x: +state.ship.x.toFixed(1), y: +state.ship.y.toFixed(1), vx: +state.ship.vx.toFixed(1), vy: +state.ship.vy.toFixed(1), angle: +state.ship.angle.toFixed(3) },
+            port: { x: +port.x.toFixed(1), y: +port.y.toFixed(1), required_angle: +port.requiredAngle.toFixed(3) }, result: window.relayStageResult.status,
+          });
+        }
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => { const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000))); for (let i = 0; i < steps; i += 1) update(FIXED_DT); render(); return renderGameToText(); };
+        window.relayStageMeta = { id: "orbital-dock", title: "궤도 도킹", creator: "jungcollin", genre: "Inertial docking", description: "관성과 회전을 읽고 이동 정거장에 정밀 도킹하세요.", controls: "화면 터치 드래그로 기체 회전, 추진 버튼으로 가속", clearCondition: "40초 안에 도킹 링 3곳에 정밀 결합", failCondition: "선체 충돌 또는 연료 소진 시 실패" };
+        window.relayStageResult = { status: "menu" };
+        window.relayStageDebug = {
+          forceClear() { startStage(); state.docks = 3; clearStage(); render(); },
+          forceFail() { startStage(); state.elapsed = 6; failStage("debug_force_fail"); render(); },
+          difficultyAt,
+          prepareDockApproach() { startStage(); state.elapsed = 6; const p = portAt(); Object.assign(state.ship, { x: p.x - 39, y: p.y, vx: 48, vy: p.vy, angle: p.requiredAngle, av: 0 }); render(); return JSON.parse(renderGameToText()); },
+          exerciseDock() { startStage(); state.elapsed = 6; const p = portAt(); Object.assign(state.ship, { x: p.x - 1, y: p.y, vx: 20, vy: p.vy, angle: p.requiredAngle, av: 0 }); update(FIXED_DT); render(); return JSON.parse(renderGameToText()); },
+        };
+        function frame(timestamp) { const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT; lastTimestamp = timestamp; update(dt); render(); animationFrame = requestAnimationFrame(frame); }
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+        reportReady(); render(); animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>시간의 쌍둥이</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        width: 100%; height: 100%; margin: 0; overflow: hidden;
+        background: #061722;
+        font-family: "Avenir Next", "Pretendard", "Segoe UI", sans-serif;
+      }
+      body { display: grid; place-items: center; }
+      .skip-link {
+        position: fixed; left: 12px; top: 12px; z-index: 4;
+        width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+        padding: 0; border-radius: 999px; background: #f4b860; color: #061722;
+        font-weight: 800; text-decoration: none;
+      }
+      .skip-link:focus, .skip-link:focus-visible {
+        width: auto; height: auto; overflow: visible; clip-path: none; padding: 11px 16px;
+      }
+      .sr-only {
+        position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+        overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+      }
+      canvas {
+        display: block;
+        width: min(100vw, calc(100vh * 16 / 9));
+        height: min(100vh, calc(100vw * 9 / 16));
+        min-height: min(220px, 100vh);
+        max-width: 100vw; max-height: 100vh;
+        object-fit: contain; background: #061722; touch-action: none; -webkit-tap-highlight-color: transparent;
+      }
+      canvas:focus-visible { outline: 4px solid #f4b860; outline-offset: -7px; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">시간의 쌍둥이. 화면 터치 드래그 또는 방향키로 빛을 이동. 과거의 분신과 시간문 3쌍을 동시에 열기. 균열 충돌 또는 40초 초과 시 실패. 캔버스를 터치하거나 Enter로 시작합니다. 모바일에서는 화면을 터치하고 드래그해 빛을 이동합니다.</p>
+    <canvas id="game" width="960" height="540" tabindex="0" aria-label="시간의 쌍둥이" aria-describedby="stage-instructions"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        const canvas = document.querySelector("#game");
+        const ctx = canvas.getContext("2d");
+        const W = canvas.width;
+        const H = canvas.height;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 40;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "echo-twins",
+          title: "시간의 쌍둥이",
+          description: "4~6초 전의 나와 협력해 두 개의 시간문을 동시에 여세요.",
+          creator: "jungcollin",
+          genre: "Temporal co-op puzzle",
+          clearCondition: "과거의 분신과 시간문 3쌍을 동시에 열기",
+          failCondition: "균열 충돌 또는 40초 초과 시 실패",
+          controls: "화면 터치 드래그 또는 방향키로 빛을 이동",
+        };
+        const COLORS = {
+          ink: "#061722",
+          deep: "#0b2b38",
+          cyan: "#6ee7f2",
+          amber: "#f4b860",
+          paper: "#e8f7f5",
+        };
+        const PAD_PAIRS = [
+          [{ x: 220, y: 190 }, { x: 735, y: 355 }],
+          [{ x: 185, y: 375 }, { x: 775, y: 175 }],
+          [{ x: 350, y: 150 }, { x: 610, y: 405 }],
+        ];
+        const RIFT_ORBITS = [
+          { cx: 480, cy: 270, rx: 150, ry: 86, seed: 0.3 },
+          { cx: 480, cy: 270, rx: 248, ry: 142, seed: 2.1 },
+          { cx: 480, cy: 270, rx: 325, ry: 188, seed: 4.0 },
+          { cx: 480, cy: 270, rx: 205, ry: 205, seed: 5.2 },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          player: { x: W / 2, y: H / 2 },
+          echo: { x: W / 2, y: H / 2 },
+          path: [],
+          completed: 0,
+          sync: 0,
+          dragging: false,
+          keys: new Set(),
+          flash: 0,
+          failReason: "",
+          particles: [],
+        };
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+
+        function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            echoDelay: lerp(4, 6, difficulty),
+            padRadius: lerp(46, 32, difficulty),
+            syncHold: lerp(0.58, 1.02, difficulty),
+            riftCount: seconds < 5 ? 0 : Math.min(4, 1 + Math.floor(difficulty * 4)),
+            riftSpeed: lerp(0.46, 1.18, difficulty),
+            riftRadius: lerp(15, 22, difficulty),
+          };
+        }
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.parent.RelayHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.parent.RelayHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.parent.RelayHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.parent.RelayHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.player.x = W / 2;
+          state.player.y = H / 2;
+          state.echo.x = W / 2;
+          state.echo.y = H / 2;
+          state.path = [{ t: -6, x: W / 2, y: H / 2 }, { t: 0, x: W / 2, y: H / 2 }];
+          state.completed = 0;
+          state.sync = 0;
+          state.flash = 0;
+          state.failReason = "";
+          state.particles = [];
+          state.keys.clear();
+          state.dragging = false;
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+        function startStage() {
+          if (state.mode !== "menu") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+        }
+        function clearStage() {
+          if (state.mode === "cleared") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          spawnBurst(state.player.x, state.player.y, 28);
+          reportClear();
+        }
+        function failStage(reason) {
+          if (state.mode === "failed") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          reportFail(reason);
+        }
+        function spawnBurst(x, y, count = 12) {
+          const amount = reducedMotion ? Math.min(4, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            const speed = 45 + (index % 5) * 14;
+            state.particles.push({
+              x, y,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed,
+              life: 0.7 + (index % 3) * 0.12,
+              color: index % 2 ? COLORS.amber : COLORS.cyan,
+            });
+          }
+        }
+        function sampleEcho(targetTime) {
+          if (targetTime <= 0 || state.path.length < 2) return { x: W / 2, y: H / 2 };
+          let rightIndex = state.path.length - 1;
+          for (let index = state.path.length - 1; index >= 0; index -= 1) {
+            if (state.path[index].t <= targetTime) {
+              rightIndex = Math.min(state.path.length - 1, index + 1);
+              const left = state.path[index];
+              const right = state.path[rightIndex];
+              const span = Math.max(0.0001, right.t - left.t);
+              const mix = clamp((targetTime - left.t) / span, 0, 1);
+              return { x: lerp(left.x, right.x, mix), y: lerp(left.y, right.y, mix) };
+            }
+          }
+          return { x: W / 2, y: H / 2 };
+        }
+        function riftPositions(params) {
+          const result = [];
+          for (let index = 0; index < params.riftCount; index += 1) {
+            const orbit = RIFT_ORBITS[index];
+            const angle = state.elapsed * params.riftSpeed * (1 + index * 0.08) + orbit.seed;
+            result.push({
+              x: orbit.cx + Math.cos(angle) * orbit.rx,
+              y: orbit.cy + Math.sin(angle * 1.23) * orbit.ry,
+              angle,
+            });
+          }
+          return result;
+        }
+        function updatePlayer(dt) {
+          let dx = 0;
+          let dy = 0;
+          if (state.keys.has("ArrowLeft") || state.keys.has("KeyA")) dx -= 1;
+          if (state.keys.has("ArrowRight") || state.keys.has("KeyD")) dx += 1;
+          if (state.keys.has("ArrowUp") || state.keys.has("KeyW")) dy -= 1;
+          if (state.keys.has("ArrowDown") || state.keys.has("KeyS")) dy += 1;
+          if (dx || dy) {
+            const length = Math.hypot(dx, dy) || 1;
+            const speed = 250;
+            state.player.x += (dx / length) * speed * dt;
+            state.player.y += (dy / length) * speed * dt;
+          }
+          state.player.x = clamp(state.player.x, 54, W - 54);
+          state.player.y = clamp(state.player.y, 82, H - 52);
+        }
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.vx *= 0.985;
+            particle.vy *= 0.985;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+        function update(dt) {
+          updateParticles(dt);
+          state.flash = Math.max(0, state.flash - dt);
+          if (state.mode !== "running") return;
+
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updatePlayer(dt);
+          state.path.push({ t: state.elapsed, x: state.player.x, y: state.player.y });
+          const earliest = state.elapsed - 6.2;
+          while (state.path.length > 2 && state.path[1].t < earliest) state.path.shift();
+          state.echo = sampleEcho(state.elapsed - params.echoDelay);
+
+          if (state.completed < PAD_PAIRS.length) {
+            const pair = PAD_PAIRS[state.completed];
+            const normal = distance(state.player, pair[0]) <= params.padRadius && distance(state.echo, pair[1]) <= params.padRadius;
+            const reversed = distance(state.player, pair[1]) <= params.padRadius && distance(state.echo, pair[0]) <= params.padRadius;
+            if (normal || reversed) state.sync += dt;
+            else state.sync = Math.max(0, state.sync - dt * 1.7);
+
+            if (state.sync >= params.syncHold) {
+              const midpoint = { x: (pair[0].x + pair[1].x) / 2, y: (pair[0].y + pair[1].y) / 2 };
+              state.completed += 1;
+              state.sync = 0;
+              state.flash = 0.55;
+              spawnBurst(midpoint.x, midpoint.y, 18);
+              if (state.completed >= PAD_PAIRS.length) clearStage();
+            }
+          }
+
+          if (state.elapsed >= 5) {
+            const collisionRadius = params.riftRadius + 13;
+            const hit = riftPositions(params).some((rift) => distance(state.player, rift) < collisionRadius);
+            if (hit) failStage("시간 균열 충돌");
+          }
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("40초 시간 초과");
+        }
+
+        function roundedRect(x, y, width, height, radius) {
+          ctx.beginPath();
+          ctx.roundRect(x, y, width, height, radius);
+        }
+        function drawBackground() {
+          ctx.fillStyle = COLORS.ink;
+          ctx.fillRect(0, 0, W, H);
+          ctx.strokeStyle = "rgba(110,231,242,0.10)";
+          ctx.lineWidth = 1;
+          for (let x = 30; x < W; x += 60) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+          }
+          for (let y = 30; y < H; y += 60) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+          }
+          ctx.save();
+          ctx.translate(W / 2, H / 2);
+          ctx.strokeStyle = "rgba(244,184,96,0.16)";
+          [102, 185, 260].forEach((radius, index) => {
+            ctx.lineWidth = index === 1 ? 3 : 1;
+            ctx.setLineDash(index === 1 ? [14, 12] : [4, 14]);
+            ctx.beginPath(); ctx.arc(0, 0, radius, 0, Math.PI * 2); ctx.stroke();
+          });
+          ctx.setLineDash([]);
+          for (let index = 0; index < 12; index += 1) {
+            const angle = (index / 12) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(angle) * 275, Math.sin(angle) * 275);
+            ctx.lineTo(Math.cos(angle) * 294, Math.sin(angle) * 294);
+            ctx.stroke();
+          }
+          ctx.restore();
+          ctx.fillStyle = "rgba(110,231,242,0.07)";
+          ctx.fillRect(0, 66, W, 2);
+        }
+        function drawPad(point, index, active, completed, params) {
+          const pulse = reducedMotion ? 0 : Math.sin(state.elapsed * 4 + point.x * 0.02) * 3;
+          ctx.save();
+          ctx.translate(point.x, point.y);
+          ctx.strokeStyle = completed ? "rgba(110,231,242,0.28)" : active ? COLORS.amber : "rgba(110,231,242,0.72)";
+          ctx.fillStyle = completed ? "rgba(110,231,242,0.05)" : active ? "rgba(244,184,96,0.18)" : "rgba(110,231,242,0.10)";
+          ctx.lineWidth = active ? 5 : 2;
+          ctx.beginPath(); ctx.arc(0, 0, params.padRadius + pulse, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.beginPath(); ctx.arc(0, 0, Math.max(12, params.padRadius - 13), 0, Math.PI * 2); ctx.stroke();
+          ctx.fillStyle = completed ? "rgba(110,231,242,0.4)" : active ? COLORS.amber : COLORS.cyan;
+          ctx.font = "800 14px Avenir Next, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(completed ? "LOCKED" : String.fromCharCode(65 + index), 0, 5);
+          ctx.restore();
+        }
+        function drawTrail() {
+          if (state.path.length < 2) return;
+          const cutoff = state.elapsed - 6.1;
+          ctx.save();
+          ctx.lineWidth = 3;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          state.path.forEach((point, index) => {
+            if (point.t < cutoff) return;
+            if (index === 0) ctx.moveTo(point.x, point.y);
+            else ctx.lineTo(point.x, point.y);
+          });
+          ctx.strokeStyle = "rgba(110,231,242,0.18)";
+          ctx.stroke();
+          ctx.restore();
+        }
+        function drawOrb(point, isEcho) {
+          ctx.save();
+          ctx.translate(point.x, point.y);
+          ctx.globalAlpha = isEcho ? 0.62 : 1;
+          ctx.shadowColor = isEcho ? COLORS.cyan : COLORS.amber;
+          ctx.shadowBlur = reducedMotion ? 4 : 18;
+          ctx.fillStyle = isEcho ? COLORS.cyan : COLORS.amber;
+          ctx.beginPath(); ctx.arc(0, 0, isEcho ? 13 : 15, 0, Math.PI * 2); ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = COLORS.paper;
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(0, 0, isEcho ? 19 : 22, -1.2, 1.9); ctx.stroke();
+          if (isEcho) {
+            ctx.setLineDash([3, 4]);
+            ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI * 2); ctx.stroke();
+          }
+          ctx.restore();
+        }
+        function drawRifts(params) {
+          riftPositions(params).forEach((rift, index) => {
+            ctx.save();
+            ctx.translate(rift.x, rift.y);
+            ctx.rotate(rift.angle + index);
+            ctx.strokeStyle = COLORS.amber;
+            ctx.fillStyle = "rgba(244,184,96,0.12)";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(-params.riftRadius, -4);
+            ctx.lineTo(-5, 2);
+            ctx.lineTo(3, -params.riftRadius);
+            ctx.lineTo(7, 4);
+            ctx.lineTo(params.riftRadius, 8);
+            ctx.stroke();
+            ctx.beginPath(); ctx.arc(0, 0, params.riftRadius + 5, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+          });
+        }
+        function drawHud(params) {
+          const entries = [
+            ["시간문", `${state.completed}/3`],
+            ["남은 시간", `${Math.max(0, DURATION - state.elapsed).toFixed(1)}초`],
+            ["분신 지연", `${params.echoDelay.toFixed(1)}초`],
+            ["균열 단계", `${params.phase}/3`],
+          ];
+          ctx.save();
+          entries.forEach(([label, value], index) => {
+            const x = 24 + index * 229;
+            roundedRect(x, 16, 209, 44, 12);
+            ctx.fillStyle = "rgba(6,23,34,0.84)"; ctx.fill();
+            ctx.strokeStyle = "rgba(110,231,242,0.24)"; ctx.stroke();
+            ctx.fillStyle = "rgba(232,247,245,0.62)";
+            ctx.font = "700 11px Avenir Next, sans-serif";
+            ctx.fillText(label, x + 13, 34);
+            ctx.fillStyle = index === 2 ? COLORS.amber : COLORS.paper;
+            ctx.font = "800 15px Avenir Next, sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText(value, x + 194, 44);
+            ctx.textAlign = "left";
+          });
+          ctx.restore();
+        }
+        function drawSyncMeter(params) {
+          if (state.completed >= PAD_PAIRS.length) return;
+          const width = 260;
+          const ratio = clamp(state.sync / params.syncHold, 0, 1);
+          roundedRect(W / 2 - width / 2, H - 35, width, 12, 6);
+          ctx.fillStyle = "rgba(110,231,242,0.12)"; ctx.fill();
+          roundedRect(W / 2 - width / 2, H - 35, width * ratio, 12, 6);
+          ctx.fillStyle = ratio > 0 ? COLORS.amber : COLORS.cyan; ctx.fill();
+          ctx.fillStyle = COLORS.paper;
+          ctx.font = "700 11px Avenir Next, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("두 시간축을 겹쳐 유지", W / 2, H - 43);
+          ctx.textAlign = "left";
+        }
+        function wrapText(text, centerX, startY, maxWidth, lineHeight) {
+          const words = text.split(" ");
+          let line = "";
+          let y = startY;
+          words.forEach((word) => {
+            const test = line ? `${line} ${word}` : word;
+            if (ctx.measureText(test).width > maxWidth && line) {
+              ctx.fillText(line, centerX, y);
+              line = word;
+              y += lineHeight;
+            } else line = test;
+          });
+          if (line) ctx.fillText(line, centerX, y);
+          return y;
+        }
+        function drawCard(kind) {
+          drawBackground();
+          ctx.save();
+          roundedRect(125, 72, 710, 396, 28);
+          ctx.fillStyle = "rgba(11,43,56,0.94)"; ctx.fill();
+          ctx.strokeStyle = kind === "failed" ? COLORS.amber : COLORS.cyan;
+          ctx.lineWidth = 2; ctx.stroke();
+          ctx.textAlign = "center";
+          ctx.fillStyle = kind === "cleared" ? COLORS.amber : COLORS.cyan;
+          ctx.font = "800 15px Avenir Next, sans-serif";
+          ctx.fillText(kind === "menu" ? "ABYSSAL CHRONOLOGY STATION · 03" : "TEMPORAL RECORD", W / 2, 111);
+          ctx.fillStyle = COLORS.paper;
+          ctx.font = "800 46px Avenir Next, sans-serif";
+          const title = kind === "menu" ? META.title : kind === "failed" ? "시간축 붕괴" : "세 개의 문이 열렸다";
+          ctx.fillText(title, W / 2, 164);
+          ctx.font = "600 20px Avenir Next, sans-serif";
+          ctx.fillStyle = "rgba(232,247,245,0.8)";
+          if (kind === "menu") {
+            wrapText("5초 전 내가 남긴 궤적을 분신이 되짚습니다. 먼저 한 패드를 밟고, 분신이 도착할 때 반대편 패드를 점유하세요.", W / 2, 208, 590, 29);
+            ctx.fillStyle = COLORS.amber; ctx.font = "700 18px Avenir Next, sans-serif";
+            ctx.fillText(`조작 · ${META.controls}`, W / 2, 287);
+            ctx.fillStyle = "rgba(232,247,245,0.74)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText(`클리어 · ${META.clearCondition}`, W / 2, 326);
+            ctx.fillText(`실패 · ${META.failCondition}`, W / 2, 354);
+            ctx.fillStyle = COLORS.cyan; ctx.font = "800 18px Avenir Next, sans-serif";
+            ctx.fillText("화면을 터치하거나 Enter로 시간축 진입", W / 2, 412);
+          } else if (kind === "failed") {
+            ctx.fillText(state.failReason || META.failCondition, W / 2, 228);
+            ctx.fillStyle = COLORS.amber; ctx.font = "800 22px Avenir Next, sans-serif";
+            ctx.fillText(`${state.completed} / 3 시간문 동기화`, W / 2, 280);
+            ctx.fillStyle = "rgba(232,247,245,0.66)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText("공유 목숨이 소진되었습니다.", W / 2, 338);
+          } else {
+            ctx.fillText("현재와 과거가 같은 순간에 도착했습니다.", W / 2, 228);
+            ctx.fillStyle = COLORS.amber; ctx.font = "800 25px Avenir Next, sans-serif";
+            ctx.fillText(`${state.lastRunTime.toFixed(1)}초의 완전한 궤적`, W / 2, 286);
+            ctx.fillStyle = "rgba(232,247,245,0.66)"; ctx.font = "600 16px Avenir Next, sans-serif";
+            ctx.fillText(META.clearCondition, W / 2, 338);
+          }
+          ctx.restore();
+        }
+        function render() {
+          if (state.mode === "menu") { drawCard("menu"); return; }
+          if (state.mode === "failed") { drawCard("failed"); return; }
+          if (state.mode === "cleared") { drawCard("cleared"); return; }
+
+          const params = difficultyAt(state.elapsed);
+          drawBackground();
+          PAD_PAIRS.forEach((pair, pairIndex) => {
+            const completed = pairIndex < state.completed;
+            const activePair = pairIndex === state.completed;
+            pair.forEach((point, pointIndex) => {
+              const occupied = activePair && (distance(state.player, point) <= params.padRadius || distance(state.echo, point) <= params.padRadius);
+              drawPad(point, pairIndex, occupied, completed, params);
+              if (activePair && pointIndex === 0) {
+                ctx.strokeStyle = "rgba(110,231,242,0.16)";
+                ctx.lineWidth = 2; ctx.setLineDash([8, 10]);
+                ctx.beginPath(); ctx.moveTo(pair[0].x, pair[0].y); ctx.lineTo(pair[1].x, pair[1].y); ctx.stroke();
+                ctx.setLineDash([]);
+              }
+            });
+          });
+          drawTrail();
+          drawRifts(params);
+          drawOrb(state.echo, true);
+          drawOrb(state.player, false);
+          state.particles.forEach((particle) => {
+            ctx.globalAlpha = clamp(particle.life, 0, 1);
+            ctx.fillStyle = particle.color;
+            ctx.fillRect(particle.x - 2, particle.y - 2, 4, 4);
+          });
+          ctx.globalAlpha = 1;
+          drawHud(params);
+          drawSyncMeter(params);
+          if (state.elapsed < 5) {
+            ctx.fillStyle = "rgba(232,247,245,0.72)";
+            ctx.font = "700 14px Avenir Next, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("학습 구간 · 균열은 5초 뒤 활성화됩니다", W / 2, 86);
+            ctx.textAlign = "left";
+          }
+          if (state.flash > 0) {
+            ctx.fillStyle = `rgba(244,184,96,${state.flash * 0.18})`;
+            ctx.fillRect(0, 0, W, H);
+          }
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "960x540 canvas; origin top-left",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            player: { x: Math.round(state.player.x), y: Math.round(state.player.y) },
+            echo: { x: Math.round(state.echo.x), y: Math.round(state.echo.y) },
+            completed_pairs: state.completed,
+            sync_progress: Number(clamp(state.sync / params.syncHold, 0, 1).toFixed(3)),
+            echo_delay_seconds: Number(params.echoDelay.toFixed(2)),
+            pad_radius: Number(params.padRadius.toFixed(2)),
+            sync_hold_seconds: Number(params.syncHold.toFixed(2)),
+            rift_count: params.riftCount,
+            rift_speed: Number(params.riftSpeed.toFixed(2)),
+            result: window.relayStageResult.status,
+          });
+        }
+        function pointerPosition(event) {
+          const rect = canvas.getBoundingClientRect();
+          const scale = Math.min(rect.width / W, rect.height / H);
+          const contentWidth = W * scale;
+          const contentHeight = H * scale;
+          const contentLeft = rect.left + (rect.width - contentWidth) / 2;
+          const contentTop = rect.top + (rect.height - contentHeight) / 2;
+          return {
+            x: clamp((event.clientX - contentLeft) * (W / contentWidth), 0, W),
+            y: clamp((event.clientY - contentTop) * (H / contentHeight), 0, H),
+          };
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          canvas.focus();
+          if (state.mode === "menu") { startStage(); return; }
+          if (state.mode !== "running") return;
+          state.dragging = true;
+          canvas.setPointerCapture?.(event.pointerId);
+          const point = pointerPosition(event);
+          state.player.x = point.x; state.player.y = point.y;
+        }
+        function onPointerMove(event) {
+          if (!state.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const point = pointerPosition(event);
+          state.player.x = point.x; state.player.y = point.y;
+        }
+        function onPointerUp(event) {
+          state.dragging = false;
+          canvas.releasePointerCapture?.(event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode === "menu") {
+            event.preventDefault(); startStage(); return;
+          }
+          if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) {
+            event.preventDefault(); state.keys.add(event.code);
+          }
+        }
+        function onKeyUp(event) { state.keys.delete(event.code); }
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "running" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } clearStage(); render(); },
+          forceFail() { if (state.mode !== "running") { state.mode = "menu"; startStage(); } failStage("debug_force_fail"); render(); },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          setPlayer(x, y) { state.player.x = clamp(Number(x), 0, W); state.player.y = clamp(Number(y), 0, H); },
+          setElapsed(seconds) { state.elapsed = clamp(Number(seconds), 0, DURATION); },
+        };
+
+        canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
+        canvas.addEventListener("pointermove", onPointerMove, { passive: false });
+        canvas.addEventListener("pointerup", onPointerUp);
+        canvas.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => state.keys.clear());
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
