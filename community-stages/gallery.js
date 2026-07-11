@@ -136,8 +136,8 @@
       "</div>" +
       '<div class="stage-card-actions">' +
       '<div class="vote-group">' +
-      '<button class="vote-btn vote-up magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="1" data-active="' + (myVote === 1) + '" type="button" aria-label="좋아요">\uD83D\uDC4D</button>' +
-      '<button class="vote-btn vote-down magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="-1" data-active="' + (myVote === -1) + '" type="button" aria-label="싫어요">\uD83D\uDC4E</button>' +
+      '<button class="vote-btn vote-up magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="1" data-active="' + (myVote === 1) + '" type="button" aria-label="좋아요">+</button>' +
+      '<button class="vote-btn vote-down magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="-1" data-active="' + (myVote === -1) + '" type="button" aria-label="싫어요">−</button>' +
       "</div>" +
       '<a class="play-link magnetic-btn" href="./play.html?stage=' + encodeURIComponent(entry.id) + '">플레이</a>' +
       "</div>" +

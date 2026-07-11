@@ -15,6 +15,9 @@ const rankingSaveFormEl = document.querySelector("#ranking-save-form");
 const rankingPlayerNameEl = document.querySelector("#ranking-player-name");
 const rankingSaveStatusEl = document.querySelector("#ranking-save-status");
 const rankingSaveButtonEl = document.querySelector("#ranking-save-button");
+const dailySeedEl = document.querySelector("#daily-seed");
+const dailyRouteListEl = document.querySelector("#daily-route-list");
+const startRelayBtn = document.querySelector("#start-relay");
 
 const STAGE_READY_TIMEOUT_MS = 4000;
 const SUPABASE_URL = "https://ikrhlbwsrahnswuhuyka.supabase.co";
@@ -54,7 +57,39 @@ const state = {
   saveState: "idle",
   likeCounts: new Map(),
   likeCountsLoaded: false,
+  dailyDateKey: "",
+  dailyRoute: [],
+  focusRequested: false,
 };
+
+function renderDailyRoute() {
+  if (dailySeedEl) {
+    dailySeedEl.textContent = state.dailyDateKey.replaceAll("-", ".");
+  }
+  if (!dailyRouteListEl) return;
+  dailyRouteListEl.innerHTML = state.dailyRoute.map((stage, index) => {
+    const normalizedThumb = normalizeStagePath(stage.thumbnail || "");
+    const status = state.history.includes(stage.id)
+      ? "CLEARED"
+      : state.currentStage?.id === stage.id
+        ? "PLAYING"
+        : "LOCKED";
+    return `
+      <li class="route-card" data-status="${status.toLowerCase()}">
+        <span class="route-index">0${index + 1}</span>
+        <img src="${escapeHtml(normalizedThumb)}" alt="" loading="lazy" />
+        <div><strong>${escapeHtml(stage.title)}</strong><span>${status}</span></div>
+      </li>
+    `;
+  }).join("");
+}
+
+function prepareDailyRoute() {
+  state.dailyDateKey = window.DailyRelay?.getKstDateKey() || "KST DAILY";
+  state.dailyRoute = window.DailyRelay?.buildRoute(COMMUNITY_STAGE_REGISTRY, state.dailyDateKey, 5)
+    || COMMUNITY_STAGE_REGISTRY.slice(0, 5);
+  renderDailyRoute();
+}
 
 function getSavedPlayerName() {
   try {
@@ -190,6 +225,12 @@ async function supabaseRequest(path, options = {}) {
 }
 
 async function loadLeaderboard() {
+  if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
+    state.leaderboardEntries = [];
+    renderLeaderboard([]);
+    setLeaderboardStatus("로컬 미리보기에서는 랭킹 동기화를 생략합니다.");
+    return;
+  }
   setLeaderboardStatus("랭킹을 불러오는 중…");
   try {
     const rows = await supabaseRequest(
@@ -205,7 +246,7 @@ async function loadLeaderboard() {
     );
   } catch (error) {
     renderLeaderboard([]);
-    setLeaderboardStatus("랭킹을 불러오지 못했습니다. Supabase 테이블과 RLS 정책을 확인해 주세요.");
+    setLeaderboardStatus("지금은 랭킹 연결이 잠시 불안정합니다. 게임은 정상적으로 플레이할 수 있습니다.");
   }
 }
 
@@ -547,13 +588,19 @@ function showOverlay({
     }
   }
   relayOverlayEl.hidden = false;
+  if (window.matchMedia("(max-width: 820px)").matches) {
+    window.requestAnimationFrame(() => {
+      relayOverlayEl.scrollIntoView({ behavior: "instant", block: "center" });
+    });
+  }
 }
 
 function updateRunHeader() {
-  runClearCountEl.textContent = `${state.clearCount}개 클리어`;
+  runClearCountEl.textContent = `${state.clearCount} / ${state.dailyRoute.length || 5}`;
+  renderDailyRoute();
 
   if (state.status === "loading") {
-    runStageTitleEl.textContent = "랜덤 스테이지를 불러오는 중…";
+    runStageTitleEl.textContent = "오늘의 스테이지를 불러오는 중…";
     return;
   }
 
@@ -568,7 +615,7 @@ function updateRunHeader() {
   }
 
   if (state.status === "complete") {
-    runStageTitleEl.textContent = "이번 플레이의 모든 미플레이 스테이지를 완료했습니다";
+    runStageTitleEl.textContent = "오늘의 릴레이를 완주했습니다";
     return;
   }
 
@@ -615,35 +662,12 @@ function buildStageUrl(stage) {
 }
 
 function pickNextStage() {
-  if (!COMMUNITY_STAGE_REGISTRY.length) {
+  if (!state.dailyRoute.length) {
     return null;
   }
-
-  const excluded = new Set([...state.history, ...state.unavailableStageIds]);
-  const available = COMMUNITY_STAGE_REGISTRY.filter((entry) => !excluded.has(entry.id));
-  if (!available.length) {
-    return null;
-  }
-
-  // Popularity-based selection when like data is available
-  if (state.likeCountsLoaded && state.likeCounts.size > 0) {
-    const withLikes = available
-      .map((s) => ({ ...s, likes: state.likeCounts.get(s.id) || 0 }))
-      .sort((a, b) => b.likes - a.likes);
-
-    const poolSize = Math.max(3, Math.ceil(withLikes.length * 0.7));
-    const popularPool = withLikes.slice(0, Math.min(poolSize, withLikes.length));
-    return popularPool[Math.floor(Math.random() * popularPool.length)];
-  }
-
-  // Fallback: full random
-  if (window.RelayRuntime) {
-    return window.RelayRuntime.pickRandomNext(COMMUNITY_STAGE_REGISTRY, {
-      history: Array.from(excluded),
-      currentStageId: state.currentStage?.id || null,
-    });
-  }
-  return available[Math.floor(Math.random() * available.length)];
+  return state.dailyRoute.find((entry) => (
+    !state.history.includes(entry.id) && !state.unavailableStageIds.includes(entry.id)
+  )) || null;
 }
 
 function handleStageLoadTimeout() {
@@ -709,6 +733,7 @@ function startNewRun() {
   state.lastRunResult = null;
   state.saveState = "idle";
   state.status = "loading";
+  if (!state.dailyRoute.length) prepareDailyRoute();
   hideOverlay();
   updateRunHeader();
   startNextRandomStage();
@@ -780,6 +805,15 @@ window.RelayHost = {
       state.currentStage = { ...state.currentStage, ...meta };
       state.status = "playing";
       updateRunHeader();
+      window.setTimeout(() => {
+        if (state.focusRequested) {
+          relayFrameEl?.scrollIntoView({ behavior: "smooth", block: "center" });
+          relayFrameEl?.focus({ preventScroll: true });
+          state.focusRequested = false;
+        } else if (state.clearCount === 0) {
+          window.scrollTo({ top: 0, behavior: "instant" });
+        }
+      }, 80);
     }
   },
   onStageCleared(payload = {}) {
@@ -799,7 +833,6 @@ window.__relayHostDebug = {
 
 relayFrameEl?.addEventListener("load", () => {
   updateRunHeader();
-  relayFrameEl.focus();
 });
 relayFrameEl?.addEventListener("error", handleStageLoadTimeout);
 
@@ -809,6 +842,10 @@ relaySecondaryActionBtn?.addEventListener("click", () => {
 });
 leaderboardRefreshBtn?.addEventListener("click", loadLeaderboard);
 rankingSaveFormEl?.addEventListener("submit", saveCurrentRunToLeaderboard);
+startRelayBtn?.addEventListener("click", () => {
+  state.focusRequested = true;
+  startNewRun();
+});
 
 window.addEventListener("keydown", (e) => {
   // 32: Space, 37: Left, 38: Up, 39: Right, 40: Down
@@ -872,6 +909,11 @@ document.addEventListener("keydown", (event) => {
 });
 
 async function loadLikeCounts() {
+  if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
+    state.likeCounts = new Map();
+    state.likeCountsLoaded = false;
+    return;
+  }
   if (!window.LikesClient) {
     return;
   }
@@ -885,6 +927,7 @@ async function loadLikeCounts() {
 }
 
 loadLikeCounts().then(() => {
+  prepareDailyRoute();
   loadLeaderboard();
   startNewRun();
 });
