@@ -4,7 +4,7 @@ window.COMMUNITY_STAGE_REGISTRY = [
     title: "영철을 피해라",
     creator: { name: "zero4uu", avatar: null, github: "zero4uu" },
     genre: "Arcade survival",
-    clearCondition: "30초 동안 영철에 닿지 않고 생존하기",
+    clearCondition: "긴급 보호막을 활용해 20초 동안 생존하기",
     thumbnail: "./slither-worm/thumbnail.png",
     path: "./slither-worm/index.html",
   },

@@ -138,6 +138,24 @@
         }
       }
 
+      @media (max-height: 420px) and (pointer: coarse) {
+        .mobile-controls {
+          bottom: 2px;
+          padding: 0 6px 2px;
+        }
+        .mobile-controls__cluster,
+        .mobile-controls__row {
+          gap: 4px;
+        }
+        .mobile-btn {
+          min-width: 44px;
+          min-height: 44px;
+          padding: 0 10px;
+          border-radius: 14px;
+          font-size: 17px;
+        }
+      }
+
       @media (prefers-reduced-motion: reduce) {
         *,
         *::before,
@@ -152,7 +170,7 @@
   </head>
   <body>
     <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
-    <p id="stage-instructions" class="sr-only">영철을 피해라. 터치 또는 Enter로 시작, 방향키/WASD 또는 화면 버튼으로 이동. 영철에 닿으면 즉시 실패, 30초 생존하면 클리어.</p>
+    <p id="stage-instructions" class="sr-only">영철을 피해라. 터치 또는 Enter로 시작, 방향키/WASD 또는 화면 버튼으로 이동. 긴급 보호막 이후 영철이 머리에 닿으면 실패, 20초 생존하면 클리어.</p>
     <canvas id="game" width="960" height="540" aria-label="영철을 피해라" aria-describedby="stage-instructions" tabindex="0"></canvas>
     <div class="mobile-controls" aria-label="모바일 조작 버튼">
       <div class="mobile-controls__cluster">
@@ -174,20 +192,23 @@
       const VIEW = { width: canvas.width, height: canvas.height };
       const FIXED_DT = 1 / 60;
       const MAX_DT = 1 / 20;
-      const SURVIVAL_TIME = 30;
-      const WORM_BASE_SPEED = 140;
+      const SURVIVAL_TIME = 20;
+      const WORM_BASE_SPEED = 125;
       const WORM_SEGMENT_SIZE = 10;
       const WORM_INIT_LENGTH = 8;
       const EVOLVE_THRESHOLD = 12;
       const WORM_MAX_LENGTH = 25;
       const PELLET_COUNT = 6;
-      const DEVIL_COUNT_INITIAL = 2;
-      const DEVIL_SPEED = 70;
+      const DEVIL_COUNT_INITIAL = 1;
+      const DEVIL_SPEED = 50;
       const DEVIL_SIZE = 18;
       const PELLET_RADIUS = 7;
       const ARENA_MARGIN = 160;
-      const DEVIL_SPAWN_INTERVAL = 3;
-      const MAX_DEVILS = 10;
+      const DEVIL_SPAWN_INTERVAL = 8;
+      const MAX_DEVILS = 3;
+      const START_GRACE_TIME = 2.5;
+      const DASH_WARNING_TIME = 0.75;
+      const SAFE_SPAWN_DISTANCE = 190;
 
       const relayContext = window.RelayRuntime?.readContext("slither-worm") || {
         history: [],
@@ -219,6 +240,9 @@
         evolveLevel: 0,
         evolveFlash: 0,
         wormThickness: 1.0,
+        shieldCharges: 2,
+        invulnerableTime: 0,
+        shieldFlash: 0,
       };
 
       function inRelayHost() {
@@ -279,13 +303,17 @@
         };
       }
 
-      function spawnDevil() {
-        const edge = Math.floor(Math.random() * 4);
-        let x, y;
-        if (edge === 0) { x = ARENA_MARGIN; y = ARENA_MARGIN + Math.random() * (VIEW.height - ARENA_MARGIN * 2); }
-        else if (edge === 1) { x = VIEW.width - ARENA_MARGIN; y = ARENA_MARGIN + Math.random() * (VIEW.height - ARENA_MARGIN * 2); }
-        else if (edge === 2) { x = ARENA_MARGIN + Math.random() * (VIEW.width - ARENA_MARGIN * 2); y = ARENA_MARGIN; }
-        else { x = ARENA_MARGIN + Math.random() * (VIEW.width - ARENA_MARGIN * 2); y = VIEW.height - ARENA_MARGIN; }
+      function spawnDevil(avoidPoint = null) {
+        let x = ARENA_MARGIN;
+        let y = ARENA_MARGIN;
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const edge = Math.floor(Math.random() * 4);
+          if (edge === 0) { x = ARENA_MARGIN; y = ARENA_MARGIN + Math.random() * (VIEW.height - ARENA_MARGIN * 2); }
+          else if (edge === 1) { x = VIEW.width - ARENA_MARGIN; y = ARENA_MARGIN + Math.random() * (VIEW.height - ARENA_MARGIN * 2); }
+          else if (edge === 2) { x = ARENA_MARGIN + Math.random() * (VIEW.width - ARENA_MARGIN * 2); y = ARENA_MARGIN; }
+          else { x = ARENA_MARGIN + Math.random() * (VIEW.width - ARENA_MARGIN * 2); y = VIEW.height - ARENA_MARGIN; }
+          if (!avoidPoint || dist({ x, y }, avoidPoint) >= SAFE_SPAWN_DISTANCE) break;
+        }
         const angle = Math.random() * Math.PI * 2;
         return {
           x,
@@ -293,7 +321,8 @@
           vx: Math.cos(angle) * DEVIL_SPEED,
           vy: Math.sin(angle) * DEVIL_SPEED,
           bobPhase: Math.random() * Math.PI * 2,
-          dashCooldown: 2 + Math.random() * 4,
+          dashCooldown: 3.5 + Math.random() * 2.5,
+          dashWarning: 0,
           dashing: 0,
         };
       }
@@ -326,6 +355,9 @@
         state.evolveLevel = 0;
         state.evolveFlash = 0;
         state.wormThickness = 1.0;
+        state.shieldCharges = 2;
+        state.invulnerableTime = 0;
+        state.shieldFlash = 0;
         hostFailedReported = false;
         hostClearedReported = false;
         window.relayStageResult.status = "running";
@@ -345,7 +377,7 @@
 
         state.devils = [];
         for (let i = 0; i < DEVIL_COUNT_INITIAL; i++) {
-          state.devils.push(spawnDevil());
+          state.devils.push(spawnDevil(state.worm[0]));
         }
       }
 
@@ -412,8 +444,8 @@
           }
         }
 
-        const speedBonus = 1 + (state.worm.length - WORM_INIT_LENGTH) * 0.02;
-        const wormSpeed = WORM_BASE_SPEED * Math.min(speedBonus, 2.2);
+        const speedBonus = 1 + (state.worm.length - WORM_INIT_LENGTH) * 0.012;
+        const wormSpeed = WORM_BASE_SPEED * Math.min(speedBonus, 1.65);
         state.wormMoveAccum += wormSpeed * dt;
         while (state.wormMoveAccum >= WORM_SEGMENT_SIZE) {
           state.wormMoveAccum -= WORM_SEGMENT_SIZE;
@@ -471,7 +503,7 @@
 
         for (const devil of state.devils) {
           // Move toward worm with some wandering
-          if (head) {
+          if (head && state.elapsed >= START_GRACE_TIME) {
             const dx = head.x - devil.x;
             const dy = head.y - devil.y;
             const d = Math.sqrt(dx * dx + dy * dy);
@@ -485,24 +517,29 @@
           // Dash logic
           if (devil.dashing > 0) {
             devil.dashing -= dt;
-          } else {
-            devil.dashCooldown -= dt;
-            if (devil.dashCooldown <= 0 && head) {
+          } else if (devil.dashWarning > 0) {
+            devil.dashWarning -= dt;
+            if (devil.dashWarning <= 0 && head) {
               const dx2 = head.x - devil.x;
               const dy2 = head.y - devil.y;
               const d2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
               if (d2 > 1) {
-                devil.vx = (dx2 / d2) * DEVIL_SPEED * 5;
-                devil.vy = (dy2 / d2) * DEVIL_SPEED * 5;
-                devil.dashing = 0.3;
-                devil.dashCooldown = 3 + Math.random() * 4;
+                devil.vx = (dx2 / d2) * DEVIL_SPEED * 3.2;
+                devil.vy = (dy2 / d2) * DEVIL_SPEED * 3.2;
+                devil.dashing = 0.34;
               }
+              devil.dashCooldown = 4 + Math.random() * 3;
+            }
+          } else {
+            devil.dashCooldown -= dt;
+            if (devil.dashCooldown <= 0 && head && state.elapsed >= START_GRACE_TIME) {
+              devil.dashWarning = DASH_WARNING_TIME;
             }
           }
 
           // Limit speed
           const spd = Math.sqrt(devil.vx * devil.vx + devil.vy * devil.vy);
-          const dashMax = devil.dashing > 0 ? DEVIL_SPEED * 5 : DEVIL_SPEED * (1 + state.elapsed / SURVIVAL_TIME * 0.8);
+          const dashMax = devil.dashing > 0 ? DEVIL_SPEED * 3.2 : DEVIL_SPEED * (1 + state.elapsed / SURVIVAL_TIME * 0.45);
           if (spd > dashMax) {
             devil.vx = (devil.vx / spd) * dashMax;
             devil.vy = (devil.vy / spd) * dashMax;
@@ -518,11 +555,21 @@
           if (devil.y < ARENA_MARGIN) { devil.y = ARENA_MARGIN; devil.vy = Math.abs(devil.vy); }
           if (devil.y > VIEW.height - ARENA_MARGIN) { devil.y = VIEW.height - ARENA_MARGIN; devil.vy = -Math.abs(devil.vy); }
 
-          // Check collision with any worm segment — instant game over
-          for (let i = 0; i < state.worm.length; i++) {
-            const seg = state.worm[i];
-            if (dist(devil, seg) < DEVIL_SIZE * 0.5 + WORM_SEGMENT_SIZE * 0.5 * state.wormThickness) {
-              spawnParticles(seg.x, seg.y, "#f87171", 20);
+          // Growth should be a reward: only a head hit ends the run.
+          if (
+            state.elapsed >= START_GRACE_TIME &&
+            state.invulnerableTime <= 0 &&
+            head &&
+            dist(devil, head) < DEVIL_SIZE * 0.45 + WORM_SEGMENT_SIZE * 0.42 * state.wormThickness
+          ) {
+            if (state.shieldCharges > 0) {
+              state.shieldCharges -= 1;
+              state.invulnerableTime = 2;
+              state.shieldFlash = 1;
+              spawnParticles(head.x, head.y, "#67e8f9", 28);
+              Object.assign(devil, spawnDevil(head));
+            } else {
+              spawnParticles(head.x, head.y, "#f87171", 20);
               failRun("devil_hit");
               return;
             }
@@ -532,7 +579,7 @@
         // Spawn more devils over time
         state.devilSpawnTimer -= dt;
         if (state.devilSpawnTimer <= 0 && state.devils.length < MAX_DEVILS) {
-          state.devils.push(spawnDevil());
+          state.devils.push(spawnDevil(head));
           state.devilSpawnTimer = DEVIL_SPAWN_INTERVAL;
         }
       }
@@ -550,6 +597,8 @@
       function update(dt) {
         state.gridPulse += dt;
         if (state.evolveFlash > 0) state.evolveFlash = Math.max(0, state.evolveFlash - dt * 2.5);
+        if (state.invulnerableTime > 0) state.invulnerableTime = Math.max(0, state.invulnerableTime - dt);
+        if (state.shieldFlash > 0) state.shieldFlash = Math.max(0, state.shieldFlash - dt * 2.8);
         updateParticles(dt);
 
         if (state.mode !== "running") return;
@@ -660,6 +709,16 @@
 
         const head = state.worm[0];
         const headSize = WORM_SEGMENT_SIZE * 1.1 * thick;
+        if (state.shieldCharges > 0 || state.invulnerableTime > 0) {
+          const shieldAlpha = state.invulnerableTime > 0
+            ? 0.45 + Math.abs(Math.sin(state.invulnerableTime * 18)) * 0.35
+            : 0.5;
+          ctx.beginPath();
+          ctx.arc(head.x, head.y, headSize + 10 + state.shieldFlash * 8, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(103, 232, 249, ${shieldAlpha})`;
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
         ctx.beginPath();
         ctx.arc(head.x, head.y, headSize, 0, Math.PI * 2);
         ctx.fillStyle = state.evolveLevel > 0 ? `hsl(${(120 + evolveHueShift) % 360}, 90%, 65%)` : "#4ade80";
@@ -692,6 +751,23 @@
           const x = devil.x;
           const y = devil.y + bob;
           const s = DEVIL_SIZE;
+
+          if (devil.dashWarning > 0 && state.worm[0]) {
+            const warningAlpha = 0.28 + 0.5 * Math.abs(Math.sin(devil.dashWarning * 18));
+            ctx.save();
+            ctx.strokeStyle = `rgba(248, 113, 113, ${warningAlpha})`;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 7]);
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(state.worm[0].x, state.worm[0].y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.arc(x, y, s * (0.9 + warningAlpha * 0.45), 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+          }
 
           // Dash glow
           if (devil.dashing > 0) {
@@ -806,7 +882,11 @@
         ctx.fillStyle = "rgba(226, 232, 240, 0.6)";
         ctx.font = "500 12px Trebuchet MS";
         const nextEvolve = EVOLVE_THRESHOLD * (state.evolveLevel + 1) - state.maxLength;
-        ctx.fillText(`진화까지 ${Math.max(0, nextEvolve)}칸 · 길수록 빨라짐 · 영철에 닿으면 즉사`, 36, 86);
+        const graceLeft = Math.max(0, START_GRACE_TIME - state.elapsed);
+        const statusCopy = graceLeft > 0
+          ? `무적 ${graceLeft.toFixed(1)}초 · 긴급 보호막 2회`
+          : `보호막 ${state.shieldCharges} · 진화까지 ${Math.max(0, nextEvolve)}칸 · 붉은 예고선을 피하세요`;
+        ctx.fillText(statusCopy, 36, 86);
       }
 
       function roundRect(context, x, y, w, h, r) {
@@ -820,12 +900,15 @@
       }
 
       function renderCard(title, lines, accent) {
-        ctx.fillStyle = "rgba(3, 7, 18, 0.75)";
+        ctx.fillStyle = "rgba(3, 7, 18, 0.82)";
         ctx.fillRect(0, 0, VIEW.width, VIEW.height);
 
-        ctx.fillStyle = "rgba(248, 250, 252, 0.96)";
+        ctx.shadowColor = accent;
+        ctx.shadowBlur = 30;
+        ctx.fillStyle = "rgba(8, 15, 27, 0.97)";
         roundRect(ctx, 140, 80, 680, 380, 28);
         ctx.fill();
+        ctx.shadowBlur = 0;
 
         ctx.strokeStyle = accent;
         ctx.lineWidth = 4;
@@ -837,7 +920,7 @@
         ctx.font = "700 44px Trebuchet MS";
         ctx.fillText(title, VIEW.width / 2, 150);
 
-        ctx.fillStyle = "#0f172a";
+        ctx.fillStyle = "#dbeafe";
         ctx.font = "600 22px Trebuchet MS";
         lines.forEach((line, index) => {
           ctx.fillText(line, VIEW.width / 2, 210 + index * 42);
@@ -852,7 +935,7 @@
           renderCard("영철을 피해라", [
             "알갱이를 먹고 성장! 길수록 빨라진다!",
             `${EVOLVE_THRESHOLD}칸마다 진화: 몸이 두꺼워지고 짧아진다`,
-            "영철에 닿으면 즉사  |  30초 생존하면 클리어",
+            "2.5초 무적 + 긴급 보호막 2회  |  20초 생존",
             "터치 또는 Enter로 시작, 방향키/WASD로 이동 (뒤로 가기 금지)",
           ], "#4ade80");
           return;
@@ -876,7 +959,7 @@
 
         if (state.mode === "cleared") {
           renderCard("CLEAR!", [
-            "30초 동안 생존에 성공했습니다!",
+            "20초 동안 생존에 성공했습니다!",
             `최종 길이: ${state.worm.length}  |  최고 길이: ${state.bestLength}`,
             "다음 스테이지로 이어집니다.",
           ], "#22c55e");
@@ -894,6 +977,10 @@
           head: state.worm.length > 0 ? { x: Math.round(state.worm[0].x), y: Math.round(state.worm[0].y) } : null,
           pellet_count: state.pellets.length,
           devil_count: state.devils.length,
+          shield_charges: state.shieldCharges,
+          invulnerable_remaining: Number(state.invulnerableTime.toFixed(1)),
+          grace_remaining: Number(Math.max(0, START_GRACE_TIME - state.elapsed).toFixed(1)),
+          dash_warning_count: state.devils.filter((devil) => devil.dashWarning > 0).length,
           result: window.relayStageResult.status,
           relay_context: {
             previous_stage_id: relayContext.previousStageId,
@@ -946,8 +1033,8 @@
         title: "영철을 피해라",
         creator: "Contributor",
         genre: "Arcade survival",
-        clearCondition: "30초 동안 영철에 닿지 않고 생존하기",
-        failCondition: "영철에 닿으면 즉시 실패",
+        clearCondition: "긴급 보호막을 활용해 20초 동안 생존하기",
+        failCondition: "보호막이 없는 상태에서 영철이 머리에 닿으면 실패",
       };
       window.relayStageResult = { status: "running" };
       window.relayStageDebug = {
@@ -969,7 +1056,16 @@
           startFromTouch();
         }
       }, { passive: false });
-      canvas.addEventListener("click", () => canvas.focus());
+      canvas.addEventListener("pointerdown", (event) => {
+        if (state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+        }
+      });
+      canvas.addEventListener("click", () => {
+        canvas.focus();
+        startFromTouch();
+      });
       document.querySelectorAll(".mobile-btn").forEach((button) => {
         bindHoldButton(button, button.dataset.control);
       });
