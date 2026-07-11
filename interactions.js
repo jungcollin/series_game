@@ -154,6 +154,10 @@
       if(!el.dataset.scrambleBound) {
         el.dataset.scrambleBound = "true";
         const text = el.dataset.text || el.innerText;
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          el.innerText = text;
+          return;
+        }
         el.innerText = "";
         const fx = new Scrambler(el);
         setTimeout(() => fx.setText(text), 200);

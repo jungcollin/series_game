@@ -14,11 +14,14 @@
 - Mobile leaderboard: `output/relay-tools/main-host-mobile-leaderboard.png`
 - Mobile game-over: `output/relay-tools/main-host-mobile-game-over.png`
 - All-clear: `output/relay-tools/main-host-flow-all-clear.png`
+- Restored title settled state: `output/design-qa/home-title-restored.png`
+- Restored title entrance state: `output/design-qa/title-entrance-restored.png`
 
 ## Viewports and states
 
 - Desktop: 1440 × 1024, initial daily route, Galaxy Boss ready state.
 - Mobile: 390 × 844, initial home, prompt modal, leaderboard modal, and game-over overlay.
+- Title focus: 1440 × 1024 page, captured during the entrance scramble and after settling.
 - Functional route: five curated stages, all-clear at 5 / 5, restart at 0 / 5.
 
 ## Full comparison
@@ -30,6 +33,7 @@
 ## Focused comparison
 
 - Title: matching oversized condensed geometry, black negative space, pink/red/violet/cyan spectrum, and continuous background-position motion. Reduced-motion users receive a static chromatic frame.
+- Title motion follow-up: the original scramble entrance and periodic cyan/magenta slice glitches are restored; the settled title remains readable and keeps the approved chromatic field. Reduced-motion users skip both motion layers.
 - Game region: matching thin-line frame, left briefing rail, compact HUD, and 5-stage progress. Live stage content is allowed to retain each creator's visual identity.
 - Mobile: the wordmark remains the first visual anchor, navigation fits without horizontal overflow, route cards collapse to a two-column grid, and overlays stay fully reachable.
 
@@ -41,6 +45,7 @@
 4. Fixed game-over overlay clipping by bringing the result into view and stacking its form controls.
 5. Removed automatic iframe focus that skipped the mobile hero on first load; explicit start still moves focus into gameplay.
 6. Re-ran the full 5-stage host flow, restart, modal, game-over, desktop, and 390px responsive checks.
+7. Restored the original title's scramble entrance and cyan/magenta slice-glitch layers after user comparison feedback, while retaining the approved large chromatic wordmark.
 
 ## Result
 
