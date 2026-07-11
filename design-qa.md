@@ -46,6 +46,7 @@
 5. Removed automatic iframe focus that skipped the mobile hero on first load; explicit start still moves focus into gameplay.
 6. Re-ran the full 5-stage host flow, restart, modal, game-over, desktop, and 390px responsive checks.
 7. Restored the original title's scramble entrance and cyan/magenta slice-glitch layers after user comparison feedback, while retaining the approved large chromatic wordmark.
+8. Guarded the interaction observer target after public-browser verification exposed an initialization edge case; the final public pass reports no console errors.
 
 ## Result
 

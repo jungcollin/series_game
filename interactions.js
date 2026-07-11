@@ -190,10 +190,13 @@
       }
     });
 
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
+    const observeTarget = document.body || document.documentElement;
+    if (observeTarget instanceof Node) {
+      observer.observe(observeTarget, {
+        childList: true,
+        subtree: true,
+      });
+    }
   });
 
 })();
