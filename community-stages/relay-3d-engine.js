@@ -121,6 +121,10 @@
     updateHud();
     if (state.score >= cfg.target) clearStage(cfg.clearCondition);
   }
+  function difficultyAt(seconds) {
+    var limit = cfg.mode === "runner" ? cfg.duration : (cfg.timeLimit || 30);
+    return Math.max(0, Math.min(1, Number(seconds || 0) / Math.max(1, limit)));
+  }
   function spawnEntity() {
     var goodChance = cfg.mode === "runner" ? 0 : (cfg.mode === "shooter" ? 0.72 : 0.64);
     var good = Math.random() < goodChance;
@@ -479,7 +483,9 @@
   window.render_game_to_text = function () {
     return JSON.stringify({
       mode: state.mode, result: window.relayStageResult.status, elapsed: Number(state.elapsed.toFixed(2)),
+      phase: cfg.mode.toUpperCase(),
       lane: state.lane, score: state.score, target: cfg.mode === "runner" ? cfg.duration : cfg.target,
+      difficulty: Number(difficultyAt(state.elapsed).toFixed(4)),
       mistakes: state.mistakes, nearby_entities: entities.filter(function (e) { return e.z > -28; }).map(function (e) { return { lane: e.lane, distance: Number(Math.abs(e.z).toFixed(1)), kind: e.good ? "objective" : "danger" }; }),
       relay_context: { previous_stage_id: relayContext.previousStageId, clear_count_before_this_stage: relayContext.clearCount }
     });
@@ -490,6 +496,7 @@
     return window.render_game_to_text();
   };
   window.relayStageDebug = {
+    difficultyAt: difficultyAt,
     forceClear: function () { if (state.mode !== "running") start(); clearStage("디버그 클리어"); },
     forceFail: function () { if (state.mode !== "running") start(); failStage("디버그 실패"); }
   };
