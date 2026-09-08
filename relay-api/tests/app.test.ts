@@ -41,6 +41,88 @@ test("rejects unverified leaderboard and stage ranking writes", async () => {
   assert.equal((await json(global)).error, "verified_results_required");
 });
 
+test("legacy ranking POSTs stay closed and do not mutate stored history", async () => {
+  const { app, store } = makeApp();
+  await store.insertLeaderboard({
+    run_id: "run-history01",
+    player_name: "기존기록",
+    clear_count: 3,
+    duration_sec: 40.2,
+    finished_all_clear: false,
+    stages: ["galaxy-boss", "slither-worm", "lightning-dodge"],
+  });
+  const spoofed = await app.request("/v1/leaderboard", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_id: "run-spoofed01",
+      player_name: "스푸핑",
+      clear_count: "5",
+      duration_sec: "1",
+      finished_all_clear: "false",
+      stages: ["galaxy-boss"],
+    }),
+  });
+  assert.equal(spoofed.status, 410);
+  assert.equal((await json(spoofed)).error, "verified_results_required");
+
+  const listed = await json(await app.request("/v1/leaderboard")) as {
+    verified: boolean;
+    entries: Array<{ player_name: string; run_id: string }>;
+  };
+  assert.equal(listed.verified, false);
+  assert.equal(listed.entries.length, 1);
+  assert.equal(listed.entries[0].player_name, "기존기록");
+  assert.equal(listed.entries[0].run_id, "run-history01");
+});
+
+test("write endpoints reject coerced votes, invalid ids, and oversized payloads", async () => {
+  const { app, store } = makeApp();
+  const headers = await session(app);
+
+  const stringVote = await app.request("/v1/votes", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ stage_id: "fly-bird", vote: "1" }),
+  });
+  assert.equal(stringVote.status, 400);
+  assert.equal((await json(stringVote)).error, "invalid_input");
+
+  const badStage = await app.request("/v1/votes", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ stage_id: "../etc/passwd", vote: 1 }),
+  });
+  assert.equal(badStage.status, 400);
+
+  const oversized = await app.request("/v1/votes", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ stage_id: "fly-bird", vote: 1, pad: "x".repeat(20 * 1024) }),
+  });
+  assert.equal(oversized.status, 413);
+  assert.equal((await json(oversized)).error, "payload_too_large");
+
+  const emptyComment = await app.request("/v1/stages/fly-bird/comments", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ author_name: "콜린", body: "" }),
+  });
+  assert.equal(emptyComment.status, 400);
+
+  const scores = await json(await app.request("/v1/votes")) as { scores: unknown[] };
+  assert.deepEqual(scores.scores, []);
+  assert.equal((await store.listComments("fly-bird", 10)).length, 0);
+});
+
+test("query limit digit strings still work and junk query values return invalid_input", async () => {
+  const { app } = makeApp();
+  assert.equal((await app.request("/v1/leaderboard?limit=10")).status, 200);
+  const invalid = await app.request("/v1/leaderboard?limit=nope");
+  assert.equal(invalid.status, 400);
+  assert.equal((await json(invalid)).error, "invalid_input");
+});
+
 test("keeps historical rankings read-only without exposing visitor ids", async () => {
   const { app, store } = makeApp();
   await store.upsertStageRanking({ stage_id: "fly-bird", visitor_id: "private-visitor-id", player_name: "기존기록", duration_sec: 9.4 });

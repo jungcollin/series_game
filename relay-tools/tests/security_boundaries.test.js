@@ -43,11 +43,19 @@ test("contributor documentation uses the sandbox-compatible runtime bridge", () 
 test("PR and Pages workflows keep untrusted code read-only and main-only", () => {
   const review = read(".github/workflows/relay-pr-review.yml");
   const pages = read(".github/workflows/deploy-pages.yml");
+  const verify = read(".github/workflows/verify.yml");
   assert.doesNotMatch(review, /pull-requests:\s*write|RELAY_REVIEW_TOKEN|event:\s*['"]?APPROVE/);
   assert.match(review, /persist-credentials:\s*false/);
   assert.match(review, /--directory "\$RUNNER_TEMP\/relay-site"/);
   assert.doesNotMatch(pages, /codex\/local-relay-workflow/);
   assert.match(pages, /if: github\.ref == 'refs\/heads\/main'/);
+  assert.match(pages, /needs:\s*verify/);
+  assert.match(pages, /build_pages_site\.js/);
+  assert.match(verify, /npm test/);
+  assert.match(verify, /npm run test:api/);
+  assert.match(verify, /typecheck/);
+  assert.doesNotMatch(verify, /secrets\.|DATABASE_URL|SESSION_SIGNING_SECRET/);
+  assert.doesNotMatch(pages, /secrets\.|DATABASE_URL|SESSION_SIGNING_SECRET/);
 });
 
 test("stage browser checks block HTTP, WebSocket, and service worker egress", () => {

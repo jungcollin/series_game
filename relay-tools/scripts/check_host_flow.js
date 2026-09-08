@@ -63,6 +63,28 @@ async function getRelayFrame(page) {
   return frame;
 }
 
+async function waitForRelayIdle(page) {
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector("#relay-overlay");
+    const title = document.querySelector("#relay-overlay-title")?.textContent || "";
+    return overlay && overlay.hidden === false && title === "READY";
+  }, null, { timeout: 8000 });
+
+  const frameHandle = await page.$("#relay-frame");
+  const frame = await frameHandle.contentFrame();
+  const started = frame
+    ? await frame.evaluate(() => Boolean(window.relayStageDebug || window.relayStageMeta)).catch(() => false)
+    : false;
+  if (started) {
+    throw new Error("Relay started before the player asked to begin.");
+  }
+}
+
+async function startDailyRun(page) {
+  await waitForRelayIdle(page);
+  await page.click("#start-relay");
+}
+
 async function waitForStageReady(page) {
   await page.waitForFunction(() => {
     const stageTitle = document.querySelector("#run-stage-title")?.textContent || "";
@@ -231,6 +253,7 @@ async function runMobileChecks(browser, baseUrl, outputDir, consoleErrors) {
   });
 
   await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
+  await waitForRelayIdle(page);
 
   const home = await assertMobilePageFits(page, "home");
   const homeScreenshot = path.join(outputDir, "main-host-mobile-home.png");
@@ -257,6 +280,7 @@ async function runMobileChecks(browser, baseUrl, outputDir, consoleErrors) {
   await page.click("#close-leaderboard");
   await waitForModalState(page, "#leaderboard-modal", false);
 
+  await startDailyRun(page);
   const frame = await waitForStageReady(page);
   await frame.evaluate(() => {
     window.relayStageDebug.forceFail();
@@ -307,6 +331,7 @@ async function main() {
   });
 
   await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
+  await startDailyRun(page);
 
   const visitedStageIds = [];
   for (;;) {

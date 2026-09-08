@@ -68,19 +68,17 @@ export function normalizeRunId(value: unknown): string {
 }
 
 export function normalizeDuration(value: unknown, min: number, max: number): number {
-  const duration = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(duration) || duration < min || duration > max) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
     throw new ValidationError("기록 시간이 올바르지 않습니다.");
   }
-  return Number(duration.toFixed(1));
+  return Number(value.toFixed(1));
 }
 
 export function normalizeClearCount(value: unknown): number {
-  const count = typeof value === "number" ? value : Number(value);
-  if (!Number.isInteger(count) || count < 0 || count > 999) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 999) {
     throw new ValidationError("클리어 수가 올바르지 않습니다.");
   }
-  return count;
+  return value;
 }
 
 export function normalizeStages(value: unknown): string[] {
@@ -91,15 +89,19 @@ export function normalizeStages(value: unknown): string[] {
   if (value.length > 32) {
     throw new ValidationError("스테이지 목록이 너무 깁니다.");
   }
-  return value.map((item) => normalizeStageId(item));
+  const stages = value.map((item) => normalizeStageId(item));
+  const unique = new Set(stages.map((stageId) => stageId.toLowerCase()));
+  if (unique.size !== stages.length) {
+    throw new ValidationError("스테이지 목록이 올바르지 않습니다.");
+  }
+  return stages;
 }
 
 export function normalizeVote(value: unknown): 1 | -1 {
-  const vote = typeof value === "number" ? value : Number(value);
-  if (vote !== 1 && vote !== -1) {
+  if (value !== 1 && value !== -1) {
     throw new ValidationError("투표 값이 올바르지 않습니다.");
   }
-  return vote;
+  return value;
 }
 
 export function normalizeCommentBody(value: unknown): string {
@@ -112,6 +114,9 @@ export function normalizeCommentBody(value: unknown): string {
 
 export function parseLimit(value: string | undefined, fallback: number, max: number): number {
   if (value == null || value === "") return fallback;
+  if (!/^[1-9]\d{0,8}$/.test(value)) {
+    throw new ValidationError("limit 값이 올바르지 않습니다.");
+  }
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) {
     throw new ValidationError("limit 값이 올바르지 않습니다.");
@@ -119,15 +124,31 @@ export function parseLimit(value: string | undefined, fallback: number, max: num
   return Math.min(parsed, max);
 }
 
+/**
+ * Strict body parser for ranking writes. Current POST routes return 410 without
+ * calling this; keep the contract so restored writes cannot coerce "false"/NaN.
+ */
 export function readLeaderboardInput(value: unknown) {
   const body = asRecord(value);
+  const clearCount = normalizeClearCount(body.clear_count);
+  const stages = normalizeStages(body.stages);
+  if (clearCount !== stages.length) {
+    throw new ValidationError("클리어 수와 스테이지 목록이 일치하지 않습니다.");
+  }
+  if (body.finished_all_clear !== undefined && typeof body.finished_all_clear !== "boolean") {
+    throw new ValidationError("완주 여부가 올바르지 않습니다.");
+  }
+  const finishedAllClear = body.finished_all_clear === true;
+  if (finishedAllClear && stages.length === 0) {
+    throw new ValidationError("완주 기록에는 스테이지 목록이 필요합니다.");
+  }
   return {
     runId: normalizeRunId(body.run_id),
     playerName: normalizeName(body.player_name, "닉네임", 2, 24),
-    clearCount: normalizeClearCount(body.clear_count),
+    clearCount,
     durationSec: normalizeDuration(body.duration_sec, 0, 36000),
-    finishedAllClear: Boolean(body.finished_all_clear),
-    stages: normalizeStages(body.stages),
+    finishedAllClear,
+    stages,
   };
 }
 

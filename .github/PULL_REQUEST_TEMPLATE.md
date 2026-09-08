@@ -20,4 +20,5 @@
 해당없으면 이 절은 지워도 됩니다.
 
 - [ ] `npm test` 통과
+- [ ] API를 바꿨으면 `npm run test:api`와 `npm run typecheck --prefix relay-api` 통과
 - [ ] 호스트 UI를 바꿨으면 `check_host_flow.js`도 실행

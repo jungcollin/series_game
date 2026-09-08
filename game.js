@@ -51,6 +51,8 @@ const state = {
   dailyDateKey: "",
   dailyRoute: [],
   focusRequested: false,
+  outcome: null,
+  failedStageTitle: "",
 };
 
 function renderDailyRoute() {
@@ -217,13 +219,6 @@ function updateRunResult(outcome, extra = {}) {
     outcome,
     ...extra,
   };
-}
-
-function accumulateRunDuration(durationSec) {
-  if (!Number.isFinite(durationSec) || durationSec < 0) {
-    return;
-  }
-  state.runDurationSec = Number((state.runDurationSec + durationSec).toFixed(1));
 }
 
 function makeRunId() {
@@ -469,12 +464,17 @@ function updateRunHeader() {
     return;
   }
 
+  if (state.status === "incomplete") {
+    runStageTitleEl.textContent = "완주로 치지 않습니다";
+    return;
+  }
+
   if (state.currentStage) {
     runStageTitleEl.textContent = state.currentStage.title;
     return;
   }
 
-  runStageTitleEl.textContent = "랜덤 스테이지를 고르는 중…";
+  runStageTitleEl.textContent = "도전 시작을 누르면 첫 게임이 준비됩니다";
 }
 
 function clearTransitionTimer() {
@@ -491,11 +491,74 @@ function clearReadyTimer() {
   }
 }
 
-function markStageUnavailable(stageId) {
-  if (!stageId || state.history.includes(stageId) || state.unavailableStageIds.includes(stageId)) {
+function applyRunEvent(event) {
+  const next = window.RelayRunState.reduce({
+    dailyRoute: state.dailyRoute,
+    runId: state.runId,
+    status: state.status,
+    clearCount: state.clearCount,
+    history: state.history,
+    unavailableStageIds: state.unavailableStageIds,
+    currentStage: state.currentStage,
+    runDurationSec: state.runDurationSec,
+    outcome: state.outcome,
+    failedStageTitle: state.failedStageTitle,
+  }, event);
+  state.runId = next.runId;
+  state.status = next.status;
+  state.clearCount = next.clearCount;
+  state.history = next.history;
+  state.unavailableStageIds = next.unavailableStageIds;
+  state.currentStage = next.currentStage;
+  state.runDurationSec = next.runDurationSec;
+  state.outcome = next.outcome;
+  state.failedStageTitle = next.failedStageTitle;
+  return next;
+}
+
+function showTerminalOverlay() {
+  if (state.status === "complete") {
+    updateRunResult("all-clear");
+    showOverlay({
+      kicker: "Run Complete",
+      title: "ALL CLEAR",
+      copy: `이번 플레이에서 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
+      buttonLabel: "처음부터 다시",
+    });
     return;
   }
-  state.unavailableStageIds.push(stageId);
+
+  if (state.status === "incomplete") {
+    updateRunResult("incomplete");
+    showOverlay({
+      kicker: "Run Stopped",
+      title: "ROUTE BLOCKED",
+      copy: `클리어 ${state.clearCount}개. 나머지 스테이지는 준비되지 않아 완주로 치지 않습니다. 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
+      buttonLabel: "처음부터 다시",
+    });
+    return;
+  }
+
+  if (state.status === "gameover") {
+    updateRunResult("failed", { failedStageTitle: state.failedStageTitle });
+    showOverlay({
+      kicker: "Run Over",
+      title: "GAME OVER",
+      copy: `${state.failedStageTitle || "현재 스테이지"}에서 실패했습니다. 이번 런은 끝났지만 처음부터 다시 도전할 수 있습니다. 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
+      buttonLabel: "처음부터 다시",
+      buttonAction: "restart",
+    });
+  }
+}
+
+function continueCurrentRun() {
+  applyRunEvent({ type: "continue" });
+  updateRunHeader();
+  if (state.status === "loading" && state.currentStage) {
+    loadStage(state.currentStage);
+    return;
+  }
+  showTerminalOverlay();
 }
 
 function buildStageUrl(stage) {
@@ -512,39 +575,27 @@ function buildStageUrl(stage) {
   });
 }
 
-function pickNextStage() {
-  if (!state.dailyRoute.length) {
-    return null;
-  }
-  return state.dailyRoute.find((entry) => (
-    !state.history.includes(entry.id) && !state.unavailableStageIds.includes(entry.id)
-  )) || null;
-}
-
 function handleStageLoadTimeout() {
   if (!state.currentStage || state.status !== "loading") {
     return;
   }
 
   clearReadyTimer();
-  state.status = "load-error";
-  markStageUnavailable(state.currentStage.id);
-    updateRunHeader();
-    showOverlay({
-      kicker: "Stage Error",
-      title: "LOAD FAILED",
-      copy: `${state.currentStage.title} 스테이지가 준비 신호를 보내지 못했습니다. 이번 플레이에서는 제외하고 다음 스테이지로 건너뛸 수 있습니다.`,
-      buttonLabel: "다음 스테이지로",
-      buttonAction: "skip-stage",
-      secondaryButtonLabel: "처음부터 다시",
+  applyRunEvent({ type: "load-failed", stageId: state.currentStage.id });
+  updateRunHeader();
+  showOverlay({
+    kicker: "Stage Error",
+    title: "LOAD FAILED",
+    copy: `${state.currentStage.title} 스테이지가 준비 신호를 보내지 못했습니다. 이번 플레이에서는 제외하고 다음 스테이지로 건너뛸 수 있습니다.`,
+    buttonLabel: "다음 스테이지로",
+    buttonAction: "skip-stage",
+    secondaryButtonLabel: "처음부터 다시",
     secondaryButtonAction: "restart",
   });
 }
 
 function loadStage(stage) {
   clearReadyTimer();
-  state.currentStage = stage;
-  state.status = "loading";
   hideOverlay();
   updateRunHeader();
   state.stageMessageToken = makeStageMessageToken();
@@ -554,61 +605,47 @@ function loadStage(stage) {
   }, STAGE_READY_TIMEOUT_MS);
 }
 
-function startNextRandomStage() {
-  const nextStage = pickNextStage();
-  if (!nextStage) {
-    state.currentStage = null;
-    state.status = "complete";
-    updateRunHeader();
-    updateRunResult("all-clear");
-    showOverlay({
-      kicker: "Run Complete",
-      title: "ALL CLEAR",
-      copy: `이번 플레이에서 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
-      buttonLabel: "처음부터 다시",
-    });
-    return;
-  }
-
-  loadStage(nextStage);
+function showIdlePrompt() {
+  clearTransitionTimer();
+  clearReadyTimer();
+  showOverlay({
+    kicker: "Today's Relay",
+    title: "READY",
+    copy: "실패하면 이번 도전이 끝납니다. 처음부터 다시 도전할 수 있습니다.",
+    buttonLabel: "도전 시작",
+    buttonAction: "start",
+  });
+  updateRunHeader();
 }
 
 function startNewRun() {
   clearTransitionTimer();
   clearReadyTimer();
-  state.runId = makeRunId();
-  state.clearCount = 0;
-  state.runDurationSec = 0;
-  state.history = [];
-  state.unavailableStageIds = [];
-  state.currentStage = null;
   state.lastRunResult = null;
   state.stageMessageToken = "";
-  state.status = "loading";
   if (!state.dailyRoute.length) prepareDailyRoute();
+  applyRunEvent({ type: "begin-run", runId: makeRunId() });
   hideOverlay();
   updateRunHeader();
-  startNextRandomStage();
-}
-
-function markCurrentStageCleared() {
-  if (!state.currentStage) {
+  if (state.status === "loading" && state.currentStage) {
+    loadStage(state.currentStage);
     return;
   }
-  if (!state.history.includes(state.currentStage.id)) {
-    state.history.push(state.currentStage.id);
-    state.clearCount = state.history.length;
-  }
+  showTerminalOverlay();
 }
 
 function handleStageCleared(payload = {}) {
-  if (state.status === "gameover" || state.status === "complete") {
+  const stageId = state.currentStage?.id;
+  applyRunEvent({
+    type: "stage-cleared",
+    stageId,
+    durationSec: payload.durationSec,
+    stageTitle: payload.stageTitle,
+  });
+  if (state.status !== "await-advance") {
     return;
   }
   clearReadyTimer();
-  accumulateRunDuration(Number(payload.durationSec || 0));
-  markCurrentStageCleared();
-  state.status = "transition";
   if (payload.stageTitle) {
     runStageTitleEl.textContent = `${payload.stageTitle} 클리어`;
   } else {
@@ -616,34 +653,31 @@ function handleStageCleared(payload = {}) {
   }
   clearTransitionTimer();
   state.transitionTimer = window.setTimeout(() => {
-    startNextRandomStage();
+    continueCurrentRun();
   }, 260);
 }
 
 function handleStageFailed(payload = {}) {
+  applyRunEvent({
+    type: "stage-failed",
+    stageId: state.currentStage?.id,
+    durationSec: payload.durationSec,
+    stageTitle: payload.stageTitle || state.currentStage?.title,
+  });
+  if (state.status !== "gameover") {
+    return;
+  }
   clearTransitionTimer();
   clearReadyTimer();
-  accumulateRunDuration(Number(payload.durationSec || 0));
-  state.status = "gameover";
   updateRunHeader();
-  const stageTitle = payload.stageTitle || state.currentStage?.title || "현재 스테이지";
-  updateRunResult("failed", {
-    failedStageTitle: stageTitle,
-  });
-  showOverlay({
-    kicker: "Run Over",
-    title: "GAME OVER",
-    copy: `${stageTitle}에서 실패했습니다. 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
-    buttonLabel: "처음부터 다시",
-    buttonAction: "restart",
-  });
+  showTerminalOverlay();
 }
 
 function performOverlayAction(action) {
   if (action === "skip-stage") {
     clearTransitionTimer();
     clearReadyTimer();
-    startNextRandomStage();
+    continueCurrentRun();
     return;
   }
 
@@ -659,21 +693,21 @@ function makeStageMessageToken() {
 
 const stageMessageHandlers = {
   ready(meta = {}) {
-    if (state.status === "loading" && meta.title && state.currentStage && meta.id === state.currentStage.id) {
-      clearReadyTimer();
-      state.currentStage = { ...state.currentStage, ...meta };
-      state.status = "playing";
-      updateRunHeader();
-      window.setTimeout(() => {
-        if (state.focusRequested) {
-          relayFrameEl?.scrollIntoView({ behavior: "smooth", block: "center" });
-          relayFrameEl?.focus({ preventScroll: true });
-          state.focusRequested = false;
-        } else if (state.clearCount === 0) {
-          window.scrollTo({ top: 0, behavior: "instant" });
-        }
-      }, 80);
+    applyRunEvent({ type: "stage-ready", stageId: meta.id, meta });
+    if (state.status !== "playing") {
+      return;
     }
+    clearReadyTimer();
+    updateRunHeader();
+    window.setTimeout(() => {
+      if (state.focusRequested) {
+        relayFrameEl?.scrollIntoView({ behavior: "smooth", block: "center" });
+        relayFrameEl?.focus({ preventScroll: true });
+        state.focusRequested = false;
+      } else if (state.clearCount === 0) {
+        window.scrollTo({ top: 0, behavior: "instant" });
+      }
+    }, 80);
   },
   cleared(payload = {}) {
     handleStageCleared(payload);
@@ -685,14 +719,14 @@ const stageMessageHandlers = {
 
 window.addEventListener("message", (event) => {
   const message = event.data;
-  const payloadStageId = message?.type === "ready" ? message?.payload?.id : message?.payload?.stageId;
   if (
     event.source !== relayFrameEl?.contentWindow ||
-    !message || message.channel !== "one-life-relay-stage" ||
-    message.token !== state.stageMessageToken ||
-    !message.payload || typeof message.payload !== "object" ||
-    payloadStageId !== state.currentStage?.id
+    !message ||
+    message.token !== state.stageMessageToken
   ) return;
+  if (!window.RelayRunState.isCurrentStageMessage({
+    currentStage: state.currentStage,
+  }, message, state.stageMessageToken)) return;
   stageMessageHandlers[message.type]?.(message.payload);
 });
 
@@ -773,7 +807,11 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (event.key === "Enter" && !relayOverlayEl.hidden) {
+  if (event.key === "Enter" && window.RelayRunState.shouldAcceptOverlayShortcut({
+    overlayHidden: Boolean(relayOverlayEl?.hidden),
+    modalOpen: promptModalEl?.dataset.open === "true" || leaderboardModalEl?.dataset.open === "true",
+    target: event.target,
+  })) {
     event.preventDefault();
     performOverlayAction(state.overlayPrimaryAction);
   }
@@ -793,6 +831,6 @@ async function loadLikeCounts() {
 }
 
 prepareDailyRoute();
-startNewRun();
+showIdlePrompt();
 loadLeaderboard();
 loadLikeCounts().then(renderDailyRoute);
