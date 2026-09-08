@@ -7,6 +7,9 @@ AI 시대, 게임 만들기가 이렇게 쉬워졌는데 — 직접 만든 게�
 One Life Relay는 **누구나 게임 스테이지를 만들어서 올릴 수 있는** 오픈소스 아케이드 릴레이 게임입니다.
 Claude, ChatGPT, Cursor 뭘 쓰든 상관없습니다. HTML 파일 하나면 당신의 스테이지가 다른 플레이어에게 랜덤으로 돌아갑니다.
 
+라이브 서비스: [relay.collinworks.dev](https://relay.collinworks.dev)<br>
+저장소: [github.com/jungcollin/series_game](https://github.com/jungcollin/series_game)
+
 현재 **100개 이상의 커뮤니티 스테이지**가 등록되어 있습니다.
 
 ## 규칙은 단순합니다
@@ -86,6 +89,22 @@ python3 -m http.server 4173
 
 별도 빌드 과정 없이 바로 브라우저에서 플레이할 수 있습니다.
 
+## 테스트
+
+Node.js 18 이상과 의존성을 설치한 뒤 저장소의 검증 스위트를 실행할 수 있습니다.
+
+```bash
+npm ci
+npm test
+```
+
+스테이지를 브라우저에서 확인하려면 별도 터미널에서 아래 명령을 실행하세요.
+
+```bash
+python3 -m http.server 4173
+# http://127.0.0.1:4173
+```
+
 ## 기술 스택
 
 - Vanilla HTML / CSS / JavaScript
@@ -99,4 +118,4 @@ python3 -m http.server 4173
 
 ## License
 
-MIT
+프로젝트 코드는 [MIT License](./LICENSE)로 배포합니다. 스테이지를 기여할 때는 해당 코드와 이미지·사운드 등 에셋을 공개적으로 배포할 권리가 있는지 확인해 주세요. 별도의 라이선스 고지가 있는 파일이나 스테이지에는 해당 고지가 우선합니다.
