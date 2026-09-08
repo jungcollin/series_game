@@ -20,10 +20,6 @@ const dailyRouteListEl = document.querySelector("#daily-route-list");
 const startRelayBtn = document.querySelector("#start-relay");
 
 const STAGE_READY_TIMEOUT_MS = 4000;
-const SUPABASE_URL = "https://ikrhlbwsrahnswuhuyka.supabase.co";
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlrcmhsYndzcmFobnN3dWh1eWthIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MDA3OTgsImV4cCI6MjA4OTQ3Njc5OH0.Gg9sjaq-Mwv0sqOm1G4u0sIyMmkUtTccW5nL-TuMDnk";
-const SUPABASE_TABLE = "leaderboard_runs";
 const LEADERBOARD_LIMIT = 10;
 const LEADERBOARD_FETCH_LIMIT = 50;
 const PLAYER_NAME_STORAGE_KEY = "one-life-relay-player-name";
@@ -204,38 +200,20 @@ function sortLeaderboardEntries(entries) {
   });
 }
 
-async function supabaseRequest(path, options = {}) {
-  const response = await window.fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    method: options.method || "GET",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
-  if (!response.ok) {
-    throw new Error(payload?.message || payload?.error_description || `Supabase ${response.status}`);
+async function relayApiRequest(path, options = {}) {
+  if (!window.RelayApi) {
+    throw new Error("Relay API is not loaded");
   }
-  return payload;
+  return window.RelayApi.request(path, options);
 }
 
 async function loadLeaderboard() {
-  if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
-    state.leaderboardEntries = [];
-    renderLeaderboard([]);
-    setLeaderboardStatus("로컬 미리보기에서는 랭킹 동기화를 생략합니다.");
-    return;
-  }
   setLeaderboardStatus("랭킹을 불러오는 중…");
   try {
-    const rows = await supabaseRequest(
-      `${SUPABASE_TABLE}?select=player_name,clear_count,duration_sec,finished_all_clear,created_at&limit=${LEADERBOARD_FETCH_LIMIT}`
+    const payload = await relayApiRequest(
+      `/v1/leaderboard?limit=${LEADERBOARD_FETCH_LIMIT}`
     );
+    const rows = Array.isArray(payload?.entries) ? payload.entries : [];
     const entries = sortLeaderboardEntries(rows).slice(0, LEADERBOARD_LIMIT);
     state.leaderboardEntries = entries;
     renderLeaderboard(entries);
@@ -329,11 +307,8 @@ async function saveCurrentRunToLeaderboard(event) {
   }
 
   try {
-    await supabaseRequest(SUPABASE_TABLE, {
+    await relayApiRequest("/v1/leaderboard", {
       method: "POST",
-      headers: {
-        Prefer: "return=representation",
-      },
       body: {
         run_id: state.lastRunResult.runId,
         player_name: playerName,
@@ -363,7 +338,7 @@ async function saveCurrentRunToLeaderboard(event) {
     }
     if (rankingSaveStatusEl) {
       rankingSaveStatusEl.textContent =
-        "랭킹 저장에 실패했습니다. Supabase 테이블과 anon insert 정책을 확인해 주세요.";
+        "랭킹 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.";
     }
   }
 }
@@ -909,11 +884,6 @@ document.addEventListener("keydown", (event) => {
 });
 
 async function loadLikeCounts() {
-  if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
-    state.likeCounts = new Map();
-    state.likeCountsLoaded = false;
-    return;
-  }
   if (!window.LikesClient) {
     return;
   }
