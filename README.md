@@ -116,6 +116,8 @@ python3 -m http.server 4173
 
 **Collin Jung** — [Portfolio](https://jungcollin.github.io/collin-portfolio)
 
+콜린웍스 후원: [Buy Me a Coffee](https://buymeacoffee.com/collinworks)
+
 ## License
 
 프로젝트 코드는 [MIT License](./LICENSE)로 배포합니다. 스테이지를 기여할 때는 해당 코드와 이미지·사운드 등 에셋을 공개적으로 배포할 권리가 있는지 확인해 주세요. 별도의 라이선스 고지가 있는 파일이나 스테이지에는 해당 고지가 우선합니다.
