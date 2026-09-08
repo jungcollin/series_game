@@ -1,6 +1,7 @@
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { Hono } from "hono";
+import { createSessionToken, requireSessionSubject, UnauthorizedError } from "./auth.js";
 import type { Config } from "./config.js";
 import { createRateLimitMiddleware } from "./rate-limit.js";
 import type { RelayStore } from "./store.js";
@@ -8,11 +9,8 @@ import {
   DuplicateError,
   ValidationError,
   normalizeStageId,
-  normalizeVisitorId,
   parseLimit,
   readCommentInput,
-  readLeaderboardInput,
-  readStageRankingInput,
   readVoteInput,
   readVoteTarget,
 } from "./validate.js";
@@ -34,7 +32,7 @@ export function createApp(store: RelayStore, config: Config) {
   app.use("*", cors({
     origin: (origin) => (origin && config.corsOrigins.has(origin) ? origin : undefined),
     allowMethods: ["GET", "PUT", "POST", "DELETE", "HEAD", "OPTIONS"],
-    allowHeaders: ["Content-Type"],
+    allowHeaders: ["Content-Type", "Authorization"],
     maxAge: 86_400,
   }));
 
@@ -57,69 +55,38 @@ export function createApp(store: RelayStore, config: Config) {
     }
   });
 
+  app.post("/v1/session", writeLimit, (c) => {
+    const session = createSessionToken(config.sessionSigningSecret);
+    return c.json({ token: session.token, expires_at: session.expiresAt }, 201);
+  });
+
   app.get("/v1/leaderboard", async (c) => {
     try {
       const limit = parseLimit(c.req.query("limit"), 50, 50);
       const entries = await store.listLeaderboard(limit);
-      return c.json({ entries });
+      return c.json({ entries, verified: false });
     } catch (error) {
       return fail(c, error);
     }
   });
 
   app.post("/v1/leaderboard", writeLimit, async (c) => {
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "invalid_json", message: "요청 본문이 올바르지 않습니다." }, 400);
-    }
-    try {
-      const input = readLeaderboardInput(body);
-      const entry = await store.insertLeaderboard({
-        run_id: input.runId,
-        player_name: input.playerName,
-        clear_count: input.clearCount,
-        duration_sec: input.durationSec,
-        finished_all_clear: input.finishedAllClear,
-        stages: input.stages,
-      });
-      return c.json({ entry }, 201);
-    } catch (error) {
-      return fail(c, error);
-    }
+    return c.json({ error: "verified_results_required", message: "검증되지 않은 클라이언트 기록 등록은 중단되었습니다." }, 410);
   });
 
   app.get("/v1/stages/:stageId/rankings", async (c) => {
     try {
       const stageId = normalizeStageId(c.req.param("stageId"));
       const limit = parseLimit(c.req.query("limit"), 10, 20);
-      const rankings = await store.listStageRankings(stageId, limit);
-      return c.json({ rankings });
+      const rankings = (await store.listStageRankings(stageId, limit)).map(({ visitor_id: _private, ...row }) => row);
+      return c.json({ rankings, verified: false });
     } catch (error) {
       return fail(c, error);
     }
   });
 
   app.post("/v1/stages/:stageId/rankings", writeLimit, async (c) => {
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "invalid_json", message: "요청 본문이 올바르지 않습니다." }, 400);
-    }
-    try {
-      const input = readStageRankingInput(c.req.param("stageId"), body);
-      const ranking = await store.upsertStageRanking({
-        stage_id: input.stageId,
-        visitor_id: input.visitorId,
-        player_name: input.playerName,
-        duration_sec: input.durationSec,
-      });
-      return c.json({ ranking }, 200);
-    } catch (error) {
-      return fail(c, error);
-    }
+    return c.json({ error: "verified_results_required", message: "검증되지 않은 클라이언트 기록 등록은 중단되었습니다." }, 410);
   });
 
   app.get("/v1/votes", async (c) => {
@@ -129,7 +96,7 @@ export function createApp(store: RelayStore, config: Config) {
 
   app.get("/v1/votes/me", async (c) => {
     try {
-      const visitorId = normalizeVisitorId(c.req.query("visitor_id"));
+      const visitorId = requireSessionSubject(c.req.header("Authorization"), config.sessionSigningSecret);
       const votes = await store.listVotesForVisitor(visitorId);
       return c.json({ votes });
     } catch (error) {
@@ -146,7 +113,8 @@ export function createApp(store: RelayStore, config: Config) {
     }
     try {
       const input = readVoteInput(body);
-      await store.upsertVote(input.stageId, input.visitorId, input.vote);
+      const visitorId = requireSessionSubject(c.req.header("Authorization"), config.sessionSigningSecret);
+      await store.upsertVote(input.stageId, visitorId, input.vote);
       return c.json({ ok: true });
     } catch (error) {
       return fail(c, error);
@@ -163,9 +131,9 @@ export function createApp(store: RelayStore, config: Config) {
     try {
       const input = readVoteTarget(body, {
         stage_id: c.req.query("stage_id"),
-        visitor_id: c.req.query("visitor_id"),
       });
-      await store.deleteVote(input.stageId, input.visitorId);
+      const visitorId = requireSessionSubject(c.req.header("Authorization"), config.sessionSigningSecret);
+      await store.deleteVote(input.stageId, visitorId);
       return c.body(null, 204);
     } catch (error) {
       return fail(c, error);
@@ -192,7 +160,8 @@ export function createApp(store: RelayStore, config: Config) {
     }
     try {
       const input = readCommentInput(c.req.param("stageId"), body);
-      const comment = await store.insertComment(input);
+      const visitorId = requireSessionSubject(c.req.header("Authorization"), config.sessionSigningSecret);
+      const comment = await store.insertComment({ ...input, visitorId });
       return c.json({ comment }, 201);
     } catch (error) {
       return fail(c, error);
@@ -208,7 +177,10 @@ export function createApp(store: RelayStore, config: Config) {
   return app;
 }
 
-function fail(c: { json: (body: unknown, status: 400 | 409) => Response }, error: unknown) {
+function fail(c: { json: (body: unknown, status: 400 | 401 | 409) => Response }, error: unknown) {
+  if (error instanceof UnauthorizedError) {
+    return c.json({ error: "unauthorized", message: error.message }, 401);
+  }
   if (error instanceof ValidationError) {
     return c.json({ error: "invalid_input", message: error.message }, 400);
   }

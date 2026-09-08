@@ -1,18 +1,5 @@
 (function votesClientBootstrap() {
-  var VISITOR_ID_KEY = "one-life-relay-visitor-id";
   var VOTES_CACHE_KEY = "one-life-relay-votes";
-
-  function getVisitorId() {
-    try {
-      var existing = window.localStorage.getItem(VISITOR_ID_KEY);
-      if (existing) return existing;
-      var id = window.crypto.randomUUID();
-      window.localStorage.setItem(VISITOR_ID_KEY, id);
-      return id;
-    } catch (error) {
-      return "anon-" + Date.now() + "-" + Math.floor(Math.random() * 1e6);
-    }
-  }
 
   function getCachedVotes() {
     try {
@@ -63,9 +50,9 @@
     });
   }
 
-  function fetchMyVotes(visitorId) {
+  function fetchMyVotes() {
     return api()
-      .request("/v1/votes/me?visitor_id=" + encodeURIComponent(visitorId))
+      .request("/v1/votes/me", { auth: true })
       .then(function (payload) {
         var votes = {};
         var rows = (payload && payload.votes) || [];
@@ -78,11 +65,11 @@
   }
 
   function submitVote(stageId, vote) {
-    var visitorId = getVisitorId();
     return api()
       .request("/v1/votes", {
         method: "PUT",
-        body: { stage_id: stageId, visitor_id: visitorId, vote: vote },
+        auth: true,
+        body: { stage_id: stageId, vote: vote },
       })
       .then(function () {
         setCachedVote(stageId, vote);
@@ -90,15 +77,8 @@
   }
 
   function removeVote(stageId) {
-    var visitorId = getVisitorId();
     return api()
-      .request(
-        "/v1/votes?stage_id=" +
-          encodeURIComponent(stageId) +
-          "&visitor_id=" +
-          encodeURIComponent(visitorId),
-        { method: "DELETE" }
-      )
+      .request("/v1/votes?stage_id=" + encodeURIComponent(stageId), { method: "DELETE", auth: true })
       .then(function () {
         removeCachedVote(stageId);
       });
@@ -135,7 +115,6 @@
   }
 
   window.LikesClient = {
-    getVisitorId: getVisitorId,
     getCachedVotes: getCachedVotes,
     fetchVoteScores: fetchVoteScores,
     fetchMyVotes: fetchMyVotes,

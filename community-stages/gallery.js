@@ -285,10 +285,9 @@
   renderGrid();
 
   // Fetch fresh data
-  var visitorId = window.LikesClient.getVisitorId();
   Promise.all([
     window.LikesClient.fetchVoteScores().catch(function () { return new Map(); }),
-    window.LikesClient.fetchMyVotes(visitorId).catch(function () { return {}; }),
+    window.LikesClient.fetchMyVotes().catch(function () { return {}; }),
   ]).then(function (results) {
     hasLoadedVoteScores = true;
     voteScores = results[0];

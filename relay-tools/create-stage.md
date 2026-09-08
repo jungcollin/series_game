@@ -43,8 +43,8 @@
    - `window.advanceTime(ms)`
    - `window.relayStageMeta = { id, title, creator, genre, clearCondition }`
    - `window.relayStageResult = { status: "running" | "cleared" | "failed" }`
-   - `parent.RelayHost.onStageCleared(...)`
-   - `parent.RelayHost.onStageFailed(...)`
+   - `window.RelayStageHost.onStageCleared(...)`
+   - `window.RelayStageHost.onStageFailed(...)`
    - `window.relayStageDebug = { forceClear(), forceFail() }`
 6. `clear-condition`과 `fail-condition`은 한 줄(약 40자 내외)로 간결하게 쓴다. play.html과 gallery에서 2줄 clamp(0.74rem)으로 표시되므로, 너무 길면 잘린다.
 7. 시작 화면에 조작법, 클리어 조건, 실패 조건을 적는다.

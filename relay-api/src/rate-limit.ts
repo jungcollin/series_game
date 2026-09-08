@@ -55,13 +55,7 @@ export function createRateLimitMiddleware(options: RateLimitOptions = {}): Middl
 }
 
 function clientAddress(c: Context): string {
-  const cloudflareAddress = c.req.header("cf-connecting-ip")?.trim();
-  if (cloudflareAddress) return cloudflareAddress;
-
-  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  if (forwarded) return forwarded;
-
-  return c.req.header("x-real-ip")?.trim() || "unknown";
+  return c.req.header("x-relay-client-ip")?.trim() || "unknown";
 }
 
 function pruneExpiredBuckets(buckets: Map<string, Bucket>, now: number, maxEntries: number) {

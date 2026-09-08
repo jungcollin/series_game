@@ -170,12 +170,7 @@ function main() {
     stageSlugs.length > 0 &&
     checks.every((entry) => entry.ok) &&
     (!hostUiCheck || hostUiCheck.ok);
-  const safeToApprove =
-    ok &&
-    stageSlugs.length === 1 &&
-    nonStageFiles.length === 0 &&
-    risks.length === 0 &&
-    (!hostUiCheck || hostUiCheck.ok);
+  const safeToApprove = false;
 
   const report = {
     ok,

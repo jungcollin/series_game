@@ -22,6 +22,22 @@ function debugLog(message) {
   process.stderr.write(`[check_stage] ${message}\n`);
 }
 
+function isAllowedRequestUrl(requestUrl, allowedOrigin) {
+  if (/^(?:data:|blob:|about:)/i.test(requestUrl)) return true;
+  try { return new URL(requestUrl).origin === allowedOrigin; } catch (error) { return false; }
+}
+
+async function installNetworkGuard(page, allowedOrigin) {
+  const context = page.context();
+  await context.route("**/*", (route) => {
+    if (isAllowedRequestUrl(route.request().url(), allowedOrigin)) return route.continue();
+    return route.abort("blockedbyclient");
+  });
+  if (typeof context.routeWebSocket === "function") {
+    await context.routeWebSocket("**/*", (socket) => socket.close());
+  }
+}
+
 async function launchBrowser(chromium, probeUrl) {
   const attemptErrors = [];
   const attempts = [
@@ -46,7 +62,11 @@ async function launchBrowser(chromium, probeUrl) {
     let browser = null;
     try {
       browser = await chromium.launch(attempt.options);
-      const probePage = await browser.newPage({ viewport: { width: 320, height: 240 } });
+      const probePage = await browser.newPage({
+        viewport: { width: 320, height: 240 },
+        serviceWorkers: "block",
+      });
+      await installNetworkGuard(probePage, new URL(probeUrl).origin);
       await probePage.goto(probeUrl, { waitUntil: "domcontentloaded", timeout: 8000 });
       await probePage.waitForTimeout(120);
       await probePage.evaluate(() => document.readyState);
@@ -325,7 +345,13 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
 
   const thumbnailPath = stageThumbnailPath(repoRoot, stageMeta.dir);
   debugLog(`thumbnail: capture ${thumbnailPath}`);
-  await canvas.screenshot({ path: thumbnailPath });
+  if (fs.existsSync(thumbnailPath) && !fs.lstatSync(thumbnailPath).isFile()) {
+    throw new Error(`Thumbnail target must be a regular file: ${stageMeta.id}`);
+  }
+  const screenshot = await canvas.screenshot({ type: "png" });
+  const temporaryPath = path.join(path.dirname(thumbnailPath), `.thumbnail-${process.pid}-${Date.now()}.tmp`);
+  fs.writeFileSync(temporaryPath, screenshot, { flag: "wx", mode: 0o600 });
+  fs.renameSync(temporaryPath, thumbnailPath);
   return thumbnailPath;
 }
 
@@ -335,7 +361,9 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
     viewport: { width: 390, height: 844 },
     isMobile: true,
     hasTouch: true,
+    serviceWorkers: "block",
   });
+  await installNetworkGuard(mobilePage, new URL(stageUrl).origin);
   mobilePage.on("console", (msg) => {
     if (msg.type() === "error") {
       consoleErrors.push(msg.text());
@@ -534,7 +562,11 @@ async function main() {
 
   debugLog(`launch browser`);
   const browser = await launchBrowser(chromium, `${baseUrl}/community-stages/index.html`);
-  const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+  const page = await browser.newPage({
+    viewport: { width: 1440, height: 960 },
+    serviceWorkers: "block",
+  });
+  await installNetworkGuard(page, new URL(baseUrl).origin);
   const consoleErrors = [];
   page.on("console", (msg) => {
     if (msg.type() === "error") {
@@ -619,7 +651,11 @@ async function main() {
     );
   }
 
-  const hostPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const hostPage = await browser.newPage({
+    viewport: { width: 1280, height: 800 },
+    serviceWorkers: "block",
+  });
+  await installNetworkGuard(hostPage, new URL(baseUrl).origin);
   hostPage.on("console", (msg) => {
     if (msg.type() === "error") {
       consoleErrors.push(msg.text());
@@ -632,18 +668,16 @@ async function main() {
     await hostPage.evaluate(
       ({ stageDir, iframeId }) => {
         window.__relayHostEvents = [];
-        window.RelayHost = {
-          onStageReady(meta) {
-            window.__relayHostEvents.push({ type: "ready", meta });
-          },
-          onStageCleared(payload) {
-            window.__relayHostEvents.push({ type: "cleared", payload });
-          },
-          onStageFailed(payload) {
-            window.__relayHostEvents.push({ type: "failed", payload });
-          },
-        };
-        document.body.innerHTML = `<iframe id="${iframeId}" src="./${stageDir}/index.html" style="width:960px;height:540px;border:0"></iframe>`;
+        const token = crypto.randomUUID();
+        document.body.innerHTML = `<iframe id="${iframeId}" sandbox="allow-scripts allow-pointer-lock" src="./${stageDir}/index.html?relayToken=${encodeURIComponent(token)}" style="width:960px;height:540px;border:0"></iframe>`;
+        const iframe = document.getElementById(iframeId);
+        window.addEventListener("message", (event) => {
+          const message = event.data;
+          if (event.source !== iframe.contentWindow || !message ||
+              message.channel !== "one-life-relay-stage" || message.token !== token ||
+              !message.payload || typeof message.payload !== "object") return;
+          window.__relayHostEvents.push({ type: message.type, meta: message.payload, payload: message.payload });
+        });
       },
       { stageDir: stageMeta.dir, iframeId }
     );
@@ -718,6 +752,7 @@ module.exports = {
   assertStageSourceIncludesMobileSupport,
   assertStageSourceIncludesMetaText,
   findOverflowingElements,
+  isAllowedRequestUrl,
   parseArgs,
   parseChangedStageSlugs,
   parseStageRenderText,

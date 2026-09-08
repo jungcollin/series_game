@@ -38,8 +38,10 @@ cd series_game
 
 **`index.html`** — 게임 본체 (단일 HTML 파일)
 - 시작 화면에 조작법, 클리어 조건, 실패 조건 표시
-- 클리어 시 `parent.postMessage({ type: 'clear' }, '*')`
-- 실패 시 `parent.postMessage({ type: 'fail' }, '*')`
+- `../relay-runtime.js`를 불러오고 준비 시 `window.RelayStageHost.onStageReady(...)` 호출
+- 클리어 시 `window.RelayStageHost.onStageCleared(...)` 호출
+- 실패 시 `window.RelayStageHost.onStageFailed(...)` 호출
+- 직접 `window.parent`에 접근하거나 임의 `postMessage`를 보내지 않음
 
 **`meta.json`** — 스테이지 메타 정보
 

@@ -17,6 +17,8 @@ const THUMBNAIL_FILE_NAMES = [
   "thumbnail.webp",
   "thumbnail.avif",
 ];
+const STAGE_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_STAGE_SLUG_LENGTH = 48;
 
 function communityStagesRoot(repoRoot) {
   return path.join(repoRoot, "community-stages");
@@ -86,24 +88,25 @@ function normalizeThumbnail(rawThumbnail, dir) {
   if (!normalized) {
     return null;
   }
-  if (
-    normalized.startsWith("http://") ||
-    normalized.startsWith("https://") ||
-    normalized.startsWith("data:")
-  ) {
-    return normalized;
+  if (/^(?:https?:|data:|\/|\.\.\/)/i.test(normalized)) {
+    throw new Error(`Thumbnail must stay inside stage directory: ${dir}`);
   }
-  if (
-    normalized.startsWith(`./${dir}/`) ||
-    normalized.startsWith("../") ||
-    normalized.startsWith("/")
-  ) {
-    return normalized;
+  if (normalized.includes("\\")) {
+    throw new Error(`Thumbnail must use a stage-local POSIX path: ${dir}`);
   }
-  if (normalized.startsWith("./")) {
-    return `./${dir}/${normalized.slice(2)}`;
+  if (/[%?#]/.test(normalized)) {
+    throw new Error(`Thumbnail must use an unencoded stage-local path: ${dir}`);
   }
-  return `./${dir}/${normalized.replace(/^\/+/, "")}`;
+  const relative = normalized.startsWith(`./${dir}/`)
+    ? normalized.slice(dir.length + 3)
+    : normalized.startsWith("./")
+      ? normalized.slice(2)
+      : normalized;
+  const canonical = path.posix.normalize(relative);
+  if (!canonical || canonical === "." || canonical.startsWith("../") || path.posix.isAbsolute(canonical)) {
+    throw new Error(`Thumbnail must stay inside stage directory: ${dir}`);
+  }
+  return `./${dir}/${canonical}`;
 }
 
 function inferThumbnailPath(repoRoot, dir) {
@@ -117,6 +120,7 @@ function inferThumbnailPath(repoRoot, dir) {
 }
 
 function normalizeStageMeta(rawMeta, dir, repoRoot) {
+  assertValidStageSlug("directory", dir);
   const normalized = {
     id: ensureNonEmptyString("id", rawMeta.id),
     title: ensureNonEmptyString("title", rawMeta.title),
@@ -132,11 +136,39 @@ function normalizeStageMeta(rawMeta, dir, repoRoot) {
     path: `./${dir}/index.html`,
   };
 
-  if (normalized.id.includes("/")) {
-    throw new Error(`Stage id cannot contain "/": ${normalized.id}`);
+  assertValidStageSlug("id", normalized.id);
+  if (normalized.id !== dir) {
+    throw new Error(`Stage id must match directory: ${normalized.id} !== ${dir}`);
   }
 
   return normalized;
+}
+
+function assertValidStageSlug(label, value) {
+  if (
+    typeof value !== "string" ||
+    value.length > MAX_STAGE_SLUG_LENGTH ||
+    !STAGE_SLUG_RE.test(value)
+  ) {
+    throw new Error(`Invalid stage ${label}: ${value}`);
+  }
+}
+
+function assertSafeStageTree(repoRoot, dir) {
+  const root = path.join(communityStagesRoot(repoRoot), dir);
+  const pending = [root];
+  while (pending.length) {
+    const current = pending.pop();
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Stage files cannot be symbolic links: ${path.relative(repoRoot, current)}`);
+    }
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(current)) pending.push(path.join(current, entry));
+    } else if (!stat.isFile()) {
+      throw new Error(`Stage files must be regular files: ${path.relative(repoRoot, current)}`);
+    }
+  }
 }
 
 function readStageMetaFile(repoRoot, dir) {
@@ -145,17 +177,25 @@ function readStageMetaFile(repoRoot, dir) {
     return null;
   }
 
+  assertSafeStageTree(repoRoot, dir);
+
   const rawMeta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
   return normalizeStageMeta(rawMeta, dir, repoRoot);
 }
 
 function loadAllStageMetas(repoRoot) {
   const stagesRoot = communityStagesRoot(repoRoot);
-  return fs
+  const metas = fs
     .readdirSync(stagesRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => readStageMetaFile(repoRoot, entry.name))
     .filter(Boolean);
+  const ids = new Set();
+  for (const meta of metas) {
+    if (ids.has(meta.id)) throw new Error(`Duplicate stage id: ${meta.id}`);
+    ids.add(meta.id);
+  }
+  return metas;
 }
 
 function findStageMeta(repoRoot, candidate) {
@@ -253,7 +293,9 @@ function checkRegistrySync(repoRoot) {
 }
 
 module.exports = {
+  MAX_STAGE_SLUG_LENGTH,
   REQUIRED_STAGE_FIELDS,
+  STAGE_SLUG_RE,
   checkRegistrySync,
   communityStagesRoot,
   findStageMeta,

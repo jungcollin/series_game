@@ -14,20 +14,7 @@
       });
   }
 
-  function saveRanking(stageId, playerName, durationSec) {
-    var visitorId = window.LikesClient.getVisitorId();
-    return api().request("/v1/stages/" + encodeURIComponent(stageId) + "/rankings", {
-      method: "POST",
-      body: {
-        visitor_id: visitorId,
-        player_name: playerName,
-        duration_sec: durationSec,
-      },
-    });
-  }
-
   window.RankingClient = {
     fetchRankings: fetchRankings,
-    saveRanking: saveRanking,
   };
 })();

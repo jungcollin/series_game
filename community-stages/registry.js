@@ -50,8 +50,8 @@ window.COMMUNITY_STAGE_REGISTRY = [
     creator: { name: "JungCollin", avatar: null, github: "jungcollin" },
     genre: "Arcade survival",
     clearCondition: "15초 동안 하늘에서 떨어지는 똥을 피하기",
-    thumbnail: "./poop-rain/thumbnail.png",
-    path: "./poop-rain/index.html",
+    thumbnail: "./poop-rain-60/thumbnail.png",
+    path: "./poop-rain-60/index.html",
   },
   {
     id: "whack-a-mole",

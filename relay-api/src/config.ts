@@ -12,6 +12,7 @@ export interface Config {
   port: number;
   host: string;
   databaseUrl: string;
+  sessionSigningSecret: string;
   corsOrigins: Set<string>;
 }
 
@@ -21,8 +22,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("PORT must be an integer between 1 and 65535");
   }
   const databaseUrl = env.DATABASE_URL?.trim();
+  const sessionSigningSecret = env.SESSION_SIGNING_SECRET?.trim();
   if (env.NODE_ENV === "production" && !databaseUrl) {
     throw new Error("DATABASE_URL is required in production");
+  }
+  if (env.NODE_ENV === "production" && (!sessionSigningSecret || sessionSigningSecret.length < 32)) {
+    throw new Error("SESSION_SIGNING_SECRET (at least 32 characters) is required in production");
   }
   const extra = (env.CORS_ORIGIN ?? "")
     .split(",")
@@ -33,6 +38,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port,
     host: env.HOST ?? "0.0.0.0",
     databaseUrl: databaseUrl ?? "",
+    sessionSigningSecret: sessionSigningSecret || "development-only-session-secret-32chars",
     corsOrigins: new Set([...DEFAULT_ORIGINS, ...extra]),
   };
 }

@@ -28,9 +28,14 @@ if [[ ! -f "$SECRETS_DIR/db-owner-password" ]]; then
   openssl rand -base64 24 | tr -d '\n' >"$SECRETS_DIR/db-owner-password"
   chmod 600 "$SECRETS_DIR/db-owner-password"
 fi
+if [[ ! -f "$SECRETS_DIR/session-signing-secret" ]]; then
+  openssl rand -base64 48 | tr -d '\n' >"$SECRETS_DIR/session-signing-secret"
+  chmod 600 "$SECRETS_DIR/session-signing-secret"
+fi
 
 APP_PW="$(cat "$SECRETS_DIR/db-app-password")"
 OWNER_PW="$(cat "$SECRETS_DIR/db-owner-password")"
+SESSION_SIGNING_SECRET="$(cat "$SECRETS_DIR/session-signing-secret")"
 PG_SUPER_PW="$(sudo cat /srv/api-platform/compose/postgres/secrets/postgres_password)"
 PG_SUPER_USER="${PG_SUPER_USER:-platform_admin}"
 APP_PW_ENC="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$APP_PW")"
@@ -82,6 +87,7 @@ umask 077
   printf "PORT=%s\n" "$HOST_PORT"
   printf "HOST=0.0.0.0\n"
   printf "DATABASE_URL=postgresql://oneliferelay_app:%s@postgres:5432/oneliferelay\n" "$APP_PW_ENC"
+  printf "SESSION_SIGNING_SECRET=%s\n" "$SESSION_SIGNING_SECRET"
   printf "CORS_ORIGIN=https://relay.collinworks.dev,https://jungcollin.github.io,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:4175,http://localhost:4175\n"
 } >"$SECRETS_DIR/runtime.env"
 chmod 600 "$SECRETS_DIR/runtime.env"

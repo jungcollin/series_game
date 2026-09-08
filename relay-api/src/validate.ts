@@ -131,32 +131,20 @@ export function readLeaderboardInput(value: unknown) {
   };
 }
 
-export function readStageRankingInput(stageId: string, value: unknown) {
-  const body = asRecord(value);
-  return {
-    stageId: normalizeStageId(stageId),
-    visitorId: normalizeVisitorId(body.visitor_id),
-    playerName: normalizeName(body.player_name, "닉네임", 2, 24),
-    durationSec: normalizeDuration(body.duration_sec, 0.1, 36000),
-  };
-}
-
 export function readVoteInput(value: unknown, fallbackStageId?: string) {
   const body = asRecord(value);
   return {
     stageId: normalizeStageId(body.stage_id ?? fallbackStageId),
-    visitorId: normalizeVisitorId(body.visitor_id),
     vote: normalizeVote(body.vote),
   };
 }
 
-export function readVoteTarget(value: unknown, query: { stage_id?: string; visitor_id?: string }) {
+export function readVoteTarget(value: unknown, query: { stage_id?: string }) {
   const body = value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
   return {
     stageId: normalizeStageId(body.stage_id ?? query.stage_id),
-    visitorId: normalizeVisitorId(body.visitor_id ?? query.visitor_id),
   };
 }
 
@@ -164,7 +152,6 @@ export function readCommentInput(stageId: string, value: unknown) {
   const body = asRecord(value);
   return {
     stageId: normalizeStageId(stageId),
-    visitorId: normalizeVisitorId(body.visitor_id),
     authorName: normalizeName(body.author_name, "닉네임", 1, 24),
     body: normalizeCommentBody(body.body),
   };

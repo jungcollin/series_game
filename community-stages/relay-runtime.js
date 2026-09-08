@@ -27,6 +27,7 @@
       previousStageId: params.get("previous") || null,
       history,
       currentStageId,
+      relayToken: params.get("relayToken") || null,
     };
   }
 
@@ -40,6 +41,9 @@
     }
     if (context.previousStageId) {
       params.set("previous", context.previousStageId);
+    }
+    if (context.relayToken) {
+      params.set("relayToken", context.relayToken);
     }
     return `${path}?${params.toString()}`;
   }
@@ -141,32 +145,51 @@
   function decorateRegistryLinks(registry, listEl) {
     const context = readContext();
     const played = new Set(context.history);
-    listEl.innerHTML = registry
-      .map((entry) => {
+    listEl.replaceChildren();
+    registry.forEach((entry) => {
         const creator = normalizeCreator(entry.creator);
         const hasPlayed = played.has(entry.id);
-        const playedBadge = hasPlayed ? `<span class="card-status">진행함</span>` : "";
         const href = buildStageUrl(entry.path, context, context.previousStageId);
-        const wrapperTag = hasPlayed ? "article" : "a";
-        const wrapperAttrs = hasPlayed
-          ? `class="stage-card stage-card-played" aria-disabled="true"`
-          : `class="stage-card" href="${href}" aria-label="${escapeHtml(entry.title)} 플레이하기"`;
-        const actionLabel = hasPlayed ? "이미 진행함" : "플레이하기";
-        const actionClass = hasPlayed ? "card-link card-link-disabled" : "card-link";
-        return `
-          <${wrapperTag} ${wrapperAttrs}>
-            <p class="card-label">${escapeHtml(entry.genre)}</p>
-            <h2>${escapeHtml(entry.title)}</h2>
-            <p class="card-meta">by ${escapeHtml(creator.name)}</p>
-            <p class="card-copy">${escapeHtml(entry.clearCondition)}</p>
-            <div class="card-footer">
-              <span class="${actionClass}">${actionLabel}</span>
-              ${playedBadge}
-            </div>
-          </${wrapperTag}>
-        `;
-      })
-      .join("");
+        const card = document.createElement(hasPlayed ? "article" : "a");
+        card.className = hasPlayed ? "stage-card stage-card-played" : "stage-card";
+        if (hasPlayed) card.setAttribute("aria-disabled", "true");
+        else {
+          card.href = href;
+          card.setAttribute("aria-label", `${entry.title} 플레이하기`);
+        }
+        const label = document.createElement("p"); label.className = "card-label"; label.textContent = entry.genre;
+        const title = document.createElement("h2"); title.textContent = entry.title;
+        const meta = document.createElement("p"); meta.className = "card-meta"; meta.textContent = `by ${creator.name}`;
+        const copy = document.createElement("p"); copy.className = "card-copy"; copy.textContent = entry.clearCondition;
+        const footer = document.createElement("div"); footer.className = "card-footer";
+        const action = document.createElement("span");
+        action.className = hasPlayed ? "card-link card-link-disabled" : "card-link";
+        action.textContent = hasPlayed ? "이미 진행함" : "플레이하기";
+        footer.append(action);
+        if (hasPlayed) {
+          const badge = document.createElement("span"); badge.className = "card-status"; badge.textContent = "진행함";
+          footer.append(badge);
+        }
+        card.append(label, title, meta, copy, footer);
+        listEl.append(card);
+      });
+  }
+
+  const stageContext = readContext();
+  window.RelayStageHost = {
+    onStageReady(payload) { postStageEvent("ready", payload); },
+    onStageCleared(payload) { postStageEvent("cleared", payload); },
+    onStageFailed(payload) { postStageEvent("failed", payload); },
+  };
+
+  function postStageEvent(type, payload) {
+    if (window.parent === window || !stageContext.relayToken) return;
+    window.parent.postMessage({
+      channel: "one-life-relay-stage",
+      type,
+      token: stageContext.relayToken,
+      payload: payload && typeof payload === "object" ? payload : {},
+    }, "*");
   }
 
   window.RelayRuntime = {

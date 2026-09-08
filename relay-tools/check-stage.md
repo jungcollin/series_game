@@ -29,7 +29,8 @@
    - 필수 전역 인터페이스가 존재함
    - `meta.json`의 조작법/클리어 조건/실패 조건 문구가 스테이지 소스에 반영되어 있음
    - `window.relayStageDebug.forceClear()`와 `forceFail()`가 동작함
-   - same-origin 호스트 하네스에서 `RelayHost` ready/cleared/failed 콜백이 잡힘
+   - sandbox iframe 호스트 하네스에서 source/token 검증을 통과한 ready/cleared/failed `postMessage`가 잡힘
+   - 브라우저 네트워크는 로컬 검증 origin과 `data:`/`blob:`/`about:`만 허용됨
    - 콘솔 에러가 없음
    - 썸네일이 시작 설명 오버레이가 아닌 실제 플레이 장면으로 저장됨
    - 썸네일이 있는 사용자 페이지 카드에서는 대표 장르 이모지가 겹쳐 보이지 않음

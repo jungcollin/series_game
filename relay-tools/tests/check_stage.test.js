@@ -6,6 +6,7 @@ const {
   assertStageSourceIncludesMobileSupport,
   assertStageSourceIncludesMetaText,
   findOverflowingElements,
+  isAllowedRequestUrl,
   parseChangedStageSlugs,
   parseStageRenderText,
   stageThumbnailPath,
@@ -149,4 +150,12 @@ test("stageThumbnailPath points at the stage-local thumbnail.png file", () => {
     stageThumbnailPath("/tmp/repo", "meteor-dodge"),
     "/tmp/repo/community-stages/meteor-dodge/thumbnail.png"
   );
+});
+
+test("network guard allows only the configured local origin and inert URL schemes", () => {
+  const origin = "http://127.0.0.1:4173";
+  assert.equal(isAllowedRequestUrl(`${origin}/community-stages/test/index.html`, origin), true);
+  assert.equal(isAllowedRequestUrl("data:text/plain,ok", origin), true);
+  assert.equal(isAllowedRequestUrl("https://attacker.example/exfiltrate", origin), false);
+  assert.equal(isAllowedRequestUrl("http://127.0.0.1:9999/private", origin), false);
 });

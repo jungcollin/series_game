@@ -11,10 +11,6 @@ const relaySecondaryActionBtn = document.querySelector("#relay-secondary-action"
 const leaderboardRefreshBtn = document.querySelector("#leaderboard-refresh");
 const leaderboardStatusEl = document.querySelector("#leaderboard-status");
 const leaderboardListEl = document.querySelector("#leaderboard-list");
-const rankingSaveFormEl = document.querySelector("#ranking-save-form");
-const rankingPlayerNameEl = document.querySelector("#ranking-player-name");
-const rankingSaveStatusEl = document.querySelector("#ranking-save-status");
-const rankingSaveButtonEl = document.querySelector("#ranking-save-button");
 const dailySeedEl = document.querySelector("#daily-seed");
 const dailyRouteListEl = document.querySelector("#daily-route-list");
 const startRelayBtn = document.querySelector("#start-relay");
@@ -22,7 +18,6 @@ const startRelayBtn = document.querySelector("#start-relay");
 const STAGE_READY_TIMEOUT_MS = 4000;
 const LEADERBOARD_LIMIT = 10;
 const LEADERBOARD_FETCH_LIMIT = 50;
-const PLAYER_NAME_STORAGE_KEY = "one-life-relay-player-name";
 
 const promptStepCopyButtons = document.querySelectorAll(".prompt-step-copy");
 const openPromptBtn = document.querySelector("#open-prompt");
@@ -50,7 +45,7 @@ const state = {
   runDurationSec: 0,
   leaderboardEntries: [],
   lastRunResult: null,
-  saveState: "idle",
+  stageMessageToken: "",
   likeCounts: new Map(),
   likeCountsLoaded: false,
   dailyDateKey: "",
@@ -85,22 +80,6 @@ function prepareDailyRoute() {
   state.dailyRoute = window.DailyRelay?.buildRoute(COMMUNITY_STAGE_REGISTRY, state.dailyDateKey, 5)
     || COMMUNITY_STAGE_REGISTRY.slice(0, 5);
   renderDailyRoute();
-}
-
-function getSavedPlayerName() {
-  try {
-    return window.localStorage.getItem(PLAYER_NAME_STORAGE_KEY) || "";
-  } catch (error) {
-    return "";
-  }
-}
-
-function persistPlayerName(name) {
-  try {
-    window.localStorage.setItem(PLAYER_NAME_STORAGE_KEY, name);
-  } catch (error) {
-    // Keep ranking usable even if storage is unavailable.
-  }
 }
 
 function escapeHtml(value) {
@@ -228,38 +207,6 @@ async function loadLeaderboard() {
   }
 }
 
-function hideRankingSavePanel() {
-  if (rankingSaveFormEl) {
-    rankingSaveFormEl.hidden = true;
-  }
-  if (rankingSaveStatusEl) {
-    rankingSaveStatusEl.textContent = "";
-  }
-  if (rankingSaveButtonEl) {
-    rankingSaveButtonEl.disabled = false;
-    rankingSaveButtonEl.dataset.loading = "false";
-    rankingSaveButtonEl.textContent = "랭킹 저장";
-  }
-}
-
-function showRankingSavePanel() {
-  if (!rankingSaveFormEl || !rankingPlayerNameEl) {
-    return;
-  }
-  rankingSaveFormEl.hidden = false;
-  rankingPlayerNameEl.value = getSavedPlayerName();
-  if (rankingSaveButtonEl) {
-    rankingSaveButtonEl.disabled = state.saveState === "saved";
-    rankingSaveButtonEl.dataset.loading = "false";
-    rankingSaveButtonEl.textContent = state.saveState === "saved" ? "저장 완료" : "랭킹 저장";
-  }
-  if (rankingSaveStatusEl) {
-    rankingSaveStatusEl.textContent = state.saveState === "saved"
-      ? "이 런 기록은 이미 저장했습니다."
-      : "닉네임으로 기록을 저장할 수 있습니다.";
-  }
-}
-
 function updateRunResult(outcome, extra = {}) {
   state.lastRunResult = {
     runId: state.runId,
@@ -270,77 +217,6 @@ function updateRunResult(outcome, extra = {}) {
     outcome,
     ...extra,
   };
-  state.saveState = "idle";
-  showRankingSavePanel();
-}
-
-function normalizePlayerName(value) {
-  return value.replace(/\s+/g, " ").trim().slice(0, 24);
-}
-
-async function saveCurrentRunToLeaderboard(event) {
-  event.preventDefault();
-  if (!state.lastRunResult || !rankingPlayerNameEl) {
-    return;
-  }
-
-  const playerName = normalizePlayerName(rankingPlayerNameEl.value || "");
-  if (playerName.length < 2) {
-    if (rankingSaveStatusEl) {
-      rankingSaveStatusEl.textContent = "닉네임은 2자 이상으로 입력해 주세요.";
-    }
-    rankingPlayerNameEl.focus();
-    return;
-  }
-
-  if (state.saveState === "saving" || state.saveState === "saved") {
-    return;
-  }
-
-  state.saveState = "saving";
-  if (rankingSaveButtonEl) {
-    rankingSaveButtonEl.disabled = true;
-    rankingSaveButtonEl.dataset.loading = "true";
-  }
-  if (rankingSaveStatusEl) {
-    rankingSaveStatusEl.textContent = "랭킹에 기록을 저장하는 중…";
-  }
-
-  try {
-    await relayApiRequest("/v1/leaderboard", {
-      method: "POST",
-      body: {
-        run_id: state.lastRunResult.runId,
-        player_name: playerName,
-        clear_count: state.lastRunResult.clearCount,
-        duration_sec: state.lastRunResult.durationSec,
-        finished_all_clear: state.lastRunResult.finishedAllClear,
-        stages: state.lastRunResult.stages,
-      },
-    });
-    persistPlayerName(playerName);
-    state.saveState = "saved";
-    if (rankingSaveButtonEl) {
-      rankingSaveButtonEl.disabled = true;
-      rankingSaveButtonEl.dataset.loading = "false";
-      rankingSaveButtonEl.textContent = "저장 완료";
-    }
-    if (rankingSaveStatusEl) {
-      rankingSaveStatusEl.textContent = "랭킹 저장이 완료되었습니다.";
-    }
-    await loadLeaderboard();
-  } catch (error) {
-    state.saveState = "idle";
-    if (rankingSaveButtonEl) {
-      rankingSaveButtonEl.disabled = false;
-      rankingSaveButtonEl.dataset.loading = "false";
-      rankingSaveButtonEl.textContent = "랭킹 저장";
-    }
-    if (rankingSaveStatusEl) {
-      rankingSaveStatusEl.textContent =
-        "랭킹 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.";
-    }
-  }
 }
 
 function accumulateRunDuration(durationSec) {
@@ -524,7 +400,6 @@ function copyPromptStep(button) {
 function hideOverlay() {
   state.overlayPrimaryAction = "restart";
   state.overlaySecondaryAction = "";
-  hideRankingSavePanel();
   if (relaySecondaryActionBtn) {
     relaySecondaryActionBtn.hidden = true;
     relaySecondaryActionBtn.style.display = "none";
@@ -633,6 +508,7 @@ function buildStageUrl(stage) {
     clearCount: state.clearCount,
     history: state.history,
     previousStageId: state.history[state.history.length - 1] || null,
+    relayToken: state.stageMessageToken,
   });
 }
 
@@ -671,6 +547,7 @@ function loadStage(stage) {
   state.status = "loading";
   hideOverlay();
   updateRunHeader();
+  state.stageMessageToken = makeStageMessageToken();
   relayFrameEl.src = buildStageUrl(stage);
   state.readyTimer = window.setTimeout(() => {
     handleStageLoadTimeout();
@@ -706,7 +583,7 @@ function startNewRun() {
   state.unavailableStageIds = [];
   state.currentStage = null;
   state.lastRunResult = null;
-  state.saveState = "idle";
+  state.stageMessageToken = "";
   state.status = "loading";
   if (!state.dailyRoute.length) prepareDailyRoute();
   hideOverlay();
@@ -773,8 +650,15 @@ function performOverlayAction(action) {
   startNewRun();
 }
 
-window.RelayHost = {
-  onStageReady(meta = {}) {
+function makeStageMessageToken() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  const bytes = new Uint8Array(24);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+const stageMessageHandlers = {
+  ready(meta = {}) {
     if (state.status === "loading" && meta.title && state.currentStage && meta.id === state.currentStage.id) {
       clearReadyTimer();
       state.currentStage = { ...state.currentStage, ...meta };
@@ -791,13 +675,26 @@ window.RelayHost = {
       }, 80);
     }
   },
-  onStageCleared(payload = {}) {
+  cleared(payload = {}) {
     handleStageCleared(payload);
   },
-  onStageFailed(payload = {}) {
+  failed(payload = {}) {
     handleStageFailed(payload);
   },
 };
+
+window.addEventListener("message", (event) => {
+  const message = event.data;
+  const payloadStageId = message?.type === "ready" ? message?.payload?.id : message?.payload?.stageId;
+  if (
+    event.source !== relayFrameEl?.contentWindow ||
+    !message || message.channel !== "one-life-relay-stage" ||
+    message.token !== state.stageMessageToken ||
+    !message.payload || typeof message.payload !== "object" ||
+    payloadStageId !== state.currentStage?.id
+  ) return;
+  stageMessageHandlers[message.type]?.(message.payload);
+});
 
 window.__relayHostDebug = {
   startNewRun,
@@ -816,7 +713,6 @@ relaySecondaryActionBtn?.addEventListener("click", () => {
   performOverlayAction(state.overlaySecondaryAction || "restart");
 });
 leaderboardRefreshBtn?.addEventListener("click", loadLeaderboard);
-rankingSaveFormEl?.addEventListener("submit", saveCurrentRunToLeaderboard);
 startRelayBtn?.addEventListener("click", () => {
   state.focusRequested = true;
   startNewRun();
@@ -896,8 +792,7 @@ async function loadLikeCounts() {
   }
 }
 
-loadLikeCounts().then(() => {
-  prepareDailyRoute();
-  loadLeaderboard();
-  startNewRun();
-});
+prepareDailyRoute();
+startNewRun();
+loadLeaderboard();
+loadLikeCounts().then(renderDailyRoute);

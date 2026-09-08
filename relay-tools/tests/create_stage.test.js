@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { createStageInRepo } = require("../scripts/create_stage.js");
-const { syncRegistry } = require("../scripts/stage_metadata.js");
+const { loadAllStageMetas, syncRegistry } = require("../scripts/stage_metadata.js");
 
 const templatePath = path.resolve(__dirname, "../templates/stage-template.html");
 
@@ -122,4 +122,38 @@ test("syncRegistry picks up a thumbnail file from the stage directory", () => {
 
   const registry = fs.readFileSync(path.join(repoRoot, "community-stages", "registry.js"), "utf8");
   assert.match(registry, /thumbnail: "\.\/thumb-test\/thumbnail\.png"/);
+});
+
+test("metadata loader rejects directory mismatch, unsafe thumbnails, and symlinks", () => {
+  const repoRoot = makeRepoFixture();
+  createStageInRepo({
+    repoRoot,
+    args: {
+      slug: "safe-stage", title: "Safe", creator: "Tester", genre: "arcade",
+      controls: "터치", "clear-condition": "완료", "fail-condition": "실패", description: "설명",
+    },
+  });
+  const metaPath = path.join(repoRoot, "community-stages", "safe-stage", "meta.json");
+  const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+  meta.id = "other-stage";
+  fs.writeFileSync(metaPath, JSON.stringify(meta));
+  assert.throws(() => loadAllStageMetas(repoRoot), /must match directory/);
+
+  meta.id = "safe-stage";
+  meta.thumbnail = "../secret.png";
+  fs.writeFileSync(metaPath, JSON.stringify(meta));
+  assert.throws(() => loadAllStageMetas(repoRoot), /must stay inside stage directory/);
+
+  meta.thumbnail = "./safe-stage/images/../../secret.png";
+  fs.writeFileSync(metaPath, JSON.stringify(meta));
+  assert.throws(() => loadAllStageMetas(repoRoot), /must stay inside stage directory/);
+
+  meta.thumbnail = "./safe-stage/%2e%2e/%2e%2e/index.html";
+  fs.writeFileSync(metaPath, JSON.stringify(meta));
+  assert.throws(() => loadAllStageMetas(repoRoot), /must use an unencoded stage-local path/);
+
+  meta.thumbnail = null;
+  fs.writeFileSync(metaPath, JSON.stringify(meta));
+  fs.symlinkSync(metaPath, path.join(repoRoot, "community-stages", "safe-stage", "linked-meta.json"));
+  assert.throws(() => loadAllStageMetas(repoRoot), /cannot be symbolic links/);
 });
