@@ -2,16 +2,12 @@
 
 입력은 스테이지 설명 한 줄 또는 설명 + 필수 메타다.
 
-빠르게 시작하고 싶으면 아래 두 방법을 우선 사용한다.
+빠르게 시작하고 싶으면 CLI 초안 생성을 우선 사용한다.
 
-- 브라우저 위저드:
-  - 로컬 서버를 켠 뒤 `http://127.0.0.1:4173/relay-tools/make-stage.html`
-  - 아이디어 + 프리셋만 넣으면 slug, 메타, CLI 명령, `/make-stage` 프롬프트를 바로 만든다.
-- CLI 초안 생성:
-  - `node relay-tools/scripts/create_stage.js --draft --preset <preset-id> --title "<title>" --description "<idea>"`
-  - `--creator`, `--creator-github`를 생략해도 된다. 초안에서는 `Anonymous Creator`가 들어간다.
-  - `--genre`, `--controls`, `--clear-condition`, `--fail-condition`은 프리셋으로 자동 채운다.
-  - 사용 가능한 프리셋은 `node relay-tools/scripts/create_stage.js --list-presets` 로 확인한다.
+- `node relay-tools/scripts/create_stage.js --draft --preset <preset-id> --title "<title>" --description "<idea>"`
+- `--creator`, `--creator-github`를 생략해도 된다. 초안에서는 `Anonymous Creator`가 들어간다.
+- `--genre`, `--controls`, `--clear-condition`, `--fail-condition`은 프리셋으로 자동 채운다.
+- 사용 가능한 프리셋은 `node relay-tools/scripts/create_stage.js --list-presets` 로 확인한다.
 
 목표:
 - 새 릴레이 스테이지를 `community-stages/<stage-slug>/index.html`에 만든다.
@@ -57,7 +53,7 @@
    - `/check-stage`는 모바일 `menu / running / failed` 스크린샷도 함께 만들고, 가로 오버플로가 있으면 실패로 처리한다.
 
 빠른 추천 흐름:
-1. 위저드나 `--draft --preset`으로 초안을 만든다.
+1. `--draft --preset`으로 초안을 만든다.
 2. 바로 `community-stages/<stage-slug>/index.html`에서 핵심 기믹만 먼저 구현한다.
 3. 마지막에 `meta.json`의 조작법, 클리어 조건, 실패 조건을 실제 게임과 맞춘다.
 4. 그 다음 `/check-stage <stage-slug>`를 돌린다.

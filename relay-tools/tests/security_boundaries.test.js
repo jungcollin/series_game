@@ -33,11 +33,11 @@ test("all relay stages use the runtime bridge instead of direct parent host acce
 });
 
 test("contributor documentation uses the sandbox-compatible runtime bridge", () => {
-  const readme = read("README.md");
-  assert.match(readme, /RelayStageHost\.onStageReady/);
-  assert.match(readme, /RelayStageHost\.onStageCleared/);
-  assert.match(readme, /RelayStageHost\.onStageFailed/);
-  assert.doesNotMatch(readme, /parent\.postMessage/);
+  const contributing = read("CONTRIBUTING.md");
+  assert.match(contributing, /RelayStageHost\.onStageReady/);
+  assert.match(contributing, /RelayStageHost\.onStageCleared/);
+  assert.match(contributing, /RelayStageHost\.onStageFailed/);
+  assert.doesNotMatch(contributing, /parent\.postMessage/);
 });
 
 test("PR and Pages workflows keep untrusted code read-only and main-only", () => {
