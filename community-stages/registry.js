@@ -1303,5 +1303,32 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "발광 관문 6개를 통과하면 클리어",
     thumbnail: "./abyssal-gate/thumbnail.png",
     path: "./abyssal-gate/index.html",
-  }
+  },
+  {
+    id: "orbit-ringer",
+    title: "오르빗 링",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "3D rail flight",
+    clearCondition: "55초 안에 링 게이트 12개 통과",
+    thumbnail: "./orbit-ringer/thumbnail.png",
+    path: "./orbit-ringer/index.html",
+  },
+  {
+    id: "tilt-marble",
+    title: "틸트 마블",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "3D tilt physics",
+    clearCondition: "55초 안에 구슬 미로 3개 탈출",
+    thumbnail: "./tilt-marble/thumbnail.png",
+    path: "./tilt-marble/index.html",
+  },
+  {
+    id: "neon-rail",
+    title: "네온 레일",
+    creator: { name: "jungcollin", avatar: null, github: "jungcollin" },
+    genre: "3D rhythm",
+    clearCondition: "트랙 종료까지 정확도 70% 이상",
+    thumbnail: null,
+    path: "./neon-rail/index.html",
+  },
 ];

@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>네온 레일 - 커뮤니티 스테이지</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        background: #05030c; color: #f5f0ff; min-height: 100svh; overflow: hidden;
+        display: grid; place-items: center; padding: clamp(6px, 1.6vw, 12px);
+        font-family: "Avenir Next", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      }
+      .stage {
+        position: relative; width: min(1400px, 100%);
+        height: min(780px, calc(100svh - clamp(12px, 3.2vw, 24px)));
+        border: 1px solid rgba(124, 231, 255, 0.5); border-radius: 10px; overflow: hidden;
+        background: #05030c; box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+      }
+      canvas {
+        position: absolute; inset: 0;
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        background: #05030c; touch-action: none; -webkit-tap-highlight-color: transparent;
+      }
+      #hud { background: transparent; }
+      #hud:focus-visible { outline: 2px solid #7ce7ff; outline-offset: -2px; }
+      @media (max-width: 768px) {
+        body { padding: 0; }
+        .stage { width: 100vw; height: 100svh; border-radius: 0; border-left: 0; border-right: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="stage">
+      <canvas id="game"></canvas>
+      <canvas id="hud" tabindex="0"></canvas>
+      <noscript>이 게임은 JavaScript가 필요합니다.</noscript>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        const BASE_W = 1400;
+        const BASE_H = 780;
+        const gameCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        window.relayStageMeta = {
+          id: "neon-rail",
+          title: "네온 레일",
+          creator: "jungcollin",
+          genre: "3D rhythm",
+          clearCondition: "트랙 종료까지 정확도 70% 이상",
+          failCondition: "미스 12회 또는 정확도 미달 시 실패",
+          controls: "레인 화면 터치 또는 D·F·J·K",
+          version: "1.0.0",
+        };
+        window.relayStageResult = { status: "idle", stageId: "neon-rail", score: 0, attempts: 0, clear: false };
+
+        const relayContext = window.RelayRuntime?.readContext("neon-rail") || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        const CONFIG = {
+          bpm: 132,
+          duration: 45,
+          lanes: 4,
+          approachSpeed: 22,
+          perfectWindow: 0.07,
+          goodWindow: 0.14,
+          clearAccuracy: 0.7,
+          maxMisses: 12,
+          laneWidth: 1.6,
+          hitZ: 0,
+        };
+        const LANE_COLORS = [0x7ce7ff, 0xff7ce1, 0xffe066, 0x9dff7c];
+        const LANE_KEYS = { d: 0, f: 1, j: 2, k: 3, "1": 0, "2": 1, "3": 2, "4": 3 };
+
+        function createRng(seed) {
+          let value = seed >>> 0;
+          return () => {
+            value = (value + 0x6d2b79f5) | 0;
+            let t = Math.imul(value ^ (value >>> 15), 1 | value);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+          };
+        }
+        const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+        function buildTrack(seed) {
+          const rng = createRng(seed);
+          const beat = 60 / CONFIG.bpm;
+          const notes = [];
+          const beatsTotal = Math.floor(CONFIG.duration / beat) - 4;
+          let lastLane = -1;
+          for (let b = 4; b < beatsTotal; b += 1) {
+            const progress = b / beatsTotal;
+            const density = 0.42 + progress * 0.3;
+            if (rng() < density) {
+              let lane = Math.floor(rng() * CONFIG.lanes);
+              if (lane === lastLane && rng() < 0.6) lane = (lane + 1 + Math.floor(rng() * 3)) % CONFIG.lanes;
+              lastLane = lane;
+              notes.push({ lane, time: b * beat, state: "pending" });
+              // 후반부 8분음표 더블
+              if (progress > 0.45 && rng() < 0.22) {
+                notes.push({ lane: (lane + 2) % CONFIG.lanes, time: (b + 0.5) * beat, state: "pending" });
+              }
+            }
+          }
+          notes.sort((a, b2) => a.time - b2.time);
+          return notes;
+        }
+
+        const state = {
+          mode: "menu",
+          notes: [],
+          time: 0,
+          combo: 0,
+          maxCombo: 0,
+          perfect: 0,
+          good: 0,
+          misses: 0,
+          score: 0,
+          attempts: 0,
+          elapsed: 0,
+          seed: 20261031,
+          lastJudgment: null,
+          laneFlash: [0, 0, 0, 0],
+          failReason: "",
+        };
+
+        function accuracy() {
+          const judged = state.perfect + state.good + state.misses;
+          if (!judged) return 1;
+          return (state.perfect + state.good * 0.5) / judged;
+        }
+        function syncResult() {
+          window.relayStageResult = {
+            status: state.mode, stageId: "neon-rail", score: state.score,
+            attempts: state.attempts, clear: state.mode === "cleared",
+          };
+        }
+        function resetRun() {
+          state.mode = "running";
+          state.notes = buildTrack(state.seed);
+          state.time = 0;
+          state.combo = 0;
+          state.maxCombo = 0;
+          state.perfect = 0;
+          state.good = 0;
+          state.misses = 0;
+          state.score = 0;
+          state.attempts += 1;
+          state.elapsed = 0;
+          state.lastJudgment = null;
+          state.laneFlash = [0, 0, 0, 0];
+          state.failReason = "";
+          syncResult();
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: "neon-rail",
+            stageTitle: "네온 레일",
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.elapsed.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: "neon-rail",
+            stageTitle: "네온 레일",
+            reason,
+            durationSec: Number(state.elapsed.toFixed(1)),
+          });
+        }
+        function startStage() { if (state.mode === "running") return; resetRun(); }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.failReason = reason;
+          syncResult();
+          reportFail(reason);
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          syncResult();
+          reportClear();
+        }
+
+        function hitLane(lane) {
+          if (state.mode !== "running") return;
+          let best = null;
+          let bestDelta = Infinity;
+          for (const note of state.notes) {
+            if (note.state !== "pending" || note.lane !== lane) continue;
+            const delta = Math.abs(note.time - state.time);
+            if (delta < bestDelta) { bestDelta = delta; best = note; }
+            if (note.time - state.time > CONFIG.goodWindow) break;
+          }
+          if (!best || bestDelta > CONFIG.goodWindow) {
+            state.laneFlash[lane] = 0.12;
+            return;
+          }
+          best.state = "hit";
+          const perfect = bestDelta <= CONFIG.perfectWindow;
+          if (perfect) { state.perfect += 1; } else { state.good += 1; }
+          state.combo += 1;
+          state.maxCombo = Math.max(state.maxCombo, state.combo);
+          state.score += (perfect ? 300 : 120) + state.combo * 4;
+          state.lastJudgment = { text: perfect ? "PERFECT" : "GOOD", color: perfect ? "#7ce7ff" : "#9dff7c", t: 0.6 };
+          state.laneFlash[lane] = 0.3;
+          burst(laneX(lane), 0.4, CONFIG.hitZ, perfect ? 14 : 8, LANE_COLORS[lane]);
+        }
+
+        function step(dt) {
+          state.elapsed += dt;
+          state.time += dt;
+          for (let i = 0; i < 4; i++) state.laneFlash[i] = Math.max(0, state.laneFlash[i] - dt);
+          if (state.lastJudgment) {
+            state.lastJudgment.t -= dt;
+            if (state.lastJudgment.t <= 0) state.lastJudgment = null;
+          }
+          // 놓친 노트 = 미스
+          for (const note of state.notes) {
+            if (note.state === "pending" && state.time - note.time > CONFIG.goodWindow) {
+              note.state = "miss";
+              state.misses += 1;
+              state.combo = 0;
+              state.lastJudgment = { text: "MISS", color: "#ff6b81", t: 0.6 };
+              if (state.misses >= CONFIG.maxMisses) { failStage("미스 12회"); return; }
+            }
+            if (note.time - state.time > 1) break;
+          }
+          // 트랙 종료 판정
+          const lastNote = state.notes[state.notes.length - 1];
+          if (lastNote && state.time > lastNote.time + 1.2) {
+            if (accuracy() >= CONFIG.clearAccuracy) clearStage();
+            else failStage(`정확도 ${(accuracy() * 100).toFixed(1)}% (70% 미만)`);
+          }
+          // 파티클 갱신
+          for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.life -= dt;
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            if (p.life <= 0) particles.splice(i, 1);
+          }
+        }
+
+        const particles = [];
+        function burst(x, y, z, count, color) {
+          const amount = reducedMotion ? Math.min(4, count) : count;
+          for (let i = 0; i < amount; i++) {
+            const angle = (Math.PI * 2 * i) / amount;
+            particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * 3, vy: Math.sin(angle) * 3 + 1.5, vz: 1.5,
+              life: 0.45, color,
+            });
+          }
+        }
+        function laneX(lane) { return (lane - 1.5) * CONFIG.laneWidth; }
+
+        // ── Three.js 뷰 ──────────────────────────────────────────────
+        const webgl = (() => {
+          if (typeof THREE === "undefined") return null;
+          try {
+            const renderer = new THREE.WebGLRenderer({ canvas: gameCanvas, antialias: true });
+            renderer.setClearColor(0x05030c, 1);
+            return renderer;
+          } catch {
+            return null;
+          }
+        })();
+
+        const three = webgl ? { scene: new THREE.Scene() } : null;
+        const noteMeshes = new Map();
+        let hitLineGroup = null;
+        let laneStrips = [];
+        let tunnelRings = [];
+        let particlePoints = null;
+        let particleGeometry = null;
+
+        function buildWorld() {
+          if (!three) return;
+          const scene = three.scene;
+          scene.fog = new THREE.Fog(0x05030c, 18, 60);
+          three.camera = new THREE.PerspectiveCamera(58, BASE_W / BASE_H, 0.1, 120);
+          three.camera.position.set(0, 4.6, 7.2);
+          three.camera.lookAt(0, 0.4, -10);
+
+          scene.add(new THREE.HemisphereLight(0x8f7cff, 0x05030c, 0.8));
+          const key = new THREE.PointLight(0x7ce7ff, 1.1, 40);
+          key.position.set(0, 6, 2);
+          scene.add(key);
+
+          // 바닥 그리드
+          const grid = new THREE.GridHelper(80, 80, 0x3a2a6a, 0x1c1440);
+          grid.position.y = -0.42;
+          scene.add(grid);
+
+          // 레인 스트립
+          laneStrips = [];
+          for (let lane = 0; lane < CONFIG.lanes; lane++) {
+            const strip = new THREE.Mesh(
+              new THREE.PlaneGeometry(CONFIG.laneWidth * 0.92, 90),
+              new THREE.MeshBasicMaterial({ color: LANE_COLORS[lane], transparent: true, opacity: 0.05 })
+            );
+            strip.rotation.x = -Math.PI / 2;
+            strip.position.set(laneX(lane), -0.4, -40);
+            scene.add(strip);
+            laneStrips.push(strip);
+            const edge = new THREE.Mesh(
+              new THREE.PlaneGeometry(0.05, 90),
+              new THREE.MeshBasicMaterial({ color: LANE_COLORS[lane], transparent: true, opacity: 0.5 })
+            );
+            edge.rotation.x = -Math.PI / 2;
+            edge.position.set(laneX(lane) + CONFIG.laneWidth / 2, -0.39, -40);
+            scene.add(edge);
+          }
+
+          // 히트 라인
+          hitLineGroup = new THREE.Group();
+          for (let lane = 0; lane < CONFIG.lanes; lane++) {
+            const bar = new THREE.Mesh(
+              new THREE.BoxGeometry(CONFIG.laneWidth * 0.9, 0.06, 0.5),
+              new THREE.MeshBasicMaterial({ color: LANE_COLORS[lane], transparent: true, opacity: 0.85 })
+            );
+            bar.position.set(laneX(lane), -0.36, CONFIG.hitZ);
+            hitLineGroup.add(bar);
+          }
+          scene.add(hitLineGroup);
+
+          // 터널 링(비트 펄스)
+          tunnelRings = [];
+          for (let i = 0; i < 12; i++) {
+            const ring = new THREE.Mesh(
+              new THREE.TorusGeometry(7.5, 0.05, 6, 48),
+              new THREE.MeshBasicMaterial({ color: i % 2 ? 0x7ce7ff : 0xff7ce1, transparent: true, opacity: 0.25 })
+            );
+            ring.position.set(0, 2.5, -6 - i * 5);
+            scene.add(ring);
+            tunnelRings.push(ring);
+          }
+
+          // 파티클 포인트 풀
+          particleGeometry = new THREE.BufferGeometry();
+          particleGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(90 * 3), 3));
+          particlePoints = new THREE.Points(
+            particleGeometry,
+            new THREE.PointsMaterial({ color: 0xffffff, size: 0.14, transparent: true, opacity: 0.95 })
+          );
+          scene.add(particlePoints);
+        }
+
+        function noteMesh(note) {
+          let mesh = noteMeshes.get(note);
+          if (!mesh) {
+            mesh = new THREE.Mesh(
+              new THREE.BoxGeometry(CONFIG.laneWidth * 0.62, 0.3, 0.9),
+              new THREE.MeshStandardMaterial({
+                color: LANE_COLORS[note.lane],
+                emissive: LANE_COLORS[note.lane],
+                emissiveIntensity: 1.1,
+                roughness: 0.3, metalness: 0.2,
+              })
+            );
+            noteMeshes.set(note, mesh);
+            three.scene.add(mesh);
+          }
+          return mesh;
+        }
+
+        function renderScene() {
+          if (!three || !webgl) return;
+          const beat = 60 / CONFIG.bpm;
+          const beatPhase = (state.time % beat) / beat;
+
+          // 노트 위치
+          for (const note of state.notes) {
+            if (note.state !== "pending") {
+              const mesh = noteMeshes.get(note);
+              if (mesh) mesh.visible = false;
+              continue;
+            }
+            const z = CONFIG.hitZ - (note.time - state.time) * CONFIG.approachSpeed;
+            if (z > 4 || z < -70) {
+              const mesh = noteMeshes.get(note);
+              if (mesh) mesh.visible = false;
+              continue;
+            }
+            const mesh = noteMesh(note);
+            mesh.visible = true;
+            mesh.position.set(laneX(note.lane), -0.2, z);
+          }
+
+          // 레인 플래시 + 히트 라인 펄스
+          for (let lane = 0; lane < CONFIG.lanes; lane++) {
+            const flash = state.laneFlash[lane];
+            laneStrips[lane].material.opacity = 0.05 + flash * 0.5;
+            const bar = hitLineGroup.children[lane];
+            bar.scale.set(1 + flash * 0.6, 1 + flash * 3, 1);
+            bar.material.opacity = 0.55 + (1 - beatPhase) * 0.3 + flash * 0.15;
+          }
+
+          // 터널 링 스크롤 + 비트 펄스
+          for (let i = 0; i < tunnelRings.length; i++) {
+            const ring = tunnelRings[i];
+            ring.position.z = -6 - i * 5 + ((state.time * 8) % 5);
+            const pulse = 1 + Math.max(0, 1 - beatPhase * 3) * 0.05;
+            ring.scale.set(pulse, pulse, 1);
+          }
+
+          // 파티클
+          if (particleGeometry) {
+            const attr = particleGeometry.getAttribute("position");
+            for (let i = 0; i < 90; i++) {
+              const p = particles[i];
+              if (p) {
+                attr.setXYZ(i, p.x, p.y, p.z);
+              } else {
+                attr.setXYZ(i, 0, -100, 0);
+              }
+            }
+            attr.needsUpdate = true;
+          }
+
+          webgl.render(three.scene, three.camera);
+        }
+
+        if (three) buildWorld();
+
+        // ── HUD(2D) ──────────────────────────────────────────────────
+        function resize() {
+          const rect = gameCanvas.getBoundingClientRect();
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          const w = Math.max(320, Math.floor(rect.width));
+          const h = Math.max(240, Math.floor(rect.height));
+          gameCanvas.width = Math.floor(w * dpr);
+          gameCanvas.height = Math.floor(h * dpr);
+          hudCanvas.width = gameCanvas.width;
+          hudCanvas.height = gameCanvas.height;
+          if (webgl) webgl.setSize(w, h, false);
+          if (three) {
+            three.camera.aspect = w / h;
+            three.camera.updateProjectionMatrix();
+          }
+        }
+        window.addEventListener("resize", resize);
+        resize();
+
+        function baseScale() { return hudCanvas.width / BASE_W; }
+        function cssX(x) { return x * baseScale(); }
+        function cssY(y) { return y * baseScale(); }
+        function cssFont(size, weight) { return `${weight || 700} ${Math.round(size * baseScale())}px "Avenir Next", "SF Mono", monospace`; }
+
+        function roundedCard(x, y, w, h, alpha) {
+          hud.fillStyle = `rgba(5, 3, 12, ${alpha})`;
+          hud.strokeStyle = "rgba(124, 231, 255, 0.55)";
+          hud.lineWidth = Math.max(1, cssX(2));
+          hud.beginPath();
+          hud.roundRect(cssX(x), cssY(y), cssX(w), cssY(h), cssX(14));
+          hud.fill();
+          hud.stroke();
+        }
+
+        function laneScreenX(lane) {
+          // 3D 레인의 대략적인 화면 x 위치(히트 라인 근처)
+          return BASE_W / 2 + (lane - 1.5) * 150;
+        }
+
+        function drawHud() {
+          hud.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+          if (!webgl) {
+            hud.fillStyle = "#05030c";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+          }
+
+          if (state.mode === "running") {
+            roundedCard(18, 16, 560, 100, 0.62);
+            hud.textAlign = "left";
+            hud.fillStyle = "#7ce7ff";
+            hud.font = cssFont(15, 600);
+            hud.fillText(`COMBO`, cssX(36), cssY(44));
+            hud.fillStyle = "#f5f0ff";
+            hud.font = cssFont(34, 800);
+            hud.fillText(`${state.combo}`, cssX(36), cssY(84));
+            hud.fillStyle = "rgba(245,240,255,0.65)";
+            hud.font = cssFont(13, 500);
+            hud.fillText("ACCURACY", cssX(170), cssY(44));
+            hud.fillStyle = accuracy() >= 0.7 ? "#9dff7c" : "#ff6b81";
+            hud.font = cssFont(28, 800);
+            hud.fillText(`${(accuracy() * 100).toFixed(1)}%`, cssX(170), cssY(80));
+            hud.fillStyle = "rgba(245,240,255,0.65)";
+            hud.font = cssFont(13, 500);
+            hud.fillText("MISS", cssX(330), cssY(44));
+            hud.fillStyle = state.misses >= 8 ? "#ff6b81" : "#f5f0ff";
+            hud.font = cssFont(28, 800);
+            hud.fillText(`${state.misses}/${CONFIG.maxMisses}`, cssX(330), cssY(80));
+            hud.fillStyle = "#ffe066";
+            hud.font = cssFont(17, 700);
+            hud.fillText(`${state.score}`, cssX(450), cssY(80));
+
+            // 진행 바
+            const progress = clamp(state.time / CONFIG.duration, 0, 1);
+            hud.fillStyle = "rgba(124,231,255,0.2)";
+            hud.fillRect(cssX(18), cssY(132), cssX(560), cssY(8));
+            hud.fillStyle = "#7ce7ff";
+            hud.fillRect(cssX(18), cssY(132), cssX(560 * progress), cssY(8));
+
+            // 레인 키 가이드(하단)
+            hud.textAlign = "center";
+            for (let lane = 0; lane < 4; lane++) {
+              const label = ["D", "F", "J", "K"][lane];
+              const flash = state.laneFlash[lane];
+              hud.fillStyle = flash > 0 ? "#f5f0ff" : "rgba(245,240,255,0.4)";
+              hud.font = cssFont(20, 800);
+              hud.fillText(label, cssX(laneScreenX(lane)), cssY(BASE_H - 36));
+            }
+
+            if (state.lastJudgment) {
+              hud.globalAlpha = clamp(state.lastJudgment.t / 0.3, 0, 1);
+              hud.textAlign = "center";
+              hud.fillStyle = state.lastJudgment.color;
+              hud.font = cssFont(40, 800);
+              hud.fillText(state.lastJudgment.text, cssX(BASE_W / 2), cssY(260));
+              hud.globalAlpha = 1;
+            }
+          }
+
+          if (state.mode === "menu") {
+            hud.fillStyle = "rgba(5,3,12,0.82)";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hud.textAlign = "center";
+            hud.fillStyle = "#7ce7ff";
+            hud.font = cssFont(60, 800);
+            hud.fillText("네온 레일", cssX(BASE_W / 2), cssY(BASE_H / 2 - 120));
+            hud.font = cssFont(21, 500);
+            hud.fillStyle = "rgba(245,240,255,0.9)";
+            hud.fillText("4레인으로 다가오는 노트를 박자에 맞춰 맞히세요", cssX(BASE_W / 2), cssY(BASE_H / 2 - 64));
+            hud.fillStyle = "#9dff7c";
+            hud.font = cssFont(17, 500);
+            hud.fillText("클리어: 트랙 종료까지 정확도 70% 이상 · 실패: 미스 12회 또는 정확도 미달 시 실패", cssX(BASE_W / 2), cssY(BASE_H / 2 - 28));
+            hud.fillStyle = "rgba(245,240,255,0.7)";
+            hud.fillText("레인 화면 터치 또는 D·F·J·K · 모바일에서는 레인을 화면 터치", cssX(BASE_W / 2), cssY(BASE_H / 2 + 6));
+            roundedCard(BASE_W / 2 - 150, BASE_H / 2 + 52, 300, 68, 0.85);
+            hud.fillStyle = "#7ce7ff";
+            hud.font = cssFont(24, 800);
+            hud.fillText("START", cssX(BASE_W / 2), cssY(BASE_H / 2 + 96));
+          } else if (state.mode === "failed") {
+            hud.fillStyle = "rgba(12,3,8,0.86)";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hud.textAlign = "center";
+            hud.fillStyle = "#ff6b81";
+            hud.font = cssFont(56, 800);
+            hud.fillText("트랙 실패", cssX(BASE_W / 2), cssY(BASE_H / 2 - 60));
+            hud.fillStyle = "#f5f0ff";
+            hud.font = cssFont(21, 500);
+            hud.fillText(`사유: ${state.failReason} · 최대 콤보 ${state.maxCombo}`, cssX(BASE_W / 2), cssY(BASE_H / 2 - 12));
+            hud.fillStyle = "rgba(245,240,255,0.75)";
+            hud.fillText("다시 시작: 화면 터치 또는 Enter", cssX(BASE_W / 2), cssY(BASE_H / 2 + 26));
+          } else if (state.mode === "cleared") {
+            hud.fillStyle = "rgba(3,10,12,0.86)";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hud.textAlign = "center";
+            hud.fillStyle = "#9dff7c";
+            hud.font = cssFont(56, 800);
+            hud.fillText("TRACK CLEAR!", cssX(BASE_W / 2), cssY(BASE_H / 2 - 60));
+            hud.fillStyle = "#f5f0ff";
+            hud.font = cssFont(22, 500);
+            hud.fillText(`정확도 ${(accuracy() * 100).toFixed(1)}% · 최대 콤보 ${state.maxCombo} · 점수 ${state.score}`, cssX(BASE_W / 2), cssY(BASE_H / 2 - 10));
+            hud.fillStyle = "rgba(245,240,255,0.75)";
+            hud.fillText("다시 플레이: 화면 터치 또는 Enter", cssX(BASE_W / 2), cssY(BASE_H / 2 + 28));
+          }
+        }
+
+        function render() {
+          renderScene();
+          drawHud();
+        }
+
+        // ── 입력 ─────────────────────────────────────────────────────
+        function pointerLane(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const ratio = (event.clientX - rect.left) / rect.width;
+          return clamp(Math.floor(((ratio * BASE_W) - (BASE_W / 2 - 300)) / 150), 0, 3);
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          if (state.mode !== "running") { startStage(); return; }
+          hitLane(pointerLane(event));
+        }
+        const stageEl = document.querySelector(".stage");
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        hudCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+        window.addEventListener("keydown", (event) => {
+          const key = event.key.toLowerCase();
+          if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key) || key === "enter") {
+            event.preventDefault();
+          }
+          if (event.key === "Enter" || event.key === " ") { startStage(); return; }
+          if (key in LANE_KEYS && !event.repeat) hitLane(LANE_KEYS[key]);
+        });
+
+        // ── 검증/디버그 계약 ─────────────────────────────────────────
+        window.render_game_to_text = () => JSON.stringify({
+          mode: state.mode,
+          coordinate_origin: "lane 0-3 left to right; time in track seconds; notes approach hit line at t=note.time",
+          time: Number(state.time.toFixed(2)),
+          duration: CONFIG.duration,
+          combo: state.combo,
+          maxCombo: state.maxCombo,
+          perfect: state.perfect,
+          good: state.good,
+          misses: state.misses,
+          accuracy: Number(accuracy().toFixed(3)),
+          score: state.score,
+          upcoming: state.notes
+            .filter((note) => note.state === "pending" && note.time >= state.time)
+            .slice(0, 5)
+            .map((note) => ({ lane: note.lane, at: Number((note.time - state.time).toFixed(2)) })),
+          webgl: Boolean(webgl),
+          failReason: state.failReason || undefined,
+        });
+        window.advanceTime = (ms = 16) => {
+          const stepMs = clamp(Number(ms) || 16, 1, 1000);
+          if (state.mode === "running") step(stepMs / 1000);
+          return window.render_game_to_text();
+        };
+        window.relayStageDebug = {
+          start: startStage,
+          forceClear() { if (state.mode !== "running") startStage(); state.perfect = 100; state.score = 9999; clearStage(); },
+          forceFail() { if (state.mode !== "running") startStage(); failStage("debug 실패"); },
+          hitNext() {
+            // 가장 가까운 대기 노트를 완벽 타이밍으로 처리
+            const next = state.notes.find((note) => note.state === "pending");
+            if (!next) return null;
+            state.time = next.time;
+            hitLane(next.lane);
+            return { lane: next.lane, time: Number(next.time.toFixed(2)) };
+          },
+          trackInfo() {
+            return { total: state.notes.length, duration: CONFIG.duration, bpm: CONFIG.bpm };
+          },
+        };
+
+        let last = performance.now();
+        reportReady();
+        function frame(now) {
+          const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
+          last = now;
+          if (state.mode === "running") step(dt);
+          render();
+          requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

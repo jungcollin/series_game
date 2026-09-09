@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>틸트 마블 - 커뮤니티 스테이지</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        background: #07090c; color: #f4f1e8; min-height: 100svh; overflow: hidden;
+        display: grid; place-items: center; padding: clamp(6px, 1.6vw, 12px);
+        font-family: "Avenir Next", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      }
+      .stage {
+        position: relative; width: min(1400px, 100%);
+        height: min(780px, calc(100svh - clamp(12px, 3.2vw, 24px)));
+        border: 1px solid rgba(244, 185, 66, 0.5); border-radius: 10px; overflow: hidden;
+        background: #07090c; box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+      }
+      canvas {
+        position: absolute; inset: 0;
+        display: block; width: 100%; height: 100%;
+        max-width: 100%; max-height: 100%;
+        background: #07090c; touch-action: none; -webkit-tap-highlight-color: transparent;
+      }
+      #hud { background: transparent; }
+      #hud:focus-visible { outline: 2px solid #f4b942; outline-offset: -2px; }
+      @media (max-width: 768px) {
+        body { padding: 0; }
+        .stage { width: 100vw; height: 100svh; border-radius: 0; border-left: 0; border-right: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="stage">
+      <canvas id="game"></canvas>
+      <canvas id="hud" tabindex="0"></canvas>
+      <noscript>이 게임은 JavaScript가 필요합니다.</noscript>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        const BASE_W = 1400;
+        const BASE_H = 780;
+        const gameCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        window.relayStageMeta = {
+          id: "tilt-marble",
+          title: "틸트 마블",
+          creator: "jungcollin",
+          genre: "3D tilt physics",
+          clearCondition: "55초 안에 구슬 미로 3개 탈출",
+          failCondition: "구멍 낙하 또는 시간 초과 시 실패",
+          controls: "드래그 또는 방향키로 큐브 기울이기",
+          version: "1.0.0",
+        };
+        window.relayStageResult = { status: "idle", stageId: "tilt-marble", score: 0, attempts: 0, clear: false };
+
+        const CONFIG = {
+          timeLimit: 55,
+          cell: 1.2,
+          wallHeight: 0.62,
+          ballRadius: 0.34,
+          gravity: 26,
+          damping: 1.6,
+          maxTilt: 0.32,
+          tiltSpeed: 2.6,
+          maxSpeed: 9.5,
+        };
+
+        // 11x11 미로 3종(BFS 연결 검증됨). # 벽, . 길, S 시작, G 골, O 구멍(낙하 즉시 실패)
+        const MAZES = [
+          ["###########","#S........#","#.#####.#.#","#.........#","#.#.#..####","#...#.....#","#...####..#","#.#.#.....#","#.#.#.##..#","#.....#..G#","###########"],
+          ["###########","#S#.....#.#","#.###.#.#.#","#...#.#...#","##O.O.#####","#.#.#.....#","#...###.#.#","#.#...#.#.#","#.#.#..##.#","#........G#","###########"],
+          ["###########","#S#.......#","#.#.###.#.#","#.#O#...#.#","#.#.#O#.#.#","#...#...#.#","#.#..##.#.#","#.......#.#","#.##.##.#.#","#...O...#G#","###########"],
+        ];
+
+        function createRng(seed) {
+          let value = seed >>> 0;
+          return () => {
+            value = (value + 0x6d2b79f5) | 0;
+            let t = Math.imul(value ^ (value >>> 15), 1 | value);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+          };
+        }
+        const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+        const relayContext = window.RelayRuntime?.readContext("tilt-marble") || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        const input = { dragging: false, startX: 0, startY: 0, tiltX: 0, tiltZ: 0, keys: new Set() };
+        const state = {
+          mode: "menu",
+          level: 0,
+          ball: { x: 0, z: 0, vx: 0, vz: 0, falling: 0 },
+          tiltX: 0,
+          tiltZ: 0,
+          remaining: CONFIG.timeLimit,
+          clearedMazes: 0,
+          score: 0,
+          attempts: 0,
+          elapsed: 0,
+          flash: 0,
+          levelBanner: 0,
+          failReason: "",
+          rng: createRng(20261031),
+          stars: [],
+          dust: [],
+        };
+        state.stars = Array.from({ length: 140 }, () => ({
+          x: Math.random(), y: Math.random() * 0.9, r: Math.random() * 1.3 + 0.4, tw: Math.random() * Math.PI * 2,
+        }));
+
+        function levelGrid() { return MAZES[state.level]; }
+        function cellAt(col, row) {
+          const grid = levelGrid();
+          if (row < 0 || row >= grid.length || col < 0 || col >= grid[row].length) return "#";
+          return grid[row][col];
+        }
+        function findCell(ch) {
+          const grid = levelGrid();
+          for (let row = 0; row < grid.length; row++) {
+            for (let col = 0; col < grid[row].length; col++) {
+              if (grid[row][col] === ch) return { col, row };
+            }
+          }
+          return { col: 1, row: 1 };
+        }
+        function toWorld(col, row) {
+          const half = (levelGrid().length * CONFIG.cell) / 2;
+          return { x: col * CONFIG.cell - half + CONFIG.cell / 2, z: row * CONFIG.cell - half + CONFIG.cell / 2 };
+        }
+        function toCell(x, z) {
+          const half = (levelGrid().length * CONFIG.cell) / 2;
+          return { col: Math.floor((x + half) / CONFIG.cell), row: Math.floor((z + half) / CONFIG.cell) };
+        }
+        function placeBallAtStart() {
+          const start = findCell("S");
+          const pos = toWorld(start.col, start.row);
+          state.ball.x = pos.x; state.ball.z = pos.z;
+          state.ball.vx = 0; state.ball.vz = 0; state.ball.falling = 0;
+        }
+        function syncResult() {
+          window.relayStageResult = {
+            status: state.mode, stageId: "tilt-marble", score: state.score,
+            attempts: state.attempts, clear: state.mode === "cleared",
+          };
+        }
+        function resetRun() {
+          state.mode = "running";
+          state.level = 0;
+          state.remaining = CONFIG.timeLimit;
+          state.clearedMazes = 0;
+          state.score = 0;
+          state.attempts = 1;
+          state.elapsed = 0;
+          state.flash = 0;
+          state.levelBanner = 2.2;
+          state.failReason = "";
+          state.tiltX = 0; state.tiltZ = 0;
+          state.dust.length = 0;
+          placeBallAtStart();
+          rebuildMazeMeshes();
+          syncResult();
+        }
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: "tilt-marble",
+            stageTitle: "틸트 마블",
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.elapsed.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: "tilt-marble",
+            stageTitle: "틸트 마블",
+            reason,
+            durationSec: Number(state.elapsed.toFixed(1)),
+          });
+        }
+        function startStage() { if (state.mode === "running") return; resetRun(); }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.failReason = reason;
+          syncResult();
+          reportFail(reason);
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          syncResult();
+          reportClear();
+        }
+
+        function step(dt) {
+          state.elapsed += dt;
+          state.remaining = Math.max(0, state.remaining - dt);
+          state.flash = Math.max(0, state.flash - dt);
+          state.levelBanner = Math.max(0, state.levelBanner - dt);
+          if (state.remaining <= 0) { failStage("제한 시간 초과"); return; }
+
+          // 기울기: 드래그 입력 또는 방향키
+          const keyTiltX = (input.keys.has("ArrowRight") || input.keys.has("d") ? 1 : 0) - (input.keys.has("ArrowLeft") || input.keys.has("a") ? 1 : 0);
+          const keyTiltZ = (input.keys.has("ArrowDown") || input.keys.has("s") ? 1 : 0) - (input.keys.has("ArrowUp") || input.keys.has("w") ? 1 : 0);
+          const targetX = clamp(input.tiltX + keyTiltX, -1, 1) * CONFIG.maxTilt;
+          const targetZ = clamp(input.tiltZ + keyTiltZ, -1, 1) * CONFIG.maxTilt;
+          state.tiltX += (targetX - state.tiltX) * Math.min(1, dt * CONFIG.tiltSpeed * 2);
+          state.tiltZ += (targetZ - state.tiltZ) * Math.min(1, dt * CONFIG.tiltSpeed * 2);
+
+          if (state.ball.falling > 0) {
+            state.ball.falling += dt;
+            if (state.ball.falling > 0.7) { failStage("구멍에 빠짐"); }
+            return;
+          }
+
+          // 구슬 물리: 기울기 중력 성분 + 감쇠
+          state.ball.vx += Math.sin(state.tiltX) * CONFIG.gravity * dt;
+          state.ball.vz += Math.sin(state.tiltZ) * CONFIG.gravity * dt;
+          const damp = Math.max(0, 1 - CONFIG.damping * dt);
+          state.ball.vx *= damp; state.ball.vz *= damp;
+          const speed = Math.hypot(state.ball.vx, state.ball.vz);
+          if (speed > CONFIG.maxSpeed) { state.ball.vx *= CONFIG.maxSpeed / speed; state.ball.vz *= CONFIG.maxSpeed / speed; }
+
+          // 서브스텝 충돌(벽 AABB vs 원)
+          const sub = 2;
+          for (let s = 0; s < sub; s++) {
+            state.ball.x += state.ball.vx * (dt / sub);
+            state.ball.z += state.ball.vz * (dt / sub);
+            resolveWallCollision();
+          }
+
+          // 구멍/골 판정
+          const cell = toCell(state.ball.x, state.ball.z);
+          const kind = cellAt(cell.col, cell.row);
+          const center = toWorld(cell.col, cell.row);
+          if (kind === "O" && Math.hypot(state.ball.x - center.x, state.ball.z - center.z) < 0.34) {
+            state.ball.falling = dt;
+            return;
+          }
+          if (kind === "G" && Math.hypot(state.ball.x - center.x, state.ball.z - center.z) < 0.4) {
+            state.clearedMazes += 1;
+            state.score = state.clearedMazes * 1000 + Math.round(state.remaining) * 10;
+            if (state.clearedMazes >= MAZES.length) { clearStage(); return; }
+            state.level = state.clearedMazes;
+            state.flash = 0.5;
+            state.levelBanner = 2.2;
+            placeBallAtStart();
+            rebuildMazeMeshes();
+          }
+
+          // 이동 먼지 파티클
+          if (speed > 3 && state.dust.length < 60) {
+            state.dust.push({ x: state.ball.x, z: state.ball.z, life: 0.5, r: state.rng() });
+          }
+          for (let i = state.dust.length - 1; i >= 0; i--) {
+            state.dust[i].life -= dt;
+            if (state.dust[i].life <= 0) state.dust.splice(i, 1);
+          }
+        }
+
+        function resolveWallCollision() {
+          const r = CONFIG.ballRadius;
+          const cell = toCell(state.ball.x, state.ball.z);
+          for (let row = cell.row - 1; row <= cell.row + 1; row++) {
+            for (let col = cell.col - 1; col <= cell.col + 1; col++) {
+              if (cellAt(col, row) !== "#") continue;
+              const c = toWorld(col, row);
+              const half = CONFIG.cell / 2;
+              const nearX = clamp(state.ball.x, c.x - half, c.x + half);
+              const nearZ = clamp(state.ball.z, c.z - half, c.z + half);
+              const dx = state.ball.x - nearX;
+              const dz = state.ball.z - nearZ;
+              const dist = Math.hypot(dx, dz);
+              if (dist >= r) continue;
+              if (dist > 1e-6) {
+                const push = (r - dist);
+                state.ball.x += (dx / dist) * push;
+                state.ball.z += (dz / dist) * push;
+                // 법선 방향 속도 제거(약간의 반발)
+                const vn = state.ball.vx * (dx / dist) + state.ball.vz * (dz / dist);
+                if (vn < 0) {
+                  state.ball.vx -= 1.3 * vn * (dx / dist);
+                  state.ball.vz -= 1.3 * vn * (dz / dist);
+                }
+              } else {
+                state.ball.x += r;
+              }
+            }
+          }
+        }
+
+        // ── Three.js 뷰 ──────────────────────────────────────────────
+        const webgl = (() => {
+          if (typeof THREE === "undefined") return null;
+          try {
+            const renderer = new THREE.WebGLRenderer({ canvas: gameCanvas, antialias: true });
+            renderer.setClearColor(0x07090c, 1);
+            if (renderer.shadowMap) {
+              renderer.shadowMap.enabled = !reducedMotion;
+              renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            }
+            return renderer;
+          } catch (_error) {
+            return null;
+          }
+        })();
+
+        const three = webgl ? { scene: new THREE.Scene() } : null;
+        let mazeGroup = null;
+        let boardGroup = null;
+        let ballMesh = null;
+        let goalPulse = null;
+
+        function buildWorld() {
+          if (!three) return;
+          const scene = three.scene;
+          scene.fog = new THREE.Fog(0x07090c, 16, 46);
+          three.camera = new THREE.PerspectiveCamera(46, BASE_W / BASE_H, 0.1, 120);
+          three.camera.position.set(0, 11.5, 10.5);
+          three.camera.lookAt(0, 0, 0.6);
+
+          scene.add(new THREE.HemisphereLight(0xf4e8c8, 0x0a0c12, 0.75));
+          const key = new THREE.DirectionalLight(0xffe0a3, 1.0);
+          key.position.set(5, 12, 6);
+          if (key.castShadow !== undefined) {
+            key.castShadow = !reducedMotion;
+            key.shadow.mapSize.set(1024, 1024);
+            key.shadow.camera.left = -8; key.shadow.camera.right = 8;
+            key.shadow.camera.top = 8; key.shadow.camera.bottom = -8;
+          }
+          scene.add(key);
+          const rim = new THREE.PointLight(0x7fc4ff, 0.9, 40);
+          rim.position.set(-6, 4, -6);
+          scene.add(rim);
+
+          boardGroup = new THREE.Group();
+          scene.add(boardGroup);
+
+          // 큐브 보드(아래로 뾰족한 큐브 덩어리)
+          const boardSize = 11 * CONFIG.cell + 0.7;
+          const board = new THREE.Mesh(
+            new THREE.BoxGeometry(boardSize, 1.6, boardSize),
+            new THREE.MeshStandardMaterial({ color: 0x2a2416, roughness: 0.55, metalness: 0.35 })
+          );
+          board.position.y = -0.82;
+          if (board.receiveShadow !== undefined) board.receiveShadow = true;
+          boardGroup.add(board);
+          const plate = new THREE.Mesh(
+            new THREE.BoxGeometry(boardSize - 0.2, 0.08, boardSize - 0.2),
+            new THREE.MeshStandardMaterial({ color: 0x3b3528, roughness: 0.7, metalness: 0.15 })
+          );
+          boardGroup.add(plate);
+
+          // 구슬
+          ballMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(CONFIG.ballRadius, 28, 22),
+            new THREE.MeshStandardMaterial({ color: 0xf4b942, roughness: 0.25, metalness: 0.9, emissive: 0x2a1c00, emissiveIntensity: 0.4 })
+          );
+          if (ballMesh.castShadow !== undefined) ballMesh.castShadow = true;
+          boardGroup.add(ballMesh);
+
+          mazeGroup = new THREE.Group();
+          boardGroup.add(mazeGroup);
+        }
+
+        function rebuildMazeMeshes() {
+          if (!three || !mazeGroup) return;
+          while (mazeGroup.children.length) {
+            const child = mazeGroup.children.pop();
+            if (child.geometry) child.geometry.dispose();
+            mazeGroup.remove(child);
+          }
+          const wallMaterial = new THREE.MeshStandardMaterial({ color: 0xc8b98a, roughness: 0.4, metalness: 0.4 });
+          const holeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+          const goalMaterial = new THREE.MeshStandardMaterial({ color: 0x2ee6a8, emissive: 0x1d9d72, emissiveIntensity: 1.2 });
+          const grid = levelGrid();
+          for (let row = 0; row < grid.length; row++) {
+            for (let col = 0; col < grid[row].length; col++) {
+              const ch = grid[row][col];
+              const pos = toWorld(col, row);
+              if (ch === "#") {
+                const wall = new THREE.Mesh(new THREE.BoxGeometry(CONFIG.cell, CONFIG.wallHeight, CONFIG.cell), wallMaterial);
+                wall.position.set(pos.x, CONFIG.wallHeight / 2, pos.z);
+                if (wall.castShadow !== undefined) wall.castShadow = true;
+                mazeGroup.add(wall);
+              } else if (ch === "O") {
+                const hole = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 0.06, 24), holeMaterial);
+                hole.position.set(pos.x, 0.045, pos.z);
+                mazeGroup.add(hole);
+                const ring = new THREE.Mesh(
+                  new THREE.TorusGeometry(0.42, 0.05, 8, 28),
+                  new THREE.MeshStandardMaterial({ color: 0xff5f4a, emissive: 0xa02418, emissiveIntensity: 1.0, roughness: 0.4 })
+                );
+                ring.position.set(pos.x, 0.06, pos.z);
+                ring.rotation.x = Math.PI / 2;
+                mazeGroup.add(ring);
+              } else if (ch === "G") {
+                goalPulse = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.44, 0.07, 24), goalMaterial);
+                goalPulse.position.set(pos.x, 0.05, pos.z);
+                mazeGroup.add(goalPulse);
+              }
+            }
+          }
+        }
+
+        if (three) {
+          buildWorld();
+          rebuildMazeMeshes();
+          placeBallAtStart();
+        }
+
+        function renderScene(timeMs) {
+          if (!three || !webgl) return;
+          boardGroup.rotation.z = -state.tiltX;
+          boardGroup.rotation.x = state.tiltZ;
+          if (ballMesh) {
+            ballMesh.position.set(state.ball.x, CONFIG.ballRadius + 0.05 - state.ball.falling * 1.4, state.ball.z);
+            ballMesh.rotation.x += state.ball.vz * 0.03;
+            ballMesh.rotation.z -= state.ball.vx * 0.03;
+          }
+          if (goalPulse) {
+            const pulse = 1 + Math.sin(timeMs * 0.006) * 0.12;
+            goalPulse.scale.set(pulse, 1, pulse);
+          }
+          webgl.render(three.scene, three.camera);
+        }
+
+        // ── HUD(2D) ──────────────────────────────────────────────────
+        function resize() {
+          const rect = gameCanvas.getBoundingClientRect();
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          const w = Math.max(320, Math.floor(rect.width));
+          const h = Math.max(240, Math.floor(rect.height));
+          gameCanvas.width = Math.floor(w * dpr);
+          gameCanvas.height = Math.floor(h * dpr);
+          hudCanvas.width = gameCanvas.width;
+          hudCanvas.height = gameCanvas.height;
+          if (webgl) webgl.setSize(w, h, false);
+          if (three) {
+            three.camera.aspect = w / h;
+            three.camera.updateProjectionMatrix();
+          }
+        }
+        window.addEventListener("resize", resize);
+        resize();
+
+        function baseScale() { return hudCanvas.width / BASE_W; }
+        function cssX(x) { return x * baseScale(); }
+        function cssY(y) { return y * baseScale(); }
+        function cssFont(size, weight) { return `${weight || 700} ${Math.round(size * baseScale())}px "Avenir Next", "SF Mono", monospace`; }
+
+        function roundedCard(x, y, w, h, alpha) {
+          hud.fillStyle = `rgba(7, 9, 12, ${alpha})`;
+          hud.strokeStyle = "rgba(244, 185, 66, 0.6)";
+          hud.lineWidth = Math.max(1, cssX(2));
+          hud.beginPath();
+          hud.roundRect(cssX(x), cssY(y), cssX(w), cssY(h), cssX(14));
+          hud.fill();
+          hud.stroke();
+        }
+
+        function drawHud(timeMs) {
+          hud.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+          if (!webgl) {
+            hud.fillStyle = "#07090c";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hud.strokeStyle = "rgba(244,185,66,0.15)";
+            hud.lineWidth = 1;
+            for (let y = 0; y < BASE_H; y += 52) {
+              hud.beginPath(); hud.moveTo(0, cssY(y)); hud.lineTo(hudCanvas.width, cssY(y)); hud.stroke();
+            }
+          }
+
+          if (state.mode === "running" || state.mode === "menu") {
+            const panelW = 480;
+            roundedCard(18, 16, panelW, 96, 0.62);
+            hud.textAlign = "left";
+            hud.fillStyle = "#f4b942";
+            hud.font = cssFont(15, 600);
+            hud.fillText(`MAZE  ${Math.min(state.clearedMazes + 1, 3)}/3`, cssX(36), cssY(48));
+            hud.fillStyle = state.remaining < 10 ? "#ff5f4a" : "#f4f1e8";
+            hud.font = cssFont(30, 800);
+            hud.fillText(state.remaining.toFixed(1), cssX(210), cssY(56));
+            hud.fillStyle = "rgba(244,241,232,0.6)";
+            hud.font = cssFont(13, 500);
+            hud.fillText("TIME", cssX(210), cssY(80));
+            hud.fillStyle = "#8fd3ff";
+            hud.font = cssFont(15, 600);
+            hud.fillText(`SCORE ${state.score}`, cssX(330), cssY(48));
+
+            // 기울기 미터
+            const meterX = 36, meterY = 76;
+            hud.fillStyle = "rgba(244,241,232,0.25)";
+            hud.fillRect(cssX(meterX), cssY(meterY + 8), cssX(140), cssY(4));
+            hud.fillRect(cssX(meterX + 68), cssY(meterY - 26), cssX(4), cssY(72));
+            const tiltPx = state.tiltX / CONFIG.maxTilt;
+            const tiltPz = state.tiltZ / CONFIG.maxTilt;
+            hud.fillStyle = "#f4b942";
+            hud.beginPath();
+            hud.arc(cssX(meterX + 70 + tiltPx * 62), cssY(meterY + 10 + tiltPz * 28), cssX(7), 0, Math.PI * 2);
+            hud.fill();
+          }
+
+          if (state.levelBanner > 0 && state.mode === "running") {
+            const a = clamp(state.levelBanner / 0.5, 0, 1);
+            hud.globalAlpha = Math.min(1, a);
+            hud.textAlign = "center";
+            hud.fillStyle = "#f4b942";
+            hud.font = cssFont(44, 800);
+            hud.fillText(`MAZE ${state.clearedMazes + 1}`, cssX(BASE_W / 2), cssY(200));
+            hud.globalAlpha = 1;
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(46, 230, 168, ${state.flash * 0.35})`;
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+          }
+
+          if (state.mode === "menu") {
+            hud.fillStyle = "rgba(7,9,12,0.82)";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hud.textAlign = "center";
+            hud.fillStyle = "#f4b942";
+            hud.font = cssFont(60, 800);
+            hud.fillText("틸트 마블", cssX(BASE_W / 2), cssY(BASE_H / 2 - 120));
+            hud.font = cssFont(21, 500);
+            hud.fillStyle = "rgba(244,241,232,0.9)";
+            hud.fillText("큐브를 기울여 구슬을 굴려 미로 3개를 탈출하세요", cssX(BASE_W / 2), cssY(BASE_H / 2 - 64));
+            hud.fillStyle = "#8fd3ff";
+            hud.font = cssFont(17, 500);
+            hud.fillText("클리어: 55초 안에 구슬 미로 3개 탈출 · 실패: 구멍 낙하 또는 시간 초과 시 실패", cssX(BASE_W / 2), cssY(BASE_H / 2 - 28));
+            hud.fillStyle = "rgba(244,241,232,0.7)";
+            hud.fillText("드래그 또는 방향키로 큐브 기울이기 · 모바일은 화면 터치 드래그", cssX(BASE_W / 2), cssY(BASE_H / 2 + 6));
+            roundedCard(BASE_W / 2 - 150, BASE_H / 2 + 52, 300, 68, 0.85);
+            hud.fillStyle = "#f4b942";
+            hud.font = cssFont(24, 800);
+            hud.fillText("START", cssX(BASE_W / 2), cssY(BASE_H / 2 + 96));
+          } else if (state.mode === "failed") {
+            hud.fillStyle = "rgba(12,7,7,0.86)";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hud.textAlign = "center";
+            hud.fillStyle = "#ff5f4a";
+            hud.font = cssFont(56, 800);
+            hud.fillText("실패", cssX(BASE_W / 2), cssY(BASE_H / 2 - 60));
+            hud.fillStyle = "#f4f1e8";
+            hud.font = cssFont(21, 500);
+            hud.fillText(`사유: ${state.failReason} · 클리어 미로 ${state.clearedMazes}/3`, cssX(BASE_W / 2), cssY(BASE_H / 2 - 12));
+            hud.fillStyle = "rgba(244,241,232,0.75)";
+            hud.fillText("다시 시작: 화면 터치 또는 Enter", cssX(BASE_W / 2), cssY(BASE_H / 2 + 26));
+          } else if (state.mode === "cleared") {
+            hud.fillStyle = "rgba(7,12,10,0.86)";
+            hud.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hud.textAlign = "center";
+            hud.fillStyle = "#2ee6a8";
+            hud.font = cssFont(56, 800);
+            hud.fillText("탈출 성공!", cssX(BASE_W / 2), cssY(BASE_H / 2 - 60));
+            hud.fillStyle = "#f4f1e8";
+            hud.font = cssFont(22, 500);
+            hud.fillText(`점수 ${state.score} · 남은 시간 보너스 포함`, cssX(BASE_W / 2), cssY(BASE_H / 2 - 10));
+            hud.fillStyle = "rgba(244,241,232,0.75)";
+            hud.fillText("다시 플레이: 화면 터치 또는 Enter", cssX(BASE_W / 2), cssY(BASE_H / 2 + 28));
+          }
+        }
+
+        function render(timeMs) {
+          renderScene(timeMs);
+          drawHud(timeMs);
+        }
+
+        // ── 입력 ─────────────────────────────────────────────────────
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          if (state.mode !== "running") { startStage(); return; }
+          input.dragging = true;
+          input.startX = event.clientX;
+          input.startY = event.clientY;
+          try { hudCanvas.setPointerCapture?.(event.pointerId); } catch { /* synthetic events */ }
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          input.tiltX = clamp((event.clientX - input.startX) / 140, -1, 1);
+          input.tiltZ = clamp((event.clientY - input.startY) / 140, -1, 1);
+        }
+        function onPointerUp(event) {
+          input.dragging = false;
+          input.tiltX = 0;
+          input.tiltZ = 0;
+          try { hudCanvas.releasePointerCapture?.(event.pointerId); } catch { /* synthetic events */ }
+        }
+        const stageEl = document.querySelector(".stage");
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        hudCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+        window.addEventListener("keydown", (event) => {
+          const key = event.key.toLowerCase();
+          if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key) || key === "enter") {
+            event.preventDefault();
+          }
+          input.keys.add(key.startsWith("arrow") ? event.key : key);
+          if (event.key === "Enter" || event.key === " ") startStage();
+        });
+        window.addEventListener("keyup", (event) => {
+          input.keys.delete(event.key.startsWith("Arrow") ? event.key : event.key.toLowerCase());
+        });
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) input.keys.clear();
+        });
+
+        // ── 검증/디버그 계약 ─────────────────────────────────────────
+        window.render_game_to_text = () => JSON.stringify({
+          mode: state.mode,
+          coordinate_origin: "board-local x right, z down (rows), y up; ball collides with wall AABBs",
+          level: state.level + 1,
+          clearedMazes: state.clearedMazes,
+          remaining: Number(state.remaining.toFixed(2)),
+          score: state.score,
+          ball: {
+            x: Number(state.ball.x.toFixed(2)), z: Number(state.ball.z.toFixed(2)),
+            vx: Number(state.ball.vx.toFixed(2)), vz: Number(state.ball.vz.toFixed(2)),
+            falling: Number(state.ball.falling.toFixed(2)),
+          },
+          tilt: { x: Number(state.tiltX.toFixed(3)), z: Number(state.tiltZ.toFixed(3)) },
+          webgl: Boolean(webgl),
+          failReason: state.failReason || undefined,
+        });
+        window.advanceTime = (ms = 16) => {
+          const stepMs = clamp(Number(ms) || 16, 1, 1000);
+          if (state.mode === "running") step(stepMs / 1000);
+          return window.render_game_to_text();
+        };
+        window.relayStageDebug = {
+          start: startStage,
+          forceClear() { if (state.mode !== "running") startStage(); state.clearedMazes = MAZES.length - 1; state.score = 3000; clearStage(); },
+          forceFail() { if (state.mode !== "running") startStage(); failStage("debug 실패"); },
+          setTilt(x, z) { input.tiltX = clamp(Number(x) || 0, -1, 1); input.tiltZ = clamp(Number(z) || 0, -1, 1); },
+          teleport(col, row) {
+            const pos = toWorld(Number(col) || 0, Number(row) || 0);
+            state.ball.x = pos.x; state.ball.z = pos.z;
+            state.ball.vx = 0; state.ball.vz = 0;
+          },
+          mazeInfo() {
+            const grid = levelGrid();
+            return { level: state.level, start: findCell("S"), goal: findCell("G"), rows: grid };
+          },
+        };
+
+        let last = performance.now();
+        reportReady();
+        function frame(now) {
+          const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
+          last = now;
+          if (state.mode === "running") step(dt);
+          render(now);
+          requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
