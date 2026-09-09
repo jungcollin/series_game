@@ -74,6 +74,10 @@
     return GENRE_STYLES[genre] || DEFAULT_GENRE;
   }
 
+  function generationLabel(generation) {
+    return generation === "v2" ? "정식" : "클래식";
+  }
+
   function getStageThumbnailUrl(entry) {
     if (!entry || !entry.thumbnail) {
       return null;
@@ -176,10 +180,10 @@
       '<span class="stage-card-genre">' +
       escapeHtml(entry.genre) +
       "</span>" +
-      '<span class="stage-card-gen" aria-label="버전 ' +
-      escapeHtml(entry.generation || "v1") +
+      '<span class="stage-card-gen" aria-label="' +
+      escapeHtml(generationLabel(entry.generation)) +
       '">' +
-      escapeHtml(entry.generation || "v1") +
+      escapeHtml(generationLabel(entry.generation)) +
       "</span>" +
       '<span class="stage-card-heart" data-stage-id="' +
       escapeHtml(entry.id) +
