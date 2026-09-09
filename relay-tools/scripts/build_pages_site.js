@@ -46,6 +46,7 @@ const REQUIRED_PATHS = [
   "content/catalog.json",
   "content/reviews.json",
   "content/daily-rules.json",
+  "content/events.json",
   "community-stages/gallery.html",
   "community-stages/play.html",
   "community-stages/creators.html",

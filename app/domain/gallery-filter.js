@@ -24,6 +24,7 @@
         gen: params.get("gen") || "",
         sort: params.get("sort") || "",
         fav: params.get("fav") === "1",
+        event: params.get("event") === "1",
       };
     }
 
@@ -36,6 +37,7 @@
       if (state.sort && state.sort !== "popular")
         params.set("sort", state.sort);
       if (state.fav) params.set("fav", "1");
+      if (state.event) params.set("event", "1");
       var query = params.toString();
       return query ? "?" + query : "";
     }
@@ -68,6 +70,10 @@
       options = options || {};
       var favorites = options.favorites || [];
       var favoriteSet = new Set(favorites);
+      var eventIdSet =
+        options.event && Array.isArray(options.eventIds)
+          ? new Set(options.eventIds)
+          : null;
       var filtered = (entries || []).filter(function (entry) {
         if (!matchesQuery(entry, options.q)) return false;
         if (options.genre && entry.genre !== options.genre) return false;
@@ -79,6 +85,7 @@
         if (options.gen && (entry.generation || "v1") !== options.gen)
           return false;
         if (options.fav && !favoriteSet.has(entry.id)) return false;
+        if (eventIdSet && !eventIdSet.has(entry.id)) return false;
         return true;
       });
 
