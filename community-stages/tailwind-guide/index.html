@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>바람 길잡이</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">바람 길잡이. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 타일 터치·클릭으로 바람 화살표 방향을 회전하는 것이며, 출발 버튼을 누르면 종이비행기가 화살표를 따라 납니다. 비행 중에도 타일을 계속 회전할 수 있습니다. 목적지에 3회 도달하면 클리어, 막힌 길에 3회 부딪히면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="바람 길잡이" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const relayContext = window.RelayRuntime?.readContext("tailwind-guide") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const DIRS = [
+        { dx: 0, dy: -1, angle: -Math.PI / 2 },
+        { dx: 1, dy: 0, angle: 0 },
+        { dx: 0, dy: 1, angle: Math.PI / 2 },
+        { dx: -1, dy: 0, angle: Math.PI },
+      ];
+
+      const state = {
+        mode: "menu", // menu | setup | flying | crashed | landed | cleared | failed
+        elapsed: 0,
+        lastRunTime: 0,
+        round: 1,
+        maxRounds: 3,
+        crashes: 0,
+        maxCrashes: 3,
+        grid: [],
+        cols: 0,
+        rows: 0,
+        board: { x: 0, y: 0, cell: 0 },
+        plane: null,
+        launchButton: null,
+        particles: [],
+        flash: null,
+        banner: "",
+        bannerTime: 0,
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      // --- Board generation ---
+      function mulberry(seed) {
+        let value = seed >>> 0;
+        return function random() {
+          value += 0x6d2b79f5;
+          let result = value;
+          result = Math.imul(result ^ (result >>> 15), result | 1);
+          result ^= result + Math.imul(result ^ (result >>> 7), result | 61);
+          return ((result ^ (result >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function generateBoard(round) {
+        const cols = Math.min(5 + round, 7); // 6, 7, 7
+        const rows = Math.min(4 + round, 6); // 5, 6, 6
+        const random = mulberry(round * 7919 + 17);
+        const start = { c: 0, r: Math.floor(random() * rows) };
+        const goal = { c: cols - 1, r: Math.floor(random() * rows) };
+
+        // Build a guaranteed path from start to goal with detours.
+        const path = [];
+        let c = start.c;
+        let r = start.r;
+        path.push({ c, r });
+        while (c !== goal.c || r !== goal.r) {
+          const moveRight = c !== goal.c && (r === goal.r || random() < 0.72);
+          if (moveRight) c += 1;
+          else r += r < goal.r ? 1 : -1;
+          path.push({ c, r });
+        }
+
+        const onPath = new Set(path.map((p) => p.c + "," + p.r));
+        const obstacleCount = round + 2; // 3, 4, 5
+        const obstacles = new Set();
+        let guard = 0;
+        while (obstacles.size < obstacleCount && guard < 200) {
+          guard += 1;
+          const oc = Math.floor(random() * cols);
+          const orow = Math.floor(random() * rows);
+          const key = oc + "," + orow;
+          if (onPath.has(key) || obstacles.has(key)) continue;
+          obstacles.add(key);
+        }
+
+        const grid = [];
+        for (let row = 0; row < rows; row += 1) {
+          const line = [];
+          for (let col = 0; col < cols; col += 1) {
+            const key = col + "," + row;
+            let type = "wind";
+            if (obstacles.has(key)) type = "rock";
+            if (col === start.c && row === start.r) type = "start";
+            if (col === goal.c && row === goal.r) type = "goal";
+            line.push({ type, dir: Math.floor(random() * 4) });
+          }
+          grid.push(line);
+        }
+        // Point path tiles along the solution so the board is always solvable.
+        for (let i = 0; i < path.length - 1; i += 1) {
+          const from = path[i];
+          const to = path[i + 1];
+          const dx = to.c - from.c;
+          const dy = to.r - from.r;
+          const dir = DIRS.findIndex((d) => d.dx === dx && d.dy === dy);
+          if (grid[from.r][from.c].type !== "rock" && dir >= 0) {
+            grid[from.r][from.c].dir = dir;
+          }
+        }
+        // Scramble some path tiles so the player must rotate them back.
+        let scrambled = 0;
+        for (let i = 0; i < path.length - 1 && scrambled < round + 2; i += 1) {
+          const p = path[i];
+          if (grid[p.r][p.c].type === "wind" && random() < 0.75) {
+            const turn = random() < 0.5 ? 1 : 3;
+            grid[p.r][p.c].dir = (grid[p.r][p.c].dir + turn) % 4;
+            scrambled += 1;
+          }
+        }
+        // Ensure the start tile always points along the path.
+        grid[start.r][start.c].dir = DIRS.findIndex(
+          (d) => d.dx === path[1].c - start.c && d.dy === path[1].r - start.r,
+        );
+        return { grid, cols, rows, start, goal };
+      }
+
+      function layoutBoard() {
+        const marginX = 120;
+        const marginY = 96;
+        const usableW = VIEW.width - marginX * 2;
+        const usableH = VIEW.height - marginY * 2 - 24;
+        const cell = Math.floor(Math.min(usableW / state.cols, usableH / state.rows));
+        state.board = {
+          x: Math.round((VIEW.width - cell * state.cols) / 2),
+          y: Math.round(marginY + (usableH - cell * state.rows) / 2),
+          cell,
+        };
+      }
+
+      function cellCenter(c, r) {
+        return {
+          x: state.board.x + c * state.board.cell + state.board.cell / 2,
+          y: state.board.y + r * state.board.cell + state.board.cell / 2,
+        };
+      }
+
+      function setupRound(round) {
+        const board = generateBoard(round);
+        state.grid = board.grid;
+        state.cols = board.cols;
+        state.rows = board.rows;
+        state.start = board.start;
+        state.goal = board.goal;
+        layoutBoard();
+        state.plane = null;
+        state.mode = "setup";
+        state.banner = "라운드 " + round + " — 바람 길을 맞추고 출발하세요";
+        state.bannerTime = 2.4;
+      }
+
+      function launchPlane() {
+        if (state.mode !== "setup") return;
+        const startDir = state.grid[state.start.r][state.start.c].dir;
+        const center = cellCenter(state.start.c, state.start.r);
+        state.plane = {
+          c: state.start.c,
+          r: state.start.r,
+          x: center.x,
+          y: center.y,
+          dir: startDir,
+          stepTimer: 0,
+          stepDuration: reducedMotion ? 0.18 : 0.42,
+          from: { c: state.start.c, r: state.start.r },
+          moving: false,
+        };
+        state.mode = "flying";
+        state.banner = "";
+      }
+
+      function crashPlane() {
+        state.crashes += 1;
+        state.flash = { color: "rgba(239, 68, 68, 0.35)", time: 0.35 };
+        if (state.plane) {
+          spawnWindBurst(state.plane.x, state.plane.y, "#ef4444", 16);
+        }
+        if (state.crashes >= state.maxCrashes) {
+          failStage("three_crashes");
+          return;
+        }
+        state.mode = "crashed";
+        state.banner = "충돌! (" + state.crashes + "/" + state.maxCrashes + ") 바람 길을 다시 맞춰 보세요";
+        state.bannerTime = 2.2;
+        state.plane = null;
+      }
+
+      function landPlane() {
+        state.flash = { color: "rgba(74, 222, 128, 0.3)", time: 0.4 };
+        if (state.plane) {
+          spawnWindBurst(state.plane.x, state.plane.y, "#4ade80", 22);
+        }
+        if (state.round >= state.maxRounds) {
+          clearStage();
+          return;
+        }
+        state.mode = "landed";
+        state.banner = "착륙 성공! (" + state.round + "/" + state.maxRounds + ")";
+        state.bannerTime = 1.6;
+        state.plane = null;
+      }
+
+      function updatePlane(dt) {
+        const plane = state.plane;
+        if (!plane || !plane.moving) return;
+        plane.stepTimer += dt;
+        const t = Math.min(plane.stepTimer / plane.stepDuration, 1);
+        const from = cellCenter(plane.from.c, plane.from.r);
+        const to = cellCenter(plane.c, plane.r);
+        plane.x = from.x + (to.x - from.x) * t;
+        plane.y = from.y + (to.y - from.y) * t;
+        const targetAngle = DIRS[plane.dir].angle;
+        plane.angle = plane.angle === undefined ? targetAngle : plane.angle + (targetAngle - plane.angle) * Math.min(1, dt * 14);
+        if (!reducedMotion && Math.random() < 0.5) {
+          spawnTrail(plane.x, plane.y);
+        }
+        if (t >= 1) {
+          plane.moving = false;
+          plane.from = { c: plane.c, r: plane.r };
+          plane.stepTimer = 0;
+          const tile = state.grid[plane.r][plane.c];
+          if (tile.type === "goal") {
+            landPlane();
+            return;
+          }
+          const dir = DIRS[tile.dir];
+          const nc = plane.c + dir.dx;
+          const nr = plane.r + dir.dy;
+          if (nc < 0 || nr < 0 || nc >= state.cols || nr >= state.rows || state.grid[nr][nc].type === "rock") {
+            crashPlane();
+            return;
+          }
+          plane.dir = tile.dir;
+          plane.c = nc;
+          plane.r = nr;
+          plane.moving = true;
+        }
+      }
+
+      // --- Particles ---
+      function spawnTrail(x, y) {
+        state.particles.push({
+          x: x + (Math.random() - 0.5) * 6,
+          y: y + (Math.random() - 0.5) * 6,
+          vx: (Math.random() - 0.5) * 24,
+          vy: (Math.random() - 0.5) * 24,
+          life: 0.5,
+          maxLife: 0.5,
+          size: 2.5,
+          color: "#bae6fd",
+        });
+      }
+
+      function spawnWindBurst(x, y, color, count) {
+        for (let i = 0; i < count; i += 1) {
+          const angle = (Math.PI * 2 * i) / count + Math.random() * 0.4;
+          const speed = 60 + Math.random() * 90;
+          state.particles.push({
+            x,
+            y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 0.7,
+            maxLife: 0.7,
+            size: 3.5,
+            color,
+          });
+        }
+      }
+
+      function spawnAmbientWind() {
+        if (state.grid.length === 0) return;
+        const r = Math.floor(Math.random() * state.rows);
+        const c = Math.floor(Math.random() * state.cols);
+        const tile = state.grid[r][c];
+        if (tile.type === "rock" || tile.type === "goal") return;
+        const dir = DIRS[tile.dir];
+        const center = cellCenter(c, r);
+        state.particles.push({
+          x: center.x - dir.dx * state.board.cell * 0.35 + (Math.random() - 0.5) * 10,
+          y: center.y - dir.dy * state.board.cell * 0.35 + (Math.random() - 0.5) * 10,
+          vx: dir.dx * 70,
+          vy: dir.dy * 70,
+          life: 0.65,
+          maxLife: 0.65,
+          size: 2,
+          color: "rgba(125, 211, 252, 0.9)",
+        });
+      }
+
+      function updateParticles(dt) {
+        for (let i = state.particles.length - 1; i >= 0; i -= 1) {
+          const p = state.particles[i];
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.life -= dt;
+          if (p.life <= 0) state.particles.splice(i, 1);
+        }
+      }
+
+      // --- Flow ---
+      function startStage() {
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.round = 1;
+        state.crashes = 0;
+        state.particles = [];
+        state.flash = null;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+        setupRound(1);
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function update(dt) {
+        if (state.mode === "setup" || state.mode === "flying" || state.mode === "crashed" || state.mode === "landed") {
+          state.elapsed += dt;
+        }
+        if (state.bannerTime > 0) {
+          state.bannerTime -= dt;
+          if (state.bannerTime <= 0 && state.mode === "crashed") {
+            state.mode = "setup";
+            state.banner = "바람 길을 고친 뒤 다시 출발하세요";
+            state.bannerTime = 1.8;
+          } else if (state.bannerTime <= 0 && state.mode === "landed") {
+            setupRound(state.round + 1);
+            state.round += 1;
+          }
+        }
+        if (state.flash) {
+          state.flash.time -= dt;
+          if (state.flash.time <= 0) state.flash = null;
+        }
+        updatePlane(dt);
+        updateParticles(dt);
+        if (!reducedMotion && (state.mode === "setup" || state.mode === "flying") && Math.random() < dt * 6) {
+          spawnAmbientWind();
+        }
+      }
+
+      // --- Rendering ---
+      function drawBackground() {
+        const gradient = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        gradient.addColorStop(0, "#0b1e3a");
+        gradient.addColorStop(1, "#0f172a");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+      }
+
+      function drawArrow(cx, cy, dir, size, color) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(DIRS[dir].angle);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(3, size * 0.09);
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(-size * 0.28, 0);
+        ctx.lineTo(size * 0.24, 0);
+        ctx.moveTo(size * 0.06, -size * 0.18);
+        ctx.lineTo(size * 0.28, 0);
+        ctx.lineTo(size * 0.06, size * 0.18);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawBoard() {
+        const { x: bx, y: by, cell } = state.board;
+        for (let r = 0; r < state.rows; r += 1) {
+          for (let c = 0; c < state.cols; c += 1) {
+            const tile = state.grid[r][c];
+            const x = bx + c * cell;
+            const y = by + r * cell;
+            ctx.fillStyle = "rgba(30, 58, 95, 0.55)";
+            if (tile.type === "rock") ctx.fillStyle = "rgba(51, 65, 85, 0.9)";
+            if (tile.type === "start") ctx.fillStyle = "rgba(37, 99, 235, 0.35)";
+            if (tile.type === "goal") ctx.fillStyle = "rgba(22, 163, 74, 0.35)";
+            ctx.fillRect(x + 2, y + 2, cell - 4, cell - 4);
+            ctx.strokeStyle = tile.type === "goal" ? "#4ade80" : tile.type === "start" ? "#60a5fa" : "rgba(125, 211, 252, 0.22)";
+            ctx.lineWidth = tile.type === "goal" || tile.type === "start" ? 3 : 1.5;
+            ctx.strokeRect(x + 2, y + 2, cell - 4, cell - 4);
+
+            const center = cellCenter(c, r);
+            if (tile.type === "rock") {
+              ctx.fillStyle = "#64748b";
+              ctx.beginPath();
+              ctx.moveTo(center.x - cell * 0.2, center.y + cell * 0.18);
+              ctx.lineTo(center.x, center.y - cell * 0.22);
+              ctx.lineTo(center.x + cell * 0.2, center.y + cell * 0.18);
+              ctx.closePath();
+              ctx.fill();
+            } else if (tile.type === "goal") {
+              ctx.strokeStyle = "#4ade80";
+              ctx.lineWidth = 3;
+              ctx.beginPath();
+              ctx.arc(center.x, center.y, cell * 0.24, 0, Math.PI * 2);
+              ctx.stroke();
+              ctx.beginPath();
+              ctx.arc(center.x, center.y, cell * 0.1, 0, Math.PI * 2);
+              ctx.fillStyle = "#4ade80";
+              ctx.fill();
+            } else {
+              drawArrow(center.x, center.y, tile.dir, cell * 0.8, tile.type === "start" ? "#93c5fd" : "#7dd3fc");
+            }
+          }
+        }
+      }
+
+      function drawPlane() {
+        const plane = state.plane;
+        if (!plane) return;
+        ctx.save();
+        ctx.translate(plane.x, plane.y);
+        ctx.rotate(plane.angle || 0);
+        const s = state.board.cell * 0.34;
+        ctx.fillStyle = "#f8fafc";
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(s, 0);
+        ctx.lineTo(-s * 0.7, -s * 0.55);
+        ctx.lineTo(-s * 0.35, 0);
+        ctx.lineTo(-s * 0.7, s * 0.55);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawParticles() {
+        for (const p of state.particles) {
+          ctx.globalAlpha = Math.max(p.life / p.maxLife, 0);
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHud() {
+        ctx.fillStyle = "rgba(2, 6, 23, 0.72)";
+        ctx.fillRect(0, 0, VIEW.width, 56);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "700 22px 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("라운드 " + state.round + "/" + state.maxRounds, 24, 37);
+        ctx.textAlign = "right";
+        const crashText = "충돌 " + state.crashes + "/" + state.maxCrashes;
+        ctx.fillStyle = state.crashes > 0 ? "#fca5a5" : "#cbd5f5";
+        ctx.fillText(crashText, VIEW.width - 24, 37);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "600 18px 'Trebuchet MS', sans-serif";
+        ctx.fillText(state.mode === "flying" ? "비행 중 — 타일을 눌러 바람을 바꿀 수 있습니다" : "타일을 눌러 화살표를 회전", VIEW.width / 2, 37);
+
+        // Launch button
+        const bw = 200;
+        const bh = 58;
+        const bx = (VIEW.width - bw) / 2;
+        const by = VIEW.height - bh - 18;
+        state.launchButton = { x: bx, y: by, w: bw, h: bh };
+        if (state.mode === "setup") {
+          ctx.fillStyle = "#2563eb";
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.strokeStyle = "#93c5fd";
+          ctx.lineWidth = 3;
+          ctx.strokeRect(bx, by, bw, bh);
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "800 26px 'Trebuchet MS', sans-serif";
+          ctx.fillText("출발", VIEW.width / 2, by + 39);
+        }
+
+        if (state.banner) {
+          ctx.fillStyle = "rgba(2, 6, 23, 0.78)";
+          ctx.fillRect(0, 64, VIEW.width, 40);
+          ctx.fillStyle = "#fef08a";
+          ctx.font = "700 20px 'Trebuchet MS', sans-serif";
+          ctx.fillText(state.banner, VIEW.width / 2, 91);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 82, 704, 380);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 82, 704, 380);
+        ctx.fillStyle = accent;
+        ctx.font = "800 44px 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 152);
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 23px 'Trebuchet MS', sans-serif";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 218 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        drawBackground();
+        if (state.mode === "menu") {
+          renderCard("바람 길잡이", [
+            "바람 화살표 타일을 회전해 종이비행기의 길을 만드세요",
+            "조작: 타일 터치·클릭으로 바람 방향 회전, 출발 버튼으로 비행",
+            "모바일에서는 화면 터치만으로 타일 회전과 출발이 가능합니다",
+            "비행 중에도 타일을 계속 돌릴 수 있습니다",
+            "클리어 조건: 종이비행기를 목적지에 3회 도달시키면 클리어",
+            "실패 조건: 비행기가 막힌 길에 3회 부딪히면 실패",
+            "터치하거나 Enter로 시작",
+          ], "#38bdf8");
+          return;
+        }
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "비행기가 막힌 길에 3번 부딪혔습니다",
+            "공유 목숨 1개가 여기서 종료되었습니다",
+            "비행 시간 " + state.lastRunTime.toFixed(1) + "초 · 도달 " + (state.round - 1) + "회",
+            "터치하면 다시 도전할 수 있습니다",
+          ], "#b91c1c");
+          return;
+        }
+        if (state.mode === "cleared") {
+          renderCard("클리어", [
+            "모든 라운드의 목적지에 도달했습니다",
+            "비행 시간 " + state.lastRunTime.toFixed(1) + "초 · 충돌 " + state.crashes + "회",
+            "호스트가 다음 스테이지를 선택합니다",
+          ], "#15803d");
+          return;
+        }
+        drawBoard();
+        drawParticles();
+        drawPlane();
+        drawHud();
+        if (state.flash) {
+          ctx.fillStyle = state.flash.color;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "grid cols x rows, origin top-left; dir 0=up 1=right 2=down 3=left",
+          mode: state.mode === "setup" || state.mode === "flying" || state.mode === "crashed" || state.mode === "landed" ? "running" : state.mode,
+          phase: state.mode,
+          round: state.round,
+          crashes: state.crashes,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          plane: state.plane
+            ? { c: state.plane.c, r: state.plane.r, dir: state.plane.dir }
+            : null,
+          board: state.grid.length
+            ? state.grid.map((row) => row.map((tile) => tile.type[0] + tile.dir).join(" "))
+            : null,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      // --- Input ---
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        return {
+          x: (event.clientX - rect.left) * scaleX,
+          y: (event.clientY - rect.top) * scaleY,
+        };
+      }
+
+      function handlePress(event) {
+        const point = canvasPoint(event);
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startFromTouch();
+          return;
+        }
+        const btn = state.launchButton;
+        if (state.mode === "setup" && btn && point.x >= btn.x && point.x <= btn.x + btn.w && point.y >= btn.y && point.y <= btn.y + btn.h) {
+          launchPlane();
+          return;
+        }
+        if (state.mode === "setup" || state.mode === "flying") {
+          const { x: bx, y: by, cell } = state.board;
+          const c = Math.floor((point.x - bx) / cell);
+          const r = Math.floor((point.y - by) / cell);
+          if (c < 0 || r < 0 || c >= state.cols || r >= state.rows) return;
+          const tile = state.grid[r][c];
+          if (tile.type === "rock" || tile.type === "goal") return;
+          tile.dir = (tile.dir + 1) % 4;
+          const center = cellCenter(c, r);
+          spawnWindBurst(center.x, center.y, "#7dd3fc", 6);
+        }
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+            startFromTouch();
+          } else if (state.mode === "setup") {
+            launchPlane();
+          }
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "tailwind-guide",
+        title: "바람 길잡이",
+        creator: "jungcollin",
+        genre: "Path rotation puzzle",
+        clearCondition: "종이비행기를 목적지에 3회 도달시키면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        handlePress(event);
+      });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      window.relayStageResult.status = "running";
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
