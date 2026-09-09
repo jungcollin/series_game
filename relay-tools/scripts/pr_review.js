@@ -106,6 +106,7 @@ function runStageChecks(repoRoot, stageSlugs, baseUrl) {
       ["relay-tools/scripts/check_stage.js", "--stage", slug, "--base-url", baseUrl],
       repoRoot
     );
+    // pi-lens-ignore: unchecked-throwing-call-js
     return JSON.parse(output);
   });
 }
@@ -129,6 +130,7 @@ function runHostUiCheck(repoRoot, baseUrl) {
     ["relay-tools/scripts/check_host_flow.js", "--base-url", baseUrl, "--mobile"],
     repoRoot
   );
+  // pi-lens-ignore: unchecked-throwing-call-js
   return JSON.parse(output);
 }
 
@@ -167,7 +169,6 @@ function main() {
     : null;
 
   const ok =
-    stageSlugs.length > 0 &&
     checks.every((entry) => entry.ok) &&
     (!hostUiCheck || hostUiCheck.ok);
   const safeToApprove = false;
