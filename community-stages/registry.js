@@ -1366,5 +1366,5 @@ window.COMMUNITY_STAGE_REGISTRY = [
     clearCondition: "소포 5개를 목표 지점에 배송하면 클리어",
     thumbnail: "./vacuum-tube-post/thumbnail.png",
     path: "./vacuum-tube-post/index.html",
-  }
+  },
 ];
