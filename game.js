@@ -15,6 +15,12 @@ const leaderboardStatusEl = document.querySelector("#leaderboard-status");
 const leaderboardListEl = document.querySelector("#leaderboard-list");
 const dailySeedEl = document.querySelector("#daily-seed");
 const dailyRouteListEl = document.querySelector("#daily-route-list");
+const eventSectionEl = document.querySelector("#event-section");
+const eventKickerEl = document.querySelector("#event-kicker");
+const eventTitleEl = document.querySelector("#event-title");
+const eventDescriptionEl = document.querySelector("#event-description");
+const eventPeriodEl = document.querySelector("#event-period");
+const eventStageListEl = document.querySelector("#event-stage-list");
 const startRelayBtn = document.querySelector("#start-relay");
 
 const STAGE_READY_TIMEOUT_MS = 4000;
@@ -67,6 +73,7 @@ function renderDailyRoute() {
     dailySeedEl.textContent = state.challengeId || state.dailyDateKey.replaceAll("-", ".");
   }
   if (!dailyRouteListEl) return;
+  // pi-lens-ignore: no-inner-html-js
   dailyRouteListEl.innerHTML = state.dailyRoute.map((stage, index) => {
     const thumb = stage.thumbnail
       ? `<img src="${escapeHtml(normalizeStagePath(stage.thumbnail))}" alt="" loading="lazy" />`
@@ -84,6 +91,45 @@ function renderDailyRoute() {
       </li>
     `;
   }).join("");
+}
+
+function renderEventSection(eventsData, catalog) {
+  if (!eventSectionEl || !window.RelayEvents) return;
+  const event = window.RelayEvents.selectActiveEvent(eventsData);
+  if (!event) {
+    eventSectionEl.hidden = true;
+    return;
+  }
+  const entries = (catalog && catalog.entries) || catalog || COMMUNITY_STAGE_REGISTRY;
+  const stages = window.RelayEvents.resolveEventStages(event, entries);
+  if (!stages.length) {
+    eventSectionEl.hidden = true;
+    return;
+  }
+  eventKickerEl.textContent = event.kicker || "THEMED EVENT";
+  eventTitleEl.textContent = event.title;
+  eventDescriptionEl.textContent = event.description || "";
+  eventDescriptionEl.hidden = !event.description;
+  eventPeriodEl.textContent = window.RelayEvents.formatPeriod(event, "ko-KR");
+  // pi-lens-ignore: no-inner-html-js
+  eventStageListEl.innerHTML = stages.map((stage) => {
+    const registry = COMMUNITY_STAGE_REGISTRY.find((entry) => entry.id === stage.id) || stage;
+    const thumbnail = registry.thumbnail || stage.thumbnail;
+    const thumb = thumbnail
+      ? `<img src="${escapeHtml(normalizeStagePath(thumbnail))}" alt="" loading="lazy" />`
+      : "<span></span>";
+    const playHref = `./community-stages/play.html?stage=${encodeURIComponent(stage.id)}`;
+    return `
+      <li class="event-card">
+        <a href="${playHref}" aria-label="${escapeHtml(stage.title)} 플레이 페이지로 이동">
+          ${thumb}
+          <div><strong>${escapeHtml(stage.title)}</strong><span>${escapeHtml(registry.genre || stage.genre || "")}</span></div>
+        </a>
+      </li>
+    `;
+  }).join("");
+  eventSectionEl.hidden = false;
+  eventSectionEl.classList.add("reveal-up");
 }
 
 function setCourseControlsEnabled(enabled) {
@@ -180,6 +226,7 @@ function renderLeaderboard(entries = []) {
     return;
   }
 
+  // pi-lens-ignore: no-inner-html-js
   leaderboardListEl.innerHTML = entries
     .map((entry, index) => {
       const name = escapeHtml(entry.player_name || "익명");
@@ -244,7 +291,7 @@ async function loadLeaderboard() {
         ? "저장된 상위 기록입니다."
         : "아직 저장된 기록이 없습니다. 첫 번째 기록을 남겨보세요."
     );
-  } catch (error) {
+  } catch {
     renderLeaderboard([]);
     setLeaderboardStatus("지금은 랭킹 연결이 잠시 불안정합니다. 게임은 정상적으로 플레이할 수 있습니다.");
   }
@@ -579,19 +626,6 @@ function currentTodayChallengeId() {
   ) || "";
 }
 
-function currentResultPolicy(outcome, extra = {}) {
-  if (!window.RelayResultPolicy) {
-    return { saveState: "writes-off", canSubmitOfficial: false };
-  }
-  return window.RelayResultPolicy.classifyRun({
-    challengeId: state.challengeId,
-    todayChallengeId: currentTodayChallengeId(),
-    outcome,
-    rankedWritesEnabled: state.rankedWrites,
-    technical: extra.technical === true || outcome === "incomplete",
-  });
-}
-
 function resultStatusLine(outcome, extra = {}) {
   if (!window.RelayResultPolicy) return "";
   return window.RelayResultPolicy.resultCopy({
@@ -816,6 +850,7 @@ function performOverlayAction(action) {
   if (action === "practice-failed") {
     const stageId = state.currentStage?.id;
     if (stageId) {
+      // pi-lens-ignore: no-open-redirect-js
       window.location.href = `./community-stages/play.html?stage=${encodeURIComponent(stageId)}&mode=practice`;
     }
     return;
@@ -974,7 +1009,7 @@ async function loadLikeCounts() {
   try {
     state.likeCounts = await window.LikesClient.fetchLikeCounts();
     state.likeCountsLoaded = true;
-  } catch (error) {
+  } catch {
     state.likeCounts = new Map();
     state.likeCountsLoaded = false;
   }
@@ -985,11 +1020,13 @@ loadLikeCounts().then(renderDailyRoute);
 
 async function bootDailyChallenge() {
   setCourseControlsEnabled(false);
-  const [catalog, rules] = await Promise.all([
+  const [catalog, rules, eventsData] = await Promise.all([
     fetch("./content/catalog.json").then((response) => response.ok ? response.json() : null).catch(() => null),
     fetch("./content/daily-rules.json").then((response) => response.ok ? response.json() : null).catch(() => null),
+    fetch("./content/events.json").then((response) => response.ok ? response.json() : null).catch(() => null),
   ]);
   prepareDailyRoute(catalog, rules);
+  renderEventSection(eventsData, catalog);
   state.courseReady = Boolean(state.dailyRoute.length);
   setCourseControlsEnabled(state.courseReady);
   showIdlePrompt();

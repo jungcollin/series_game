@@ -7,6 +7,7 @@
   var genreEl = document.querySelector("#gallery-genre");
   var genEl = document.querySelector("#gallery-generation");
   var favOnlyBtn = document.querySelector("#gallery-fav-only");
+  var eventOnlyBtn = document.querySelector("#gallery-event-only");
   var voteScores = new Map(); // stageId -> { score, upvotes, downvotes }
   var myVotes = {}; // stageId -> 1 | -1
   var SORT_STORAGE_KEY = "olr-gallery-sort";
@@ -23,6 +24,8 @@
   var currentGenre = urlState.genre || "";
   var currentGen = urlState.gen || "";
   var favOnly = Boolean(urlState.fav);
+  var eventOnly = Boolean(urlState.event);
+  var activeEventStageIds = null;
   var hasLoadedVoteScores = false;
 
   var GENRE_STYLES = {
@@ -258,6 +261,7 @@
       gen: currentGen,
       sort: currentSort,
       fav: favOnly,
+      event: eventOnly && activeEventStageIds ? true : false,
     });
     window.history.replaceState(null, "", window.location.pathname + query);
   }
@@ -277,6 +281,8 @@
         gen: currentGen,
         sort: currentSort,
         fav: favOnly,
+        event: eventOnly,
+        eventIds: activeEventStageIds || [],
         favorites: favorites,
         scores: scores,
       });
@@ -298,12 +304,14 @@
   function renderGrid() {
     if (!gridEl) return;
     if (currentSort === "popular" && !hasLoadedVoteScores) {
+      // pi-lens-ignore: no-inner-html-js, no-inner-html
       gridEl.innerHTML =
         '<p class="gallery-status" role="status">인기순을 불러오는 중…</p>';
       return;
     }
     var sorted = getSortedEntries();
     if (!sorted.length) {
+      // pi-lens-ignore: no-inner-html-js, no-inner-html
       gridEl.innerHTML =
         '<p class="gallery-empty">조건에 맞는 스테이지가 없습니다. 검색어나 필터를 바꿔 보세요.</p>';
       return;
@@ -463,6 +471,38 @@
       renderGrid();
     });
   }
+
+  if (eventOnlyBtn) {
+    eventOnlyBtn.addEventListener("click", function () {
+      if (!activeEventStageIds) return;
+      eventOnly = !eventOnly;
+      eventOnlyBtn.setAttribute("aria-pressed", eventOnly ? "true" : "false");
+      eventOnlyBtn.dataset.active = eventOnly ? "true" : "false";
+      syncUrl();
+      renderGrid();
+    });
+  }
+
+  fetch("../content/events.json")
+    .then(function (response) {
+      return response.ok ? response.json() : null;
+    })
+    .then(function (eventsData) {
+      if (!window.RelayEvents) return;
+      var activeEvent = window.RelayEvents.selectActiveEvent(eventsData);
+      if (!activeEvent) return;
+      activeEventStageIds = Array.from(window.RelayEvents.stageIdSet(activeEvent));
+      if (eventOnlyBtn) {
+        eventOnlyBtn.hidden = false;
+        eventOnlyBtn.setAttribute("aria-pressed", eventOnly ? "true" : "false");
+        eventOnlyBtn.dataset.active = eventOnly ? "true" : "false";
+        if (activeEvent.title) {
+          eventOnlyBtn.title = activeEvent.title;
+        }
+      }
+      if (eventOnly) renderGrid();
+    })
+    .catch(function () {});
 
   fetch("../content/catalog.json")
     .then(function (response) {
