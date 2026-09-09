@@ -1,5 +1,17 @@
 # /make-stage
 
+> 버전 정책: 2026-09-09 이전 게시 스테이지는 v1 레거시(커뮤니티 테스트 기여작, 검수 면제)다. 이 문서로 새로 만드는 스테이지는 v2이며 `/check-stage` 검수가 필수다. generation은 `content/published-at.json`의 게시 시각으로 자동 판정된다.
+
+## v2 품질 기준
+
+v2 스테이지는 v1과 달리 고퀄리티를 목표로 한다.
+
+- 3D가 게임성에 맞으면 Three.js를 적극 사용한다. 벤더된 UMD 빌드는 `<script src="../vendor/three/three.min.js"></script>`(r147, `THREE` 전역)로 로드한다. **외부 CDN·ES module import는 sandbox 정책상 금지**다.
+- 조명(ambient + directional 등 2종 이상), 재질 구분, 카메라 연출을 갖춘다. 단색 flat 화면만으로 끝내지 않는다.
+- 조작 피드백(입력 → 화면 반응 100ms 이내), 성공/실패 연출, HUD 수치 판정 표시를 갖춘다.
+- 모바일에서 60fps에 가깝게 유지한다. 섀도우 맵은 필요할 때만 켜고, geometry/material는 재사용한다.
+- WebGL을 쓰면 컨텍스트 생성 실패 시 2D 대체 화면이나 명확한 오류 안내를 보여준다.
+
 입력은 스테이지 설명 한 줄 또는 설명 + 필수 메타다.
 
 빠르게 시작하고 싶으면 CLI 초안 생성을 우선 사용한다.
@@ -10,12 +22,14 @@
 - 사용 가능한 프리셋은 `node relay-tools/scripts/create_stage.js --list-presets` 로 확인한다.
 
 목표:
+
 - 새 릴레이 스테이지를 `community-stages/<stage-slug>/index.html`에 만든다.
 - `community-stages/<stage-slug>/meta.json`을 함께 만든다.
 - `community-stages/registry.js`를 메타 기준으로 갱신한다.
 - 메인 페이지의 iframe 안에서 바로 실행되는 16:9 단일 스테이지를 만든다.
 
 순서:
+
 1. 먼저 `stage-slug`를 정한다.
 2. 설명을 읽고 최소한 아래 필수 메타를 모두 확정한다.
    - `creator`
@@ -48,17 +62,20 @@
 8. 추가 목숨, continue, checkpoint respawn, save restore는 넣지 않는다.
 9. 메타를 고친 경우 `node relay-tools/scripts/sync_registry.js`로 registry를 다시 맞춘다.
 10. 작업이 끝나면 `/check-stage <stage-slug>` 흐름으로 넘어간다. slug 생략 추론에 기대지 않는다.
-   - `/check-stage`는 사용자 페이지 카드에 쓰일 `community-stages/<stage-slug>/thumbnail.png`를 설명 없는 실제 플레이 화면으로 자동 생성한다.
-   - 사용자 페이지 카드는 이 썸네일을 대표 비주얼로 그대로 사용한다. 실제 썸네일이 있으면 카드 위에 대표 장르 이모지를 덧씌우지 않는 것이 기본 규칙이다.
-   - `/check-stage`는 모바일 `menu / running / failed` 스크린샷도 함께 만들고, 가로 오버플로가 있으면 실패로 처리한다.
+
+- `/check-stage`는 사용자 페이지 카드에 쓰일 `community-stages/<stage-slug>/thumbnail.png`를 설명 없는 실제 플레이 화면으로 자동 생성한다.
+- 사용자 페이지 카드는 이 썸네일을 대표 비주얼로 그대로 사용한다. 실제 썸네일이 있으면 카드 위에 대표 장르 이모지를 덧씌우지 않는 것이 기본 규칙이다.
+- `/check-stage`는 모바일 `menu / running / failed` 스크린샷도 함께 만들고, 가로 오버플로가 있으면 실패로 처리한다.
 
 빠른 추천 흐름:
+
 1. `--draft --preset`으로 초안을 만든다.
 2. 바로 `community-stages/<stage-slug>/index.html`에서 핵심 기믹만 먼저 구현한다.
 3. 마지막에 `meta.json`의 조작법, 클리어 조건, 실패 조건을 실제 게임과 맞춘다.
 4. 그 다음 `/check-stage <stage-slug>`를 돌린다.
 
 출력:
+
 - 최종으로 선택한 `stage-slug`
 - 변경한 파일만 짧게 제시한다.
 - 필요하면 검증 전 TODO를 짧게 적는다.

@@ -3,14 +3,20 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
-const { checkRegistrySync, findStageMeta, stagePathForDir } = require("./stage_metadata");
+const {
+  checkRegistrySync,
+  findStageMeta,
+  stagePathForDir,
+} = require("./stage_metadata");
 
 function loadPlaywright() {
   try {
     return require("playwright");
   } catch (firstError) {
     try {
-      const npmRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+      const npmRoot = execFileSync("npm", ["root", "-g"], {
+        encoding: "utf8",
+      }).trim();
       return require(path.join(npmRoot, "playwright"));
     } catch (secondError) {
       throw firstError;
@@ -24,13 +30,28 @@ function debugLog(message) {
 
 function isAllowedRequestUrl(requestUrl, allowedOrigin) {
   if (/^(?:data:|blob:|about:)/i.test(requestUrl)) return true;
-  try { return new URL(requestUrl).origin === allowedOrigin; } catch (error) { return false; }
+  try {
+    return new URL(requestUrl).origin === allowedOrigin;
+  } catch (error) {
+    return false;
+  }
+}
+
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch (error) {
+    throw new Error(
+      `Invalid URL passed to check_stage: ${url} (${error.message})`,
+    );
+  }
 }
 
 async function installNetworkGuard(page, allowedOrigin) {
   const context = page.context();
   await context.route("**/*", (route) => {
-    if (isAllowedRequestUrl(route.request().url(), allowedOrigin)) return route.continue();
+    if (isAllowedRequestUrl(route.request().url(), allowedOrigin))
+      return route.continue();
     return route.abort("blockedbyclient");
   });
   if (typeof context.routeWebSocket === "function") {
@@ -40,21 +61,29 @@ async function installNetworkGuard(page, allowedOrigin) {
 
 async function launchBrowser(chromium, probeUrl) {
   const attemptErrors = [];
+  // v2 스테이지의 Three.js/WebGL은 headless에서 소프트웨어 GL(swiftshader)이 필요하다.
+  // --disable-gpu는 WebGL 컨텍스트 생성까지 막으므로, WebGL이 실제로 열리는 설정을 프로브로 고른다.
+  const webglArgs = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"];
   const attempts = [
+    {
+      label: "chromium-swiftshader",
+      options: { headless: true, args: webglArgs },
+    },
+    {
+      label: "chrome-swiftshader",
+      options: { headless: true, channel: "chrome", args: webglArgs },
+    },
     {
       label: "chrome-disable-gpu",
       options: {
         headless: true,
         channel: "chrome",
-        args: ["--disable-gpu"],
+        args: ["--disable-gpu", ...webglArgs],
       },
     },
     {
       label: "chromium-disable-gpu",
-      options: {
-        headless: true,
-        args: ["--disable-gpu"],
-      },
+      options: { headless: true, args: ["--disable-gpu", ...webglArgs] },
     },
   ];
 
@@ -66,11 +95,29 @@ async function launchBrowser(chromium, probeUrl) {
         viewport: { width: 320, height: 240 },
         serviceWorkers: "block",
       });
-      await installNetworkGuard(probePage, new URL(probeUrl).origin);
-      await probePage.goto(probeUrl, { waitUntil: "domcontentloaded", timeout: 8000 });
+      await installNetworkGuard(probePage, originOf(probeUrl));
+      await probePage.goto(probeUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 8000,
+      });
       await probePage.waitForTimeout(120);
       await probePage.evaluate(() => document.readyState);
+      const webglOk = await probePage.evaluate(() => {
+        try {
+          const probe = document.createElement("canvas");
+          return Boolean(
+            probe.getContext("webgl2") || probe.getContext("webgl"),
+          );
+        } catch {
+          return false;
+        }
+      });
       await probePage.close();
+      if (!webglOk) {
+        attemptErrors.push(`${attempt.label}: webgl unavailable`);
+        await browser.close().catch(() => {});
+        continue;
+      }
       return browser;
     } catch (error) {
       attemptErrors.push(`${attempt.label}: ${error.message}`);
@@ -81,7 +128,7 @@ async function launchBrowser(chromium, probeUrl) {
   }
 
   throw new Error(
-    `Failed to launch Playwright browser.\n${attemptErrors.join("\n")}`
+    `Failed to launch Playwright browser.\n${attemptErrors.join("\n")}`,
   );
 }
 
@@ -142,7 +189,7 @@ function assertStageSourceIncludesMetaText(stageSource, stageMeta) {
   ]) {
     if (!stageSource.includes(field.value)) {
       throw new Error(
-        `Stage source must include the exact ${field.label} text from meta.json: ${field.value}`
+        `Stage source must include the exact ${field.label} text from meta.json: ${field.value}`,
       );
     }
   }
@@ -150,16 +197,18 @@ function assertStageSourceIncludesMetaText(stageSource, stageMeta) {
 
 function assertStageSourceIncludesMobileSupport(stageSource, stageMeta) {
   const hasMobileInputHook = /touchstart|pointerdown/.test(stageSource);
-  const hasTouchCopy = /화면\s*터치|터치\s*또는|터치로|화면\s*버튼|모바일/.test(stageSource);
+  const hasTouchCopy = /화면\s*터치|터치\s*또는|터치로|화면\s*버튼|모바일/.test(
+    stageSource,
+  );
 
   if (!hasMobileInputHook) {
     throw new Error(
-      `Stage source must include touchstart or pointerdown mobile input for stage: ${stageMeta.id}`
+      `Stage source must include touchstart or pointerdown mobile input for stage: ${stageMeta.id}`,
     );
   }
   if (!hasTouchCopy) {
     throw new Error(
-      `Stage source must mention touch/mobile controls in stage copy for stage: ${stageMeta.id}`
+      `Stage source must mention touch/mobile controls in stage copy for stage: ${stageMeta.id}`,
     );
   }
 }
@@ -175,11 +224,11 @@ function resolveStageSlug(args, repoRoot) {
   }
   if (candidates.length > 1) {
     throw new Error(
-      `Missing --stage. Multiple changed stage candidates found: ${candidates.join(", ")}.`
+      `Missing --stage. Multiple changed stage candidates found: ${candidates.join(", ")}.`,
     );
   }
   throw new Error(
-    "Missing --stage and could not infer stage from git changes. Pass --stage <stage-slug>."
+    "Missing --stage and could not infer stage from git changes. Pass --stage <stage-slug>.",
   );
 }
 
@@ -190,7 +239,7 @@ function parseStageRenderText(renderedText) {
   try {
     const parsed = JSON.parse(renderedText);
     return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (error) {
+  } catch {
     return null;
   }
 }
@@ -210,7 +259,9 @@ function findOverflowingElements(elements, viewportWidth, tolerance = 4) {
 
 function assertMobileLayoutMetrics(layoutMetrics, stageMeta, label) {
   if (!layoutMetrics || !layoutMetrics.viewport) {
-    throw new Error(`Missing mobile layout metrics for stage: ${stageMeta.id} (${label})`);
+    throw new Error(
+      `Missing mobile layout metrics for stage: ${stageMeta.id} (${label})`,
+    );
   }
 
   const viewportWidth = Number(layoutMetrics.viewport.width) || 0;
@@ -218,12 +269,12 @@ function assertMobileLayoutMetrics(layoutMetrics, stageMeta, label) {
   const documentScrollWidth = Number(layoutMetrics.documentScrollWidth) || 0;
   const overflowingElements = findOverflowingElements(
     layoutMetrics.elements,
-    viewportWidth
+    viewportWidth,
   );
 
   if (documentScrollWidth > viewportWidth + 4) {
     throw new Error(
-      `Mobile layout overflows horizontally in ${label} state for stage: ${stageMeta.id} (scrollWidth ${documentScrollWidth} > viewport ${viewportWidth})`
+      `Mobile layout overflows horizontally in ${label} state for stage: ${stageMeta.id} (scrollWidth ${documentScrollWidth} > viewport ${viewportWidth})`,
     );
   }
 
@@ -233,24 +284,26 @@ function assertMobileLayoutMetrics(layoutMetrics, stageMeta, label) {
       .map((entry) => entry.label || entry.tag || "unknown")
       .join(", ");
     throw new Error(
-      `Mobile layout has overflowing elements in ${label} state for stage: ${stageMeta.id} (${sample})`
+      `Mobile layout has overflowing elements in ${label} state for stage: ${stageMeta.id} (${sample})`,
     );
   }
 
   const canvas = layoutMetrics.canvas;
   if (!canvas) {
-    throw new Error(`Mobile canvas metrics missing for stage: ${stageMeta.id} (${label})`);
+    throw new Error(
+      `Mobile canvas metrics missing for stage: ${stageMeta.id} (${label})`,
+    );
   }
 
   if (Number(canvas.width) < viewportWidth * 0.75) {
     throw new Error(
-      `Mobile canvas is too narrow in ${label} state for stage: ${stageMeta.id}`
+      `Mobile canvas is too narrow in ${label} state for stage: ${stageMeta.id}`,
     );
   }
 
   if (Number(canvas.height) < Math.min(220, viewportHeight * 0.35)) {
     throw new Error(
-      `Mobile canvas is too short in ${label} state for stage: ${stageMeta.id}`
+      `Mobile canvas is too short in ${label} state for stage: ${stageMeta.id}`,
     );
   }
 }
@@ -276,7 +329,7 @@ async function dispatchCanvasPointerStart(page, pointerType = "mouse") {
         pointerType: pointerKind,
         clientX,
         clientY,
-      })
+      }),
     );
     canvas.dispatchEvent(
       new PointerEvent("pointerup", {
@@ -285,30 +338,41 @@ async function dispatchCanvasPointerStart(page, pointerType = "mouse") {
         pointerType: pointerKind,
         clientX,
         clientY,
-      })
+      }),
     );
   }, pointerType);
 }
 
-async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta }) {
+async function captureGameplayThumbnail({
+  page,
+  stageUrl,
+  repoRoot,
+  stageMeta,
+}) {
   debugLog(`thumbnail: goto ${stageMeta.id}`);
   await page.goto(stageUrl, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(
-    () => typeof window.render_game_to_text === "function" && typeof window.advanceTime === "function",
-    { timeout: 5000 }
+    () =>
+      typeof window.render_game_to_text === "function" &&
+      typeof window.advanceTime === "function",
+    { timeout: 5000 },
   );
   await page.waitForTimeout(80);
 
   const canvas = page.locator("#game");
   if ((await canvas.count()) === 0) {
-    throw new Error(`Stage canvas #game not found for thumbnail capture: ${stageMeta.id}`);
+    throw new Error(
+      `Stage canvas #game not found for thumbnail capture: ${stageMeta.id}`,
+    );
   }
 
   const readSnapshot = async () =>
     parseStageRenderText(
       await page.evaluate(() =>
-        typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null
-      )
+        typeof window.render_game_to_text === "function"
+          ? window.render_game_to_text()
+          : null,
+      ),
     );
 
   const startStage = async (frames) => {
@@ -339,7 +403,7 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
 
   if (!snapshot || snapshot.mode !== "running") {
     throw new Error(
-      `Auto thumbnail capture requires a running gameplay scene, but stage stayed in "${snapshot?.mode || "unknown"}": ${stageMeta.id}`
+      `Auto thumbnail capture requires a running gameplay scene, but stage stayed in "${snapshot?.mode || "unknown"}": ${stageMeta.id}`,
     );
   }
 
@@ -349,13 +413,22 @@ async function captureGameplayThumbnail({ page, stageUrl, repoRoot, stageMeta })
     throw new Error(`Thumbnail target must be a regular file: ${stageMeta.id}`);
   }
   const screenshot = await canvas.screenshot({ type: "png" });
-  const temporaryPath = path.join(path.dirname(thumbnailPath), `.thumbnail-${process.pid}-${Date.now()}.tmp`);
+  const temporaryPath = path.join(
+    path.dirname(thumbnailPath),
+    `.thumbnail-${process.pid}-${Date.now()}.tmp`,
+  );
   fs.writeFileSync(temporaryPath, screenshot, { flag: "wx", mode: 0o600 });
   fs.renameSync(temporaryPath, thumbnailPath);
   return thumbnailPath;
 }
 
-async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta, consoleErrors }) {
+async function captureMobileStageState({
+  browser,
+  stageUrl,
+  outputDir,
+  stageMeta,
+  consoleErrors,
+}) {
   debugLog(`mobile: create page ${stageMeta.id}`);
   const mobilePage = await browser.newPage({
     viewport: { width: 390, height: 844 },
@@ -363,7 +436,7 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
     hasTouch: true,
     serviceWorkers: "block",
   });
-  await installNetworkGuard(mobilePage, new URL(stageUrl).origin);
+  await installNetworkGuard(mobilePage, originOf(stageUrl));
   mobilePage.on("console", (msg) => {
     if (msg.type() === "error") {
       consoleErrors.push(msg.text());
@@ -412,14 +485,15 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
         .map((element) => {
           const rect = element.getBoundingClientRect();
           const id = element.id ? `#${element.id}` : "";
-          const className = typeof element.className === "string"
-            ? element.className
-                .split(/\s+/)
-                .filter(Boolean)
-                .slice(0, 2)
-                .map((name) => `.${name}`)
-                .join("")
-            : "";
+          const className =
+            typeof element.className === "string"
+              ? element.className
+                  .split(/\s+/)
+                  .filter(Boolean)
+                  .slice(0, 2)
+                  .map((name) => `.${name}`)
+                  .join("")
+              : "";
           return {
             tag: String(element.tagName || "").toLowerCase(),
             label: `${String(element.tagName || "").toLowerCase()}${id}${className}`,
@@ -442,8 +516,10 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
 
   await mobilePage.goto(stageUrl, { waitUntil: "domcontentloaded" });
   await mobilePage.waitForFunction(
-    () => typeof window.render_game_to_text === "function" && typeof window.advanceTime === "function",
-    { timeout: 5000 }
+    () =>
+      typeof window.render_game_to_text === "function" &&
+      typeof window.advanceTime === "function",
+    { timeout: 5000 },
   );
   debugLog(`mobile: loaded ${stageMeta.id}`);
   const canvas = mobilePage.locator("#game");
@@ -452,8 +528,10 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
   const readSnapshot = async () =>
     parseStageRenderText(
       await mobilePage.evaluate(() =>
-        typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null
-      )
+        typeof window.render_game_to_text === "function"
+          ? window.render_game_to_text()
+          : null,
+      ),
     );
 
   const tapToStart = async (frames) => {
@@ -469,7 +547,10 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
     await mobilePage.waitForTimeout(40);
   };
 
-  const menuScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-menu.png`);
+  const menuScreenshotPath = path.join(
+    outputDir,
+    `${stageMeta.dir}-mobile-menu.png`,
+  );
   debugLog(`mobile: screenshot menu`);
   await mobilePage.screenshot({ path: menuScreenshotPath, fullPage: true });
   const menuLayout = await readLayoutMetrics();
@@ -489,11 +570,14 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
 
   if (!snapshot || snapshot.mode !== "running") {
     throw new Error(
-      `Mobile touch start failed to enter running state for stage: ${stageMeta.id} (got "${snapshot?.mode || "unknown"}")`
+      `Mobile touch start failed to enter running state for stage: ${stageMeta.id} (got "${snapshot?.mode || "unknown"}")`,
     );
   }
 
-  const runningScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-running.png`);
+  const runningScreenshotPath = path.join(
+    outputDir,
+    `${stageMeta.dir}-mobile-running.png`,
+  );
   debugLog(`mobile: screenshot running`);
   await mobilePage.screenshot({ path: runningScreenshotPath, fullPage: true });
   const runningLayout = await readLayoutMetrics();
@@ -507,10 +591,15 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
 
   const failedSnapshot = await readSnapshot();
   if (!failedSnapshot || failedSnapshot.mode !== "failed") {
-    throw new Error(`Mobile forceFail did not enter failed state for stage: ${stageMeta.id}`);
+    throw new Error(
+      `Mobile forceFail did not enter failed state for stage: ${stageMeta.id}`,
+    );
   }
 
-  const failedScreenshotPath = path.join(outputDir, `${stageMeta.dir}-mobile-failed.png`);
+  const failedScreenshotPath = path.join(
+    outputDir,
+    `${stageMeta.dir}-mobile-failed.png`,
+  );
   debugLog(`mobile: screenshot failed`);
   await mobilePage.screenshot({ path: failedScreenshotPath, fullPage: true });
   const failedLayout = await readLayoutMetrics();
@@ -525,7 +614,11 @@ async function captureMobileStageState({ browser, stageUrl, outputDir, stageMeta
       running: runningLayout,
       failed: failedLayout,
     },
-    screenshotPaths: [menuScreenshotPath, runningScreenshotPath, failedScreenshotPath],
+    screenshotPaths: [
+      menuScreenshotPath,
+      runningScreenshotPath,
+      failedScreenshotPath,
+    ],
   };
 }
 
@@ -536,7 +629,9 @@ async function main() {
   const stageCandidate = resolveStageSlug(args, repoRoot);
   const stageMeta = findStageMeta(repoRoot, stageCandidate);
   const outputDir = path.join(repoRoot, "output", "relay-tools");
-  const baseUrl = (args["base-url"] || "http://series-game.localhost:1355").replace(/\/$/, "");
+  const baseUrl = (
+    args["base-url"] || "http://series-game.localhost:1355"
+  ).replace(/\/$/, "");
 
   if (!stageMeta) {
     throw new Error(`Stage metadata not found for: ${stageCandidate}`);
@@ -545,13 +640,15 @@ async function main() {
   const registryStatus = checkRegistrySync(repoRoot);
   if (!registryStatus.ok) {
     throw new Error(
-      "community-stages/registry.js is out of sync with stage metadata. Run node relay-tools/scripts/sync_registry.js."
+      "community-stages/registry.js is out of sync with stage metadata. Run node relay-tools/scripts/sync_registry.js.",
     );
   }
 
   const stagePath = stagePathForDir(repoRoot, stageMeta.dir);
   if (!fs.existsSync(stagePath)) {
-    throw new Error(`Stage file not found: ${path.relative(repoRoot, stagePath)}`);
+    throw new Error(
+      `Stage file not found: ${path.relative(repoRoot, stagePath)}`,
+    );
   }
 
   const stageSource = fs.readFileSync(stagePath, "utf8");
@@ -561,12 +658,15 @@ async function main() {
   fs.mkdirSync(outputDir, { recursive: true });
 
   debugLog(`launch browser`);
-  const browser = await launchBrowser(chromium, `${baseUrl}/community-stages/index.html`);
+  const browser = await launchBrowser(
+    chromium,
+    `${baseUrl}/community-stages/index.html`,
+  );
   const page = await browser.newPage({
     viewport: { width: 1440, height: 960 },
     serviceWorkers: "block",
   });
-  await installNetworkGuard(page, new URL(baseUrl).origin);
+  await installNetworkGuard(page, originOf(baseUrl));
   const consoleErrors = [];
   page.on("console", (msg) => {
     if (msg.type() === "error") {
@@ -580,26 +680,36 @@ async function main() {
   const launcherCount = await page.locator(`text=${stageMeta.title}`).count();
   await page.screenshot({
     path: path.join(outputDir, `${stageMeta.dir}-launcher.png`),
-    fullPage: true,
+    // 카드 146개+의 거대 fullPage 캡처는 swiftshader(WebGL 소프트웨어 GL)에서 실패하므로 뷰포트만 캡처한다. 카드 존재는 위 locator count가 검증한다.
+    fullPage: false,
   });
 
   const stageUrl = `${baseUrl}/community-stages/${stageMeta.dir}/index.html`;
   debugLog(`stage goto`);
   await page.goto(stageUrl, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(
-    () => typeof window.render_game_to_text === "function" && typeof window.advanceTime === "function",
-    { timeout: 5000 }
+    () =>
+      typeof window.render_game_to_text === "function" &&
+      typeof window.advanceTime === "function",
+    { timeout: 5000 },
   );
   const directChecks = await page.evaluate(() => ({
     hasRender: typeof window.render_game_to_text === "function",
     hasAdvance: typeof window.advanceTime === "function",
-    hasMeta: typeof window.relayStageMeta === "object" && window.relayStageMeta !== null,
-    hasResult: typeof window.relayStageResult === "object" && window.relayStageResult !== null,
+    hasMeta:
+      typeof window.relayStageMeta === "object" &&
+      window.relayStageMeta !== null,
+    hasResult:
+      typeof window.relayStageResult === "object" &&
+      window.relayStageResult !== null,
     hasDebug:
       typeof window.relayStageDebug === "object" &&
       typeof window.relayStageDebug?.forceClear === "function" &&
       typeof window.relayStageDebug?.forceFail === "function",
-    text: typeof window.render_game_to_text === "function" ? window.render_game_to_text() : null,
+    text:
+      typeof window.render_game_to_text === "function"
+        ? window.render_game_to_text()
+        : null,
     meta: window.relayStageMeta || null,
     result: window.relayStageResult || null,
   }));
@@ -626,28 +736,39 @@ async function main() {
   if (!launcherCount) {
     throw new Error(`Launcher card not found for stage: ${stageMeta.id}`);
   }
-  if (!directChecks.hasRender || !directChecks.hasAdvance || !directChecks.hasMeta || !directChecks.hasResult) {
-    throw new Error(`Required relay interface missing for stage: ${stageMeta.id}`);
+  if (
+    !directChecks.hasRender ||
+    !directChecks.hasAdvance ||
+    !directChecks.hasMeta ||
+    !directChecks.hasResult
+  ) {
+    throw new Error(
+      `Required relay interface missing for stage: ${stageMeta.id}`,
+    );
   }
   if (!directChecks.hasDebug) {
-    throw new Error(`relayStageDebug.forceClear/forceFail missing for stage: ${stageMeta.id}`);
+    throw new Error(
+      `relayStageDebug.forceClear/forceFail missing for stage: ${stageMeta.id}`,
+    );
   }
   if (directChecks.meta?.id !== stageMeta.id) {
-    throw new Error(`window.relayStageMeta.id does not match meta.json for stage: ${stageMeta.id}`);
+    throw new Error(
+      `window.relayStageMeta.id does not match meta.json for stage: ${stageMeta.id}`,
+    );
   }
   if (directChecks.meta?.title !== stageMeta.title) {
     throw new Error(
-      `window.relayStageMeta.title does not match meta.json for stage: ${stageMeta.id}`
+      `window.relayStageMeta.title does not match meta.json for stage: ${stageMeta.id}`,
     );
   }
   if (directChecks.meta?.genre !== stageMeta.genre) {
     throw new Error(
-      `window.relayStageMeta.genre does not match meta.json for stage: ${stageMeta.id}`
+      `window.relayStageMeta.genre does not match meta.json for stage: ${stageMeta.id}`,
     );
   }
   if (directChecks.meta?.clearCondition !== stageMeta.clearCondition) {
     throw new Error(
-      `window.relayStageMeta.clearCondition does not match meta.json for stage: ${stageMeta.id}`
+      `window.relayStageMeta.clearCondition does not match meta.json for stage: ${stageMeta.id}`,
     );
   }
 
@@ -655,7 +776,7 @@ async function main() {
     viewport: { width: 1280, height: 800 },
     serviceWorkers: "block",
   });
-  await installNetworkGuard(hostPage, new URL(baseUrl).origin);
+  await installNetworkGuard(hostPage, originOf(baseUrl));
   hostPage.on("console", (msg) => {
     if (msg.type() === "error") {
       consoleErrors.push(msg.text());
@@ -669,20 +790,39 @@ async function main() {
       ({ stageDir, iframeId }) => {
         window.__relayHostEvents = [];
         const token = crypto.randomUUID();
-        document.body.innerHTML = `<iframe id="${iframeId}" sandbox="allow-scripts allow-pointer-lock" src="./${stageDir}/index.html?relayToken=${encodeURIComponent(token)}" style="width:960px;height:540px;border:0"></iframe>`;
+        const frame = document.createElement("iframe");
+        frame.id = iframeId;
+        frame.setAttribute("sandbox", "allow-scripts allow-pointer-lock");
+        frame.src = `./${stageDir}/index.html?relayToken=${encodeURIComponent(token)}`;
+        frame.style.width = "960px";
+        frame.style.height = "540px";
+        frame.style.border = "0";
+        document.body.replaceChildren(frame);
         const iframe = document.getElementById(iframeId);
         window.addEventListener("message", (event) => {
           const message = event.data;
-          if (event.source !== iframe.contentWindow || !message ||
-              message.channel !== "one-life-relay-stage" || message.token !== token ||
-              !message.payload || typeof message.payload !== "object") return;
-          window.__relayHostEvents.push({ type: message.type, meta: message.payload, payload: message.payload });
+          if (
+            event.source !== iframe.contentWindow ||
+            !message ||
+            message.channel !== "one-life-relay-stage" ||
+            message.token !== token ||
+            !message.payload ||
+            typeof message.payload !== "object"
+          )
+            return;
+          window.__relayHostEvents.push({
+            type: message.type,
+            meta: message.payload,
+            payload: message.payload,
+          });
         });
       },
-      { stageDir: stageMeta.dir, iframeId }
+      { stageDir: stageMeta.dir, iframeId },
     );
 
-    const frame = await (await hostPage.waitForSelector(`#${iframeId}`)).contentFrame();
+    const frame = await (
+      await hostPage.waitForSelector(`#${iframeId}`)
+    ).contentFrame();
     await frame.waitForFunction(() => !!window.relayStageDebug);
     await frame.evaluate((actionName) => {
       window.relayStageDebug[actionName]();
@@ -702,13 +842,17 @@ async function main() {
 
   const hasClearEvent = clearEvents.some((event) => event.type === "cleared");
   const hasFailEvent = failEvents.some((event) => event.type === "failed");
-  const hasReadyEvent = clearEvents.some((event) => event.type === "ready") && failEvents.some((event) => event.type === "ready");
+  const hasReadyEvent =
+    clearEvents.some((event) => event.type === "ready") &&
+    failEvents.some((event) => event.type === "ready");
 
   if (!hasReadyEvent || !hasClearEvent || !hasFailEvent) {
     throw new Error(`Host callback contract failed for stage: ${stageMeta.id}`);
   }
   if (consoleErrors.length) {
-    throw new Error(`Console errors detected for stage: ${stageMeta.id}\n${consoleErrors.join("\n")}`);
+    throw new Error(
+      `Console errors detected for stage: ${stageMeta.id}\n${consoleErrors.join("\n")}`,
+    );
   }
 
   process.stdout.write(
@@ -727,16 +871,27 @@ async function main() {
           failEvents,
         },
         screenshots: [
-          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-launcher.png`)),
-          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-direct.png`)),
-          ...mobileChecks.screenshotPaths.map((screenshotPath) => path.relative(repoRoot, screenshotPath)),
-          path.relative(repoRoot, path.join(outputDir, `${stageMeta.dir}-host.png`)),
+          path.relative(
+            repoRoot,
+            path.join(outputDir, `${stageMeta.dir}-launcher.png`),
+          ),
+          path.relative(
+            repoRoot,
+            path.join(outputDir, `${stageMeta.dir}-direct.png`),
+          ),
+          ...mobileChecks.screenshotPaths.map((screenshotPath) =>
+            path.relative(repoRoot, screenshotPath),
+          ),
+          path.relative(
+            repoRoot,
+            path.join(outputDir, `${stageMeta.dir}-host.png`),
+          ),
         ],
         thumbnail: path.relative(repoRoot, thumbnailPath),
       },
       null,
-      2
-    ) + "\n"
+      2,
+    ) + "\n",
   );
 }
 
