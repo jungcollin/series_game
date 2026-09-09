@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>박자 지휘</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">박자 지휘. 캔버스를 화면 터치로 시작하거나 Enter를 누르세요. 조작: 화면 탭·홀드 (클릭·스페이스). 마커가 가운데 지휘봉 원에 닿는 순간 화면을 탭(짧은 박) 또는 홀드(긴 박)하세요. 정확도 75% 이상으로 곡을 끝까지 지휘하면 클리어이고, 박자를 연속 5회 놓치면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="박자 지휘" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const relayContext = window.RelayRuntime?.readContext("tempo-conductor") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const META = {
+        id: "tempo-conductor",
+        title: "박자 지휘",
+        creator: "jungcollin",
+        genre: "Rhythm timing",
+        clearCondition: "정확도 75% 이상으로 곡을 끝까지 지휘하면 클리어",
+      };
+
+      // --- Chart: { t: hit time(s), hold: hold length(s) or 0 } ---
+      // 112 BPM 4/4, beats every ~0.5357s after a 2s lead-in. Deterministic, no RNG.
+      const BPM = 112;
+      const BEAT = 60 / BPM;
+      const LEAD_IN = 2.0;
+      const CHART = (() => {
+        const seq = [
+          { t: 0 }, { t: 1 }, { t: 2 }, { t: 3 },
+          { t: 4 }, { t: 5 }, { t: 6, hold: 2 }, { t: 8 },
+          { t: 9 }, { t: 10 }, { t: 11 }, { t: 12 },
+          { t: 13, hold: 1 }, { t: 14.5 }, { t: 15 }, { t: 16 },
+          { t: 17 }, { t: 18 }, { t: 19, hold: 2 }, { t: 21 },
+          { t: 21.5 }, { t: 22 }, { t: 23 }, { t: 24 },
+          { t: 25 }, { t: 26 }, { t: 27 }, { t: 28, hold: 2 },
+          { t: 30 }, { t: 30.5 }, { t: 31 }, { t: 31.5 },
+          { t: 32 }, { t: 33 }, { t: 34, hold: 1.5 }, { t: 36 },
+          { t: 37 }, { t: 38 }, { t: 39 }, { t: 40 },
+          { t: 40.5 }, { t: 41 }, { t: 41.5 }, { t: 42, hold: 2 },
+          { t: 44 }, { t: 45 }, { t: 46 }, { t: 47 },
+        ];
+        return seq.map((entry) => ({
+          t: LEAD_IN + entry.t * BEAT,
+          hold: (entry.hold || 0) * BEAT,
+          judged: null,
+          holdStart: null,
+          holdJudged: false,
+        }));
+      })();
+      const SONG_END = CHART[CHART.length - 1].t + CHART[CHART.length - 1].hold + 0.8;
+
+      const PERFECT_WIN = 0.09;   // |dt| <= 90ms
+      const GOOD_WIN = 0.18;      // |dt| <= 180ms
+      const MISS_WIN = 0.24;      // beyond => miss
+      const CLEAR_ACCURACY = 0.75;
+      const MAX_CONSEC_MISS = 5;
+      const APPROACH = 1.6;       // seconds visible before hit time
+
+      // --- State ---
+      let mode = "menu"; // menu | running | cleared | failed
+      let elapsed = 0;
+      let lastRunTime = 0;
+      let notes = [];
+      let particles = [];
+      let ripples = [];
+      let hitFlash = 0;
+      let hitFlashColor = "#f8fafc";
+      let judgement = null; // { text, color, life }
+      let accuracy = 1;
+      let hits = 0;
+      let totalJudged = 0;
+      let consecutiveMiss = 0;
+      let failReason = "";
+      let holding = false;
+      let holdNote = null;
+      let animFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let metronomePulse = 0;
+
+      // --- Audio (tiny synthesized ticks, created lazily after user gesture) ---
+      let audioCtx = null;
+      function ensureAudio() {
+        if (audioCtx || !window.AudioContext) return;
+        try { audioCtx = new AudioContext(); } catch { audioCtx = null; }
+      }
+      function blip(freq, dur, gainValue) {
+        if (!audioCtx) return;
+        try {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.frequency.value = freq;
+          osc.type = "sine";
+          gain.gain.setValueAtTime(gainValue, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+          osc.connect(gain).connect(audioCtx.destination);
+          osc.start();
+          osc.stop(audioCtx.currentTime + dur);
+        } catch { /* ignore */ }
+      }
+
+      function vibrate(pattern) {
+        if (navigator.vibrate) {
+          try { navigator.vibrate(pattern); } catch { /* ignore */ }
+        }
+      }
+
+      // --- Relay Host ---
+      function inRelayHost() {
+        try { return window.parent && window.parent !== window && window.RelayStageHost; }
+        catch { return false; }
+      }
+      function reportReady() { if (inRelayHost()) window.RelayStageHost.onStageReady?.(window.relayStageMeta); }
+      function reportFailed(reason) {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: META.id,
+          stageTitle: META.title,
+          reason,
+          durationSec: +lastRunTime.toFixed(1),
+        });
+      }
+      function reportCleared() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: META.id,
+          stageTitle: META.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: +lastRunTime.toFixed(1),
+        });
+      }
+
+      // --- Game flow ---
+      function startStage() {
+        notes = CHART.map((n) => ({ ...n }));
+        particles = [];
+        ripples = [];
+        elapsed = 0;
+        lastRunTime = 0;
+        accuracy = 1;
+        hits = 0;
+        totalJudged = 0;
+        consecutiveMiss = 0;
+        judgement = null;
+        holding = false;
+        holdNote = null;
+        failReason = "";
+        hitFlash = 0;
+        metronomePulse = 0;
+        mode = "running";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+        ensureAudio();
+      }
+
+      function failStage(reason) {
+        mode = "failed";
+        failReason = reason;
+        lastRunTime = elapsed;
+        window.relayStageResult.status = "failed";
+        vibrate([80, 40, 80]);
+        blip(160, 0.35, 0.08);
+        reportFailed(reason);
+      }
+
+      function clearStage() {
+        mode = "cleared";
+        lastRunTime = elapsed;
+        window.relayStageResult.status = "cleared";
+        vibrate([30, 30, 30, 30, 60]);
+        blip(660, 0.18, 0.07);
+        setTimeout(() => blip(880, 0.3, 0.07), 120);
+        reportCleared();
+      }
+
+      function currentAccuracy() {
+        return totalJudged === 0 ? 1 : hits / totalJudged;
+      }
+
+      function showJudgement(text, color) {
+        judgement = { text, color, life: 1 };
+        hitFlash = 1;
+        hitFlashColor = color;
+      }
+
+      function judgeTap(note) {
+        const dt = elapsed - note.t;
+        const adt = Math.abs(dt);
+        note.judged = "tap";
+        if (adt <= PERFECT_WIN) {
+          hits += 1;
+          totalJudged += 1;
+          consecutiveMiss = 0;
+          showJudgement("PERFECT", "#4ade80");
+          spawnRipple(note);
+          vibrate(15);
+          blip(740, 0.08, 0.06);
+        } else if (adt <= GOOD_WIN) {
+          hits += 0.5;
+          totalJudged += 1;
+          consecutiveMiss = 0;
+          showJudgement("GOOD", "#facc15");
+          spawnRipple(note);
+          vibrate(10);
+          blip(520, 0.07, 0.05);
+        } else {
+          registerMiss(note);
+        }
+        accuracy = currentAccuracy();
+      }
+
+      function judgeHoldStart(note) {
+        const adt = Math.abs(elapsed - note.t);
+        if (adt <= GOOD_WIN) {
+          note.holdStart = elapsed;
+          holdNote = note;
+          showJudgement("HOLD", "#38bdf8");
+          vibrate(20);
+          blip(440, 0.12, 0.05);
+        } else if (adt <= MISS_WIN) {
+          registerMiss(note);
+        }
+        // before window: ignore (let it become a missed note if never held)
+      }
+
+      function judgeHoldEnd(note) {
+        const heldFor = elapsed - (note.holdStart ?? elapsed);
+        note.holdStart = null;
+        note.holdJudged = true;
+        note.judged = "hold";
+        if (heldFor >= note.hold * 0.8) {
+          hits += 1;
+          totalJudged += 1;
+          consecutiveMiss = 0;
+          showJudgement(heldFor >= note.hold * 0.95 ? "PERFECT" : "GOOD", "#4ade80");
+          spawnRipple(note);
+          vibrate([15, 20, 15]);
+          blip(880, 0.12, 0.06);
+        } else {
+          registerMiss(note);
+        }
+        accuracy = currentAccuracy();
+      }
+
+      function registerMiss(note) {
+        totalJudged += 1;
+        consecutiveMiss += 1;
+        accuracy = currentAccuracy();
+        showJudgement("MISS", "#f87171");
+        vibrate(40);
+        blip(220, 0.15, 0.06);
+        if (consecutiveMiss >= MAX_CONSEC_MISS) {
+          failStage("consecutive_miss");
+        }
+      }
+
+      function spawnRipple(note) {
+        if (reducedMotion) return;
+        ripples.push({ r: BATON_R, life: 1, color: "#e2e8f0" });
+        for (let i = 0; i < 10; i++) {
+          const a = (Math.PI * 2 * i) / 10;
+          particles.push({
+            x: CX, y: CY,
+            vx: Math.cos(a) * 120,
+            vy: Math.sin(a) * 120,
+            life: 0.6,
+            color: "#e2e8f0",
+            size: 3,
+          });
+        }
+      }
+
+      // --- Input ---
+      function pressStart() {
+        if (mode === "menu" || mode === "failed" || mode === "cleared") {
+          startStage();
+          return;
+        }
+        if (mode !== "running" || holding) return;
+        holding = true;
+        const now = elapsed;
+        // nearest upcoming un-judged note
+        let target = null;
+        let best = Infinity;
+        for (const note of notes) {
+          if (note.judged) continue;
+          const d = Math.abs(now - note.t);
+          if (d < best) { best = d; target = note; }
+        }
+        if (!target || best > MISS_WIN) {
+          return; // empty press, no penalty
+        }
+        if (target.hold > 0) {
+          judgeHoldStart(target);
+        } else {
+          judgeTap(target);
+        }
+      }
+
+      function pressEnd() {
+        if (!holding) return;
+        holding = false;
+        if (mode !== "running") return;
+        if (holdNote && !holdNote.holdJudged) {
+          judgeHoldEnd(holdNote);
+          holdNote = null;
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        pressStart();
+      });
+      canvas.addEventListener("pointerup", (event) => {
+        event.preventDefault();
+        pressEnd();
+      });
+      canvas.addEventListener("pointercancel", pressEnd);
+      canvas.addEventListener("pointerleave", pressEnd);
+      canvas.addEventListener("touchstart", (event) => event.preventDefault(), { passive: false });
+      canvas.addEventListener("click", () => canvas.focus());
+
+      window.addEventListener("keydown", (event) => {
+        if ((event.key === "Enter" || event.key === " ") && !event.repeat) {
+          event.preventDefault();
+          pressStart();
+        }
+      });
+      window.addEventListener("keyup", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          pressEnd();
+        }
+      });
+
+      // --- Update ---
+      function update(dt) {
+        if (mode === "running") {
+          elapsed += dt;
+          metronomePulse = Math.max(0, metronomePulse - dt * 2);
+
+          // auto-miss notes that passed the window without judgement
+          for (const note of notes) {
+            if (note.judged) continue;
+            if (note.hold > 0) {
+              if (elapsed > note.t + MISS_WIN && note.holdStart == null && !note.judged) {
+                registerMiss(note);
+                note.judged = "miss";
+                if (mode !== "running") break;
+              }
+              if (holdNote === note && note.holdStart != null && !note.holdJudged
+                  && elapsed >= note.t + note.hold + GOOD_WIN) {
+                // held past the end without release: judge as complete
+                judgeHoldEnd(note);
+                holdNote = null;
+                holding = false;
+              }
+            } else if (elapsed > note.t + MISS_WIN) {
+              registerMiss(note);
+              note.judged = "miss";
+              if (mode !== "running") break;
+            }
+          }
+
+          if (mode === "running" && elapsed >= SONG_END) {
+            if (accuracy >= CLEAR_ACCURACY) {
+              clearStage();
+            } else {
+              failStage("accuracy_below_75");
+            }
+          }
+        }
+
+        hitFlash = Math.max(0, hitFlash - dt * 2.4);
+        if (judgement) {
+          judgement.life -= dt * 1.4;
+          if (judgement.life <= 0) judgement = null;
+        }
+        for (const p of particles) {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 160 * dt;
+          p.life -= dt * 1.8;
+        }
+        particles = particles.filter((p) => p.life > 0);
+        for (const r of ripples) {
+          r.r += 190 * dt;
+          r.life -= dt * 2;
+        }
+        ripples = ripples.filter((r) => r.life > 0);
+      }
+
+      // --- Layout constants ---
+      const CX = VIEW.width / 2;
+      const CY = VIEW.height / 2 + 16;
+      const BATON_R = 56;
+      const SPAWN_R = 300;
+
+      function drawBackground() {
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#111827");
+        grad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // stage floor
+        ctx.fillStyle = "rgba(30, 41, 59, 0.55)";
+        ctx.beginPath();
+        ctx.ellipse(CX, VIEW.height - 60, 420, 46, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawBaton() {
+        const pulse = 1 + (mode === "running" ? metronomePulse * 0.06 : 0) + hitFlash * 0.12;
+        const r = BATON_R * pulse;
+        // outer ring
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.5)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(CX, CY, r + 12, 0, Math.PI * 2);
+        ctx.stroke();
+        // main circle
+        const grad = ctx.createRadialGradient(CX - 12, CY - 14, 8, CX, CY, r);
+        grad.addColorStop(0, "#f8fafc");
+        grad.addColorStop(1, "#cbd5f5");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(CX, CY, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = hitFlash > 0 ? hitFlashColor : "#64748b";
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        // baton stick
+        ctx.strokeStyle = "#e2e8f0";
+        ctx.lineWidth = 4;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(CX + r * 0.5, CY - r * 0.5);
+        ctx.lineTo(CX + r * 1.1, CY - r * 1.5);
+        ctx.stroke();
+        ctx.fillStyle = "#f8fafc";
+        ctx.beginPath();
+        ctx.arc(CX + r * 1.1, CY - r * 1.5, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineCap = "butt";
+
+        if (holding && holdNote) {
+          const heldFor = Math.max(0, elapsed - (holdNote.holdStart ?? elapsed));
+          const frac = Math.min(1, heldFor / holdNote.hold);
+          ctx.strokeStyle = "#38bdf8";
+          ctx.lineWidth = 7;
+          ctx.beginPath();
+          ctx.arc(CX, CY, r + 22, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+          ctx.stroke();
+        }
+      }
+
+      function drawNotes() {
+        for (const note of notes) {
+          if (note.judged) continue;
+          const until = note.t - elapsed;
+          if (until > APPROACH || until < -MISS_WIN) continue;
+          const progress = 1 - Math.max(0, until) / APPROACH;
+          const angle = -Math.PI / 2; // markers fall from the top (like a score line)
+          const r = SPAWN_R + (BATON_R - SPAWN_R) * progress;
+          const x = CX + Math.cos(angle) * r;
+          const y = CY + Math.sin(angle) * r;
+          const isHold = note.hold > 0;
+
+          // guide lane
+          ctx.strokeStyle = "rgba(71, 85, 105, 0.35)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(CX + Math.cos(angle) * (BATON_R + 18), CY + Math.sin(angle) * (BATON_R + 18));
+          ctx.lineTo(CX + Math.cos(angle) * SPAWN_R, CY + Math.sin(angle) * SPAWN_R);
+          ctx.stroke();
+
+          if (isHold) {
+            // hold tail from note toward center proportional to hold length
+            const tailR = Math.min(SPAWN_R, r - note.hold * ((SPAWN_R - BATON_R) / APPROACH));
+            ctx.strokeStyle = "rgba(56, 189, 248, 0.8)";
+            ctx.lineWidth = 8;
+            ctx.beginPath();
+            ctx.moveTo(CX + Math.cos(angle) * r, CY + Math.sin(angle) * r);
+            ctx.lineTo(CX + Math.cos(angle) * Math.max(BATON_R, tailR), CY + Math.sin(angle) * Math.max(BATON_R, tailR));
+            ctx.stroke();
+          }
+
+          ctx.fillStyle = isHold ? "#38bdf8" : "#fbbf24";
+          ctx.beginPath();
+          ctx.arc(x, y, isHold ? 15 : 12, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "rgba(15, 23, 42, 0.85)";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
+      }
+
+      function drawParticles() {
+        for (const p of particles) {
+          ctx.globalAlpha = Math.max(0, Math.min(1, p.life));
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        for (const r of ripples) {
+          ctx.globalAlpha = Math.max(0, r.life) * 0.6;
+          ctx.strokeStyle = r.color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(CX, CY, r.r, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function drawJudgement() {
+        if (!judgement) return;
+        ctx.globalAlpha = Math.max(0, Math.min(1, judgement.life));
+        ctx.fillStyle = judgement.color;
+        ctx.font = "800 34px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(judgement.text, CX, CY - 110);
+        ctx.globalAlpha = 1;
+        ctx.textAlign = "left";
+      }
+
+      function drawHud() {
+        const acc = Math.round(accuracy * 100);
+        const progress = Math.min(1, elapsed / SONG_END);
+
+        // top bar
+        ctx.fillStyle = "rgba(2, 6, 23, 0.72)";
+        ctx.fillRect(0, 0, VIEW.width, 58);
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 20px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText("박자 지휘", 18, 36);
+
+        ctx.textAlign = "right";
+        ctx.fillStyle = acc >= 75 ? "#4ade80" : "#f87171";
+        ctx.font = "800 24px Trebuchet MS";
+        ctx.fillText(`정확도 ${acc}%`, VIEW.width - 18, 36);
+
+        // miss streak pips
+        ctx.textAlign = "center";
+        ctx.font = "600 15px Trebuchet MS";
+        ctx.fillStyle = "#94a3b8";
+        ctx.fillText(`연속 미스 ${consecutiveMiss}/${MAX_CONSEC_MISS}`, CX, 24);
+
+        // progress bar
+        ctx.fillStyle = "#1e293b";
+        ctx.fillRect(120, 40, VIEW.width - 240, 8);
+        ctx.fillStyle = "#818cf8";
+        ctx.fillRect(120, 40, (VIEW.width - 240) * progress, 8);
+      }
+
+      function wrapLines(text, maxChars) {
+        const words = String(text).split(" ");
+        const lines = [];
+        let line = "";
+        for (const word of words) {
+          const next = line ? `${line} ${word}` : word;
+          if (next.length > maxChars && line) {
+            lines.push(line);
+            line = word;
+          } else {
+            line = next;
+          }
+        }
+        if (line) lines.push(line);
+        return lines;
+      }
+
+      function drawCard(title, lines, accent, footerLines) {
+        ctx.fillStyle = "rgba(2, 6, 23, 0.9)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        const cardW = 720;
+        const cardH = 452;
+        const cardX = (VIEW.width - cardW) / 2;
+        const cardY = (VIEW.height - cardH) / 2;
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(cardX, cardY, cardW, cardH);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(cardX, cardY, cardW, cardH);
+
+        ctx.fillStyle = accent;
+        ctx.font = "800 44px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, CX, cardY + 72);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 20px Trebuchet MS";
+        let y = cardY + 132;
+        for (const line of lines) {
+          for (const wrapped of wrapLines(line, 52)) {
+            ctx.fillText(wrapped, CX, y);
+            y += 30;
+          }
+          y += 12;
+        }
+        if (footerLines && footerLines.length) {
+          ctx.fillStyle = "#475569";
+          ctx.font = "600 18px Trebuchet MS";
+          y = cardY + cardH - footerLines.length * 30 - 12;
+          for (const line of footerLines) {
+            ctx.fillText(line, CX, y);
+            y += 30;
+          }
+        }
+        ctx.textAlign = "left";
+      }
+
+      function draw() {
+        drawBackground();
+
+        if (mode === "menu") {
+          drawCard("박자 지휘", [
+            "오케스트라의 지휘자가 되어 박자를 이끄세요.",
+            "마커가 가운데 원에 닿는 순간 화면을 탭하세요.",
+            "꼬리가 긴 마커는 닿는 순간부터 꼬리 끝까지 홀드합니다.",
+            "조작: 화면 탭·홀드 (클릭·스페이스)",
+            "모바일: 화면 터치로 탭, 꾹 눌러 홀드. 키보드: 스페이스 또는 Enter.",
+            "클리어 조건: 정확도 75% 이상으로 곡을 끝까지 지휘하면 클리어",
+            "실패 조건: 박자를 연속 5회 놓치면 실패",
+          ], "#4f46e5", ["터치, 클릭, 스페이스 또는 Enter로 시작"]);
+          return;
+        }
+
+        if (mode === "running") {
+          drawNotes();
+          drawBaton();
+          drawParticles();
+          drawJudgement();
+          drawHud();
+          return;
+        }
+
+        if (mode === "failed") {
+          const detail = failReason === "consecutive_miss"
+            ? "박자를 연속 5회 놓쳐 오케스트라가 멈췄습니다."
+            : `최종 정확도 ${Math.round(accuracy * 100)}%로 75%에 미치지 못했습니다.`;
+          drawCard("공연 중단", [
+            detail,
+            "공유 목숨 1개가 즉시 종료되었습니다.",
+            "터치, 클릭, 스페이스 또는 Enter로 다시 지휘할 수 있습니다.",
+          ], "#dc2626", [`이번 공연 시간 ${lastRunTime.toFixed(1)}초`]);
+          return;
+        }
+
+        drawCard("완벽한 커튼콜", [
+          `정확도 ${Math.round(accuracy * 100)}%로 곡을 끝까지 지휘했습니다.`,
+          "객석이 환호합니다. 호스트가 다음 스테이지를 준비합니다.",
+          "터치, 클릭, 스페이스 또는 Enter로 다시 지휘할 수 있습니다.",
+        ], "#16a34a", [`공연 시간 ${lastRunTime.toFixed(1)}초`]);
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, markers approach center baton circle from the top",
+          mode,
+          elapsed: +elapsed.toFixed(2),
+          accuracy: +accuracy.toFixed(3),
+          hits,
+          total_judged: totalJudged,
+          consecutive_miss: consecutiveMiss,
+          song_progress: +Math.min(1, elapsed / SONG_END).toFixed(3),
+          notes_total: notes.length,
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let i = 0; i < steps; i += 1) {
+          update(FIXED_DT);
+        }
+        draw();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: META.id,
+        title: META.title,
+        creator: META.creator,
+        genre: META.genre,
+        clearCondition: META.clearCondition,
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          accuracy = 1;
+          hits = notes.length;
+          totalJudged = notes.length;
+          elapsed = SONG_END;
+          clearStage();
+          draw();
+        },
+        forceFail() {
+          startStage();
+          consecutiveMiss = MAX_CONSEC_MISS;
+          accuracy = 0.2;
+          totalJudged = 10;
+          hits = 2;
+          failStage("debug_force_fail");
+          draw();
+        },
+        press() { pressStart(); },
+        release() { pressEnd(); },
+      };
+
+      reportReady();
+      draw();
+      canvas.focus();
+
+      function gameLoop(timestamp) {
+        animFrame = requestAnimationFrame(gameLoop);
+        if (!lastTimestamp) {
+          lastTimestamp = timestamp;
+          return;
+        }
+        let dt = Math.min((timestamp - lastTimestamp) / 1000, MAX_DT);
+        lastTimestamp = timestamp;
+        let steps = 0;
+        while (dt >= FIXED_DT && steps < 4) {
+          update(FIXED_DT);
+          dt -= FIXED_DT;
+          steps += 1;
+        }
+        if (dt > 0 && steps < 4) update(dt);
+        draw();
+      }
+      animFrame = requestAnimationFrame(gameLoop);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animFrame));
+    </script>
+  </body>
+</html>
