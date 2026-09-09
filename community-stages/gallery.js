@@ -268,7 +268,7 @@
 
   function getSortedEntries() {
     var scores = {};
-    voteScores.forEach(function (value, key) {
+    voteScores.forEach((value, key) => {
       scores[key] = value.score;
     });
     var favorites = window.RelayLocalStore
@@ -289,13 +289,9 @@
     }
     var sorted = entries.slice();
     if (currentSort === "popular") {
-      sorted.sort(function (a, b) {
-        return getScore(b.id) - getScore(a.id);
-      });
+      sorted.sort((a, b) => getScore(b.id) - getScore(a.id));
     } else if (currentSort === "name") {
-      sorted.sort(function (a, b) {
-        return a.title.localeCompare(b.title);
-      });
+      sorted.sort((a, b) => a.title.localeCompare(b.title));
     }
     if (currentSort === "newest") sorted.reverse();
     return sorted;
@@ -380,12 +376,12 @@
     voteScores.set(stageId, s);
 
     window.LikesClient.castVote(stageId, voteValue)
-      .then(function () {
+      .then(() => {
         announceFeedback("");
         upBtn.disabled = false;
         downBtn.disabled = false;
       })
-      .catch(function () {
+      .catch(() => {
         // Rollback
         myVotes[stageId] = oldVote;
         scoreEl.textContent = oldScore;
@@ -410,7 +406,7 @@
     currentSort = sort;
     localStorage.setItem(SORT_STORAGE_KEY, sort);
     syncUrl();
-    sortButtons.forEach(function (b) {
+    sortButtons.forEach((b) => {
       var isActive = b.dataset.sort === sort;
       b.dataset.active = isActive ? "true" : "false";
       b.setAttribute("aria-pressed", isActive ? "true" : "false");
@@ -421,13 +417,13 @@
   if (gridEl) {
     gridEl.addEventListener("click", handleVoteClick);
   }
-  sortButtons.forEach(function (btn) {
+  sortButtons.forEach((btn) => {
     btn.addEventListener("click", handleSortClick);
   });
 
   if (searchEl) {
     searchEl.value = currentQuery;
-    searchEl.addEventListener("input", function () {
+    searchEl.addEventListener("input", () => {
       currentQuery = searchEl.value;
       syncUrl();
       renderGrid();
@@ -435,18 +431,16 @@
   }
   if (genreEl) {
     var genres = window.RelayGalleryFilter
-      ? window.RelayGalleryFilter.uniqueValues(entries, function (entry) {
-          return entry.genre;
-        })
+      ? window.RelayGalleryFilter.uniqueValues(entries, (entry) => entry.genre)
       : [];
-    genres.forEach(function (genre) {
+    genres.forEach((genre) => {
       var option = document.createElement("option");
       option.value = genre;
       option.textContent = genre;
       genreEl.appendChild(option);
     });
     genreEl.value = currentGenre;
-    genreEl.addEventListener("change", function () {
+    genreEl.addEventListener("change", () => {
       currentGenre = genreEl.value;
       syncUrl();
       renderGrid();
@@ -454,7 +448,7 @@
   }
   if (genEl) {
     genEl.value = currentGen;
-    genEl.addEventListener("change", function () {
+    genEl.addEventListener("change", () => {
       currentGen = genEl.value;
       syncUrl();
       renderGrid();
@@ -463,7 +457,7 @@
   if (favOnlyBtn) {
     favOnlyBtn.setAttribute("aria-pressed", favOnly ? "true" : "false");
     favOnlyBtn.dataset.active = favOnly ? "true" : "false";
-    favOnlyBtn.addEventListener("click", function () {
+    favOnlyBtn.addEventListener("click", () => {
       favOnly = !favOnly;
       favOnlyBtn.setAttribute("aria-pressed", favOnly ? "true" : "false");
       favOnlyBtn.dataset.active = favOnly ? "true" : "false";
@@ -473,7 +467,7 @@
   }
 
   if (eventOnlyBtn) {
-    eventOnlyBtn.addEventListener("click", function () {
+    eventOnlyBtn.addEventListener("click", () => {
       if (!activeEventStageIds) return;
       eventOnly = !eventOnly;
       eventOnlyBtn.setAttribute("aria-pressed", eventOnly ? "true" : "false");
@@ -484,10 +478,8 @@
   }
 
   fetch("../content/events.json")
-    .then(function (response) {
-      return response.ok ? response.json() : null;
-    })
-    .then(function (eventsData) {
+    .then((response) => response.ok ? response.json() : null)
+    .then((eventsData) => {
       if (!window.RelayEvents) return;
       var activeEvent = window.RelayEvents.selectActiveEvent(eventsData);
       if (!activeEvent) return;
@@ -502,20 +494,16 @@
       }
       if (eventOnly) renderGrid();
     })
-    .catch(function () {});
+    .catch(() => {});
 
   fetch("../content/catalog.json")
-    .then(function (response) {
-      return response.ok ? response.json() : null;
-    })
-    .then(function (catalog) {
+    .then((response) => response.ok ? response.json() : null)
+    .then((catalog) => {
       if (!catalog || !catalog.entries) return;
       var byId = new Map(
-        catalog.entries.map(function (entry) {
-          return [entry.id, entry];
-        }),
+        catalog.entries.map((entry) => [entry.id, entry]),
       );
-      entries = entries.map(function (entry) {
+      entries = entries.map((entry) => {
         var extra = byId.get(entry.id);
         if (!extra) return entry;
         return Object.assign({}, entry, {
@@ -527,21 +515,21 @@
       });
       renderGrid();
     })
-    .catch(function () {});
+    .catch(() => {});
 
   // Apply saved sort to button states
-  sortButtons.forEach(function (b) {
+  sortButtons.forEach((b) => {
     var isActive = b.dataset.sort === currentSort;
     b.dataset.active = isActive ? "true" : "false";
     b.setAttribute("aria-pressed", isActive ? "true" : "false");
   });
 
   // Save scroll position before navigating away
-  window.addEventListener("beforeunload", function () {
+  window.addEventListener("beforeunload", () => {
     sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY));
   });
   // Also save when clicking play links (same-origin navigation)
-  document.addEventListener("click", function (e) {
+  document.addEventListener("click", (e) => {
     var link = e.target.closest("a[href]");
     if (link && link.href && link.href.indexOf("play.html") !== -1) {
       sessionStorage.setItem(SCROLL_STORAGE_KEY, String(window.scrollY));
@@ -554,13 +542,9 @@
 
   // Fetch fresh data
   Promise.all([
-    window.LikesClient.fetchVoteScores().catch(function () {
-      return new Map();
-    }),
-    window.LikesClient.fetchMyVotes().catch(function () {
-      return {};
-    }),
-  ]).then(function (results) {
+    window.LikesClient.fetchVoteScores().catch(() => new Map()),
+    window.LikesClient.fetchMyVotes().catch(() => ({})),
+  ]).then((results) => {
     hasLoadedVoteScores = true;
     voteScores = results[0];
     myVotes = results[1];
@@ -568,7 +552,7 @@
     // Restore scroll position after grid is rendered
     var savedScroll = sessionStorage.getItem(SCROLL_STORAGE_KEY);
     if (savedScroll) {
-      requestAnimationFrame(function () {
+      requestAnimationFrame(() => {
         window.scrollTo(0, parseInt(savedScroll, 10) || 0);
       });
       sessionStorage.removeItem(SCROLL_STORAGE_KEY);

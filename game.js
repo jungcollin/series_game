@@ -428,7 +428,7 @@ function syncModalBodyState() {
 }
 
 function setNavActive(el) {
-  document.querySelectorAll(".navbar-actions .nav-link, .navbar-actions .nav-btn").forEach(function (n) {
+  document.querySelectorAll(".navbar-actions .nav-link, .navbar-actions .nav-btn").forEach((n) => {
     n.classList.remove("nav-link--active");
   });
   if (el) el.classList.add("nav-link--active");
@@ -649,7 +649,7 @@ function trackEvent(name, payload) {
     method: "POST",
     auth: true,
     body: event,
-  }).catch(function () {});
+  }).catch(() => {});
 }
 
 function showTerminalOverlay() {
