@@ -168,8 +168,16 @@ test("catalog generations split v1 legacy from v2 and gallery can filter by gene
   );
   assert.deepEqual(
     v2Entries.map((entry) => entry.id).sort(),
-    ["neon-rail", "orbit-ringer", "tilt-marble"],
-    "v2는 신규 3D 스테이지뿐",
+    [
+      "moonlight-greenhouse",
+      "neon-rail",
+      "orbit-ringer",
+      "tailwind-guide",
+      "tempo-conductor",
+      "tilt-marble",
+      "vacuum-tube-post",
+    ],
+    "v2는 신규 3D 스테이지와 신규 퍼즐·리듬·물리 스테이지뿐",
   );
   const entries = [
     { id: "legacy", title: "Legacy", generation: "v1" },
