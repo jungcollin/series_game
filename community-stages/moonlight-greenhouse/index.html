@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>달빛 온실</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">달빛 온실. 캔버스를 터치하거나 Enter로 시작하세요. 거울을 터치한 채 드래그하면 거울이 회전하고, 달빛이 반사되어 꽃을 비춥니다. 꽃 다섯 송이를 모두 피우면 클리어이며, 제한 시간 90초를 넘기면 실패합니다. 키보드에서는 Tab으로 거울을 고르고 방향키로 회전합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="달빛 온실" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const TIME_LIMIT = 90;
+      const FLOWER_LIGHT_RADIUS = 30;
+      const MIRROR_LENGTH = 76;
+      const MAX_BOUNCES = 10;
+      const TAP_ROTATE_STEP = Math.PI / 12;
+      const relayContext = window.RelayRuntime?.readContext("moonlight-greenhouse") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const MOON = { x: 74, y: 66, dir: 0.34 };
+      const MIRRORS = [
+        { x: 286, y: 132, angle: 0.62 },
+        { x: 560, y: 108, angle: -0.44 },
+        { x: 788, y: 246, angle: 0.86 },
+        { x: 424, y: 330, angle: 0.2 },
+        { x: 664, y: 424, angle: -0.68 },
+        { x: 216, y: 412, angle: 1.08 },
+      ];
+      const FLOWERS = [
+        { x: 878, y: 118, hue: "#f9a8d4", name: "분홍" },
+        { x: 846, y: 412, hue: "#fcd34d", name: "노랑" },
+        { x: 508, y: 474, hue: "#c4b5fd", name: "보라" },
+        { x: 150, y: 262, hue: "#7dd3fc", name: "하늘" },
+        { x: 352, y: 74, hue: "#fda4af", name: "연꽃" },
+      ];
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        mirrors: [],
+        flowers: [],
+        beam: [],
+        litIds: new Set(),
+        grabbed: -1,
+        selected: 0,
+        pointer: null,
+        bloomedAt: [],
+        note: "거울 각도를 조절해 달빛을 잠든 꽃에 비추는 반사 퍼즐",
+      };
+
+      function resetLevel() {
+        state.mirrors = MIRRORS.map((mirror) => ({ ...mirror }));
+        state.flowers = FLOWERS.map((flower, index) => ({
+          ...flower,
+          id: index,
+          bloom: 0,
+          bloomed: false,
+        }));
+        state.beam = [];
+        state.litIds = new Set();
+        state.grabbed = -1;
+        state.selected = 0;
+        state.bloomedAt = [];
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        resetLevel();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "time_up") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function mirrorEnds(mirror) {
+        const half = MIRROR_LENGTH / 2;
+        const dx = Math.cos(mirror.angle) * half;
+        const dy = Math.sin(mirror.angle) * half;
+        return {
+          ax: mirror.x - dx,
+          ay: mirror.y - dy,
+          bx: mirror.x + dx,
+          by: mirror.y + dy,
+        };
+      }
+
+      function raySegment(ox, oy, dx, dy, ax, ay, bx, by) {
+        const rx = bx - ax;
+        const ry = by - ay;
+        const denom = dx * ry - dy * rx;
+        if (Math.abs(denom) < 1e-9) return null;
+        const t = ((ax - ox) * ry - (ay - oy) * rx) / denom;
+        const u = ((ax - ox) * dy - (ay - oy) * dx) / denom;
+        if (t > 1e-4 && u >= 0 && u <= 1) return t;
+        return null;
+      }
+
+      function traceBeam() {
+        const points = [{ x: MOON.x, y: MOON.y }];
+        let ox = MOON.x;
+        let oy = MOON.y;
+        let dx = Math.cos(MOON.dir);
+        let dy = Math.sin(MOON.dir);
+        for (let bounce = 0; bounce < MAX_BOUNCES; bounce += 1) {
+          let bestT = Infinity;
+          let bestMirror = -1;
+          state.mirrors.forEach((mirror, index) => {
+            const ends = mirrorEnds(mirror);
+            const t = raySegment(ox, oy, dx, dy, ends.ax, ends.ay, ends.bx, ends.by);
+            if (t !== null && t < bestT) {
+              bestT = t;
+              bestMirror = index;
+            }
+          });
+          const wallTs = [];
+          if (dx > 0) wallTs.push((VIEW.width - ox) / dx);
+          if (dx < 0) wallTs.push(-ox / dx);
+          if (dy > 0) wallTs.push((VIEW.height - oy) / dy);
+          if (dy < 0) wallTs.push(-oy / dy);
+          const wallT = Math.min(...wallTs.filter((t) => t > 1e-4));
+          if (bestMirror === -1 || wallT < bestT) {
+            points.push({ x: ox + dx * wallT, y: oy + dy * wallT });
+            break;
+          }
+          const hx = ox + dx * bestT;
+          const hy = oy + dy * bestT;
+          points.push({ x: hx, y: hy });
+          const mirror = state.mirrors[bestMirror];
+          const nx = -Math.sin(mirror.angle);
+          const ny = Math.cos(mirror.angle);
+          const dot = dx * nx + dy * ny;
+          dx -= 2 * dot * nx;
+          dy -= 2 * dot * ny;
+          ox = hx + dx * 1e-3;
+          oy = hy + dy * 1e-3;
+        }
+        return points;
+      }
+
+      function distPointSegment(px, py, ax, ay, bx, by) {
+        const abx = bx - ax;
+        const aby = by - ay;
+        const lenSq = abx * abx + aby * aby;
+        if (lenSq < 1e-9) return Math.hypot(px - ax, py - ay);
+        let t = ((px - ax) * abx + (py - ay) * aby) / lenSq;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(px - (ax + abx * t), py - (ay + aby * t));
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") return;
+        state.elapsed += dt;
+        state.beam = traceBeam();
+        const lit = new Set();
+        state.flowers.forEach((flower) => {
+          if (flower.bloomed) return;
+          for (let index = 0; index < state.beam.length - 1; index += 1) {
+            const a = state.beam[index];
+            const b = state.beam[index + 1];
+            if (distPointSegment(flower.x, flower.y, a.x, a.y, b.x, b.y) <= FLOWER_LIGHT_RADIUS) {
+              lit.add(flower.id);
+              break;
+            }
+          }
+        });
+        state.litIds = lit;
+        state.flowers.forEach((flower) => {
+          if (flower.bloomed) return;
+          if (lit.has(flower.id)) {
+            flower.bloom = Math.min(1, flower.bloom + dt * 1.6);
+            if (flower.bloom >= 1) {
+              flower.bloomed = true;
+              state.bloomedAt.push({ x: flower.x, y: flower.y, t: state.elapsed });
+            }
+          } else {
+            flower.bloom = Math.max(0, flower.bloom - dt * 0.7);
+          }
+        });
+        const bloomed = state.flowers.filter((flower) => flower.bloomed).length;
+        if (bloomed >= state.flowers.length) {
+          clearStage();
+          return;
+        }
+        if (state.elapsed >= TIME_LIMIT) {
+          failStage("time_up");
+        }
+      }
+
+      function toCanvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: ((event.clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((event.clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function nearestMirror(point) {
+        let best = -1;
+        let bestDist = 46;
+        state.mirrors.forEach((mirror, index) => {
+          const dist = Math.hypot(point.x - mirror.x, point.y - mirror.y);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = index;
+          }
+        });
+        return best;
+      }
+
+      function aimMirror(index, point) {
+        const mirror = state.mirrors[index];
+        mirror.angle = Math.atan2(point.y - mirror.y, point.x - mirror.x) + Math.PI / 2;
+      }
+
+      function drawBackground() {
+        const sky = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        sky.addColorStop(0, "#0b1026");
+        sky.addColorStop(0.62, "#101a33");
+        sky.addColorStop(1, "#0c1424");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.save();
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = "#e2e8f0";
+        for (let index = 0; index < 46; index += 1) {
+          const sx = (index * 197.3) % VIEW.width;
+          const sy = ((index * 89.7) % 190) + 8;
+          const size = 1 + (index % 3) * 0.5;
+          ctx.fillRect(sx, sy, size, size);
+        }
+        ctx.restore();
+
+        ctx.strokeStyle = "rgba(96, 128, 168, 0.32)";
+        ctx.lineWidth = 3;
+        for (let col = 0; col <= 6; col += 1) {
+          const x = 60 + col * 140;
+          ctx.beginPath();
+          ctx.moveTo(x, VIEW.height);
+          ctx.lineTo(x, 96);
+          ctx.quadraticCurveTo(VIEW.width / 2, -46, VIEW.width - (x - 0) + (60 - (x - 60)), VIEW.height);
+          ctx.stroke();
+        }
+        ctx.beginPath();
+        ctx.moveTo(0, 508);
+        ctx.lineTo(VIEW.width, 508);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(20, 34, 26, 0.85)";
+        ctx.fillRect(0, 508, VIEW.width, VIEW.height - 508);
+      }
+
+      function drawMoon() {
+        const glow = ctx.createRadialGradient(MOON.x, MOON.y, 6, MOON.x, MOON.y, 58);
+        glow.addColorStop(0, "rgba(226, 240, 255, 0.95)");
+        glow.addColorStop(0.35, "rgba(186, 214, 250, 0.5)");
+        glow.addColorStop(1, "rgba(186, 214, 250, 0)");
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(MOON.x, MOON.y, 58, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#f1f5f9";
+        ctx.beginPath();
+        ctx.arc(MOON.x, MOON.y, 20, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#cbd5e1";
+        ctx.beginPath();
+        ctx.arc(MOON.x - 6, MOON.y - 4, 4, 0, Math.PI * 2);
+        ctx.arc(MOON.x + 7, MOON.y + 6, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawBeam() {
+        if (state.beam.length < 2) return;
+        ctx.save();
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        for (const [width, color] of [
+          [14, "rgba(191, 219, 254, 0.10)"],
+          [7, "rgba(191, 219, 254, 0.28)"],
+          [2.6, "rgba(240, 249, 255, 0.95)"],
+        ]) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = width;
+          ctx.beginPath();
+          ctx.moveTo(state.beam[0].x, state.beam[0].y);
+          for (let index = 1; index < state.beam.length; index += 1) {
+            ctx.lineTo(state.beam[index].x, state.beam[index].y);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      function drawMirrors() {
+        state.mirrors.forEach((mirror, index) => {
+          const ends = mirrorEnds(mirror);
+          const active = index === state.grabbed || index === state.selected;
+          ctx.save();
+          ctx.lineCap = "round";
+          ctx.strokeStyle = "rgba(51, 65, 85, 0.9)";
+          ctx.lineWidth = 11;
+          ctx.beginPath();
+          ctx.moveTo(ends.ax, ends.ay);
+          ctx.lineTo(ends.bx, ends.by);
+          ctx.stroke();
+          ctx.strokeStyle = active ? "#e0f2fe" : "#a8c3dd";
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(ends.ax, ends.ay);
+          ctx.lineTo(ends.bx, ends.by);
+          ctx.stroke();
+          ctx.fillStyle = active ? "#bae6fd" : "#64748b";
+          ctx.beginPath();
+          ctx.arc(mirror.x, mirror.y, 7, 0, Math.PI * 2);
+          ctx.fill();
+          if (active) {
+            ctx.strokeStyle = "rgba(186, 230, 253, 0.55)";
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.arc(mirror.x, mirror.y, 30, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+          ctx.restore();
+        });
+      }
+
+      function drawFlowers() {
+        state.flowers.forEach((flower) => {
+          const lit = state.litIds.has(flower.id);
+          const open = flower.bloomed ? 1 : flower.bloom;
+          ctx.save();
+          ctx.strokeStyle = "#3f6212";
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.moveTo(flower.x, VIEW.height - 32);
+          ctx.quadraticCurveTo(flower.x - 10, flower.y + 40, flower.x, flower.y + 8);
+          ctx.stroke();
+          ctx.fillStyle = "#4d7c0f";
+          ctx.beginPath();
+          ctx.ellipse(flower.x - 9, VIEW.height - 74, 9, 4, -0.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          if (lit && !flower.bloomed) {
+            const halo = ctx.createRadialGradient(flower.x, flower.y, 2, flower.x, flower.y, 30);
+            halo.addColorStop(0, "rgba(224, 242, 254, 0.75)");
+            halo.addColorStop(1, "rgba(224, 242, 254, 0)");
+            ctx.fillStyle = halo;
+            ctx.beginPath();
+            ctx.arc(flower.x, flower.y, 30, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          const petalCount = 6;
+          const petalLen = 6 + open * 13;
+          for (let petal = 0; petal < petalCount; petal += 1) {
+            const angle = (Math.PI * 2 * petal) / petalCount - Math.PI / 2;
+            ctx.fillStyle = open > 0 ? flower.hue : "#334155";
+            ctx.globalAlpha = open > 0 ? 0.95 : 0.85;
+            ctx.beginPath();
+            ctx.ellipse(
+              flower.x + Math.cos(angle) * petalLen * 0.6,
+              flower.y + Math.sin(angle) * petalLen * 0.6,
+              Math.max(2.5, petalLen * 0.55),
+              Math.max(1.8, petalLen * 0.3),
+              angle,
+              0,
+              Math.PI * 2,
+            );
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = open >= 1 ? "#fef08a" : "#475569";
+          ctx.beginPath();
+          ctx.arc(flower.x, flower.y, 4.5 + open * 2.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        });
+      }
+
+      function drawBloomBursts() {
+        state.bloomedAt = state.bloomedAt.filter((burst) => state.elapsed - burst.t < 0.9);
+        state.bloomedAt.forEach((burst) => {
+          const age = state.elapsed - burst.t;
+          const radius = 12 + age * 60;
+          ctx.strokeStyle = `rgba(254, 240, 138, ${Math.max(0, 0.8 - age)})`;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(burst.x, burst.y, radius, 0, Math.PI * 2);
+          ctx.stroke();
+        });
+      }
+
+      function drawHud() {
+        const bloomed = state.flowers.filter((flower) => flower.bloomed).length;
+        const remaining = Math.max(0, TIME_LIMIT - state.elapsed);
+        ctx.save();
+        ctx.fillStyle = "rgba(8, 13, 30, 0.72)";
+        ctx.fillRect(0, 0, VIEW.width, 46);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "800 19px 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(`꽃 ${bloomed} / ${state.flowers.length}`, 18, 30);
+        ctx.textAlign = "center";
+        ctx.fillText("달빛 온실", VIEW.width / 2, 30);
+        ctx.textAlign = "right";
+        ctx.fillStyle = remaining <= 15 ? "#fca5a5" : "#e2e8f0";
+        ctx.fillText(`남은 시간 ${remaining.toFixed(0)}초`, VIEW.width - 18, 30);
+        ctx.textAlign = "left";
+        ctx.restore();
+      }
+
+      function renderCard(title, lines, accent, footer) {
+        ctx.fillStyle = "rgba(6, 10, 24, 0.92)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        const cardWidth = Math.min(704, VIEW.width - 64);
+        const cardHeight = 356;
+        const cx = (VIEW.width - cardWidth) / 2;
+        const cy = 92;
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(cx, cy, cardWidth, cardHeight);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(cx, cy, cardWidth, cardHeight);
+
+        ctx.fillStyle = accent;
+        ctx.font = "800 40px 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, cy + 70);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 21px 'Trebuchet MS', sans-serif";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, cy + 132 + index * 40);
+        });
+        if (footer) {
+          ctx.fillStyle = accent;
+          ctx.font = "800 23px 'Trebuchet MS', sans-serif";
+          ctx.fillText(footer, VIEW.width / 2, cy + cardHeight - 26);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function renderMenu() {
+        drawBackground();
+        drawMoon();
+        drawMirrors();
+        drawFlowers();
+        renderCard("달빛 온실", [
+          "어둠 속 온실, 잠든 꽃 다섯 송이.",
+          "거울을 터치·드래그해 달빛을 반사시키세요.",
+          "조작: 거울 터치·드래그로 각도 회전 (Tab + 방향키도 가능)",
+          "클리어: 달빛을 꽃 5송이에 비추면 클리어",
+          "실패: 제한 시간 90초 안에 비추지 못하면 실패",
+        ], "#7c3aed", "터치 또는 Enter로 시작");
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderMenu();
+          return;
+        }
+        if (state.mode === "running") {
+          drawBackground();
+          drawMoon();
+          drawBeam();
+          drawMirrors();
+          drawFlowers();
+          drawBloomBursts();
+          drawHud();
+          return;
+        }
+        drawBackground();
+        drawMoon();
+        drawBeam();
+        drawMirrors();
+        drawFlowers();
+        if (state.mode === "failed") {
+          renderCard("시간 초과", [
+            "제한 시간 90초 안에 비추지 못하면 실패",
+            "달빛이 꽃에 닿기 전에 밤이 깊었습니다.",
+            `피운 꽃 ${state.flowers.filter((f) => f.bloomed).length} / ${state.flowers.length}송이`,
+            `경과 ${state.lastRunTime.toFixed(1)}초 / 제한 ${TIME_LIMIT}초`,
+          ], "#b91c1c");
+          return;
+        }
+        renderCard("온실이 피어났습니다", [
+          "달빛을 꽃 5송이에 비추면 클리어 — 달성!",
+          `소요 시간 ${state.lastRunTime.toFixed(1)}초`,
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540, origin top-left, y down",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          remaining_sec: Math.max(0, Math.round((TIME_LIMIT - state.elapsed) * 10) / 10),
+          result: window.relayStageResult.status,
+          flowers: state.flowers.map((flower) => ({
+            id: flower.id,
+            x: flower.x,
+            y: flower.y,
+            bloom: Math.round(flower.bloom * 100) / 100,
+            bloomed: flower.bloomed,
+            lit_now: state.litIds.has(flower.id),
+          })),
+          mirrors: state.mirrors.map((mirror, index) => ({
+            index,
+            x: mirror.x,
+            y: mirror.y,
+            angle_deg: Math.round((mirror.angle * 180) / Math.PI),
+          })),
+          beam_points: state.beam.length,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onPointerDown(event) {
+        if (state.mode !== "running") {
+          startStage();
+          return;
+        }
+        const point = toCanvasPoint(event);
+        const index = nearestMirror(point);
+        if (index >= 0) {
+          state.grabbed = index;
+          state.selected = index;
+          state.pointer = point;
+          aimMirror(index, point);
+        }
+      }
+
+      function onPointerMove(event) {
+        if (state.mode !== "running" || state.grabbed < 0) return;
+        state.pointer = toCanvasPoint(event);
+        aimMirror(state.grabbed, state.pointer);
+      }
+
+      function onPointerUp(event) {
+        if (state.mode !== "running" || state.grabbed < 0) return;
+        const point = toCanvasPoint(event);
+        const mirror = state.mirrors[state.grabbed];
+        const moved = state.pointer
+          ? Math.hypot(point.x - state.pointer.x, point.y - state.pointer.y)
+          : 0;
+        const nearCenter = Math.hypot(point.x - mirror.x, point.y - mirror.y) < 14;
+        if (moved < 6 && nearCenter) {
+          mirror.angle += TAP_ROTATE_STEP;
+        }
+        state.grabbed = -1;
+        state.pointer = null;
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (state.mode !== "running") return;
+        if (event.key === "Tab") {
+          event.preventDefault();
+          state.selected = (state.selected + 1) % state.mirrors.length;
+          return;
+        }
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          state.mirrors[state.selected].angle -= TAP_ROTATE_STEP / 3;
+          return;
+        }
+        if (event.key === "ArrowRight") {
+          event.preventDefault();
+          state.mirrors[state.selected].angle += TAP_ROTATE_STEP / 3;
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "moonlight-greenhouse",
+        title: "달빛 온실",
+        creator: "jungcollin",
+        genre: "Mirror reflection puzzle",
+        clearCondition: "달빛을 꽃 5송이에 비추면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          if (state.mode !== "running") startStage();
+          state.flowers.forEach((flower) => {
+            flower.bloomed = true;
+            flower.bloom = 1;
+          });
+          clearStage();
+          render();
+        },
+        forceFail() {
+          if (state.mode !== "running") startStage();
+          state.elapsed = TIME_LIMIT;
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        onPointerDown(event);
+      });
+      canvas.addEventListener("pointermove", (event) => {
+        event.preventDefault();
+        onPointerMove(event);
+      });
+      canvas.addEventListener("pointerup", onPointerUp);
+      canvas.addEventListener("pointercancel", onPointerUp);
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      resetLevel();
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
