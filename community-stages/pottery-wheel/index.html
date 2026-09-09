@@ -45,7 +45,7 @@
   </head>
   <body>
     <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
-    <p id="stage-instructions" class="sr-only">도자기 빚기. 물레 위 점토를 드래그하여 목표 형태로 빚는 게임. 화면을 터치하고 위아래로 드래그하여 점토를 성형합니다. 목표 형태와 일치하면 클리어. 시간 초과 시 실패.</p>
+    <p id="stage-instructions" class="sr-only">도자기 빚기. 물레 위 점토를 드래그하여 목표 형태로 빚는 게임. 화면을 터치하고 위로 밀면 점토가 넓어지고 아래로 당기면 좁아집니다. 드래그 중에는 현재 높이의 목표 반경과 수치가 표시됩니다. 목표 형태와 일치하면 클리어. 시간 초과 시 실패.</p>
     <canvas id="game" width="960" height="540" aria-label="도자기 빚기" aria-describedby="stage-instructions" tabindex="0"></canvas>
     <div class="mobile-controls"></div>
     <script src="../relay-runtime.js"></script>
@@ -132,8 +132,7 @@
       // Touch state
       let touching = false;
       let touchSlice = -1;
-      let touchStartY = 0;
-      let touchStartR = 0;
+      let lastDragY = 0;
 
       // --- Helpers ---
       function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -206,7 +205,7 @@
       function reset() {
         elapsed = 0; shake = 0; flashAlpha = 0; clearAnim = 0;
         wheelAngle = 0; matchScore = 0; prevMatchScore = 0; displayMatch = 0;
-        touching = false; touchSlice = -1;
+        touching = false; touchSlice = -1; lastDragY = 0;
         hostFailedReported = false; hostClearedReported = false;
         particles = [];
         target = generateTarget();
@@ -305,6 +304,7 @@
           drawWheel();
           drawTargetSilhouette();
           drawClay();
+          if (mode === "running") drawTouchFeedback();
           drawParticles();
           if (mode === "running") drawHUD();
         }
@@ -448,6 +448,51 @@
         ctx.restore();
       }
 
+      function drawTouchFeedback() {
+        if (!touching || touchSlice < 0) return;
+        const slice = clamp(touchSlice, 0, SLICES - 1);
+        const y = CLAY_BASE_Y - slice * SLICE_H;
+        const currentR = Math.round(clay[slice]);
+        const targetR = Math.round(target[slice]);
+        const onTarget = Math.abs(currentR - targetR) <= 4;
+        ctx.save();
+        // Active slice guide line
+        ctx.strokeStyle = onTarget ? "rgba(107, 142, 90, 0.75)" : "rgba(212, 118, 78, 0.7)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 5]);
+        ctx.beginPath();
+        ctx.moveTo(CX - MAX_R - 24, y);
+        ctx.lineTo(CX + MAX_R + 24, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Target radius ticks at this height
+        ctx.fillStyle = onTarget ? COL.success : COL.wheelDark;
+        [-1, 1].forEach((side) => {
+          ctx.beginPath();
+          ctx.moveTo(CX + side * target[slice], y - 8);
+          ctx.lineTo(CX + side * (target[slice] + 9), y);
+          ctx.lineTo(CX + side * target[slice], y + 8);
+          ctx.closePath();
+          ctx.fill();
+        });
+        // Readout pill above the wheel area
+        const label = `${slice + 1}단 · 현재 ${currentR} / 목표 ${targetR}${onTarget ? " ✓" : ""}`;
+        ctx.font = "700 14px 'Segoe UI', sans-serif";
+        const pillW = ctx.measureText(label).width + 28;
+        ctx.fillStyle = "rgba(255, 245, 236, 0.94)";
+        roundRect(ctx, CX - pillW / 2, 66, pillW, 30, 15);
+        ctx.fill();
+        ctx.strokeStyle = onTarget ? COL.success : COL.accent;
+        ctx.lineWidth = 2;
+        roundRect(ctx, CX - pillW / 2, 66, pillW, 30, 15);
+        ctx.stroke();
+        ctx.fillStyle = onTarget ? COL.success : COL.text;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, CX, 82);
+        ctx.restore();
+      }
+
       function drawParticles() {
         for (const p of particles) {
           ctx.beginPath();
@@ -496,7 +541,7 @@
         ctx.fillStyle = COL.textLight;
         ctx.font = "400 13px 'Segoe UI', sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText("점토를 터치하고 위아래로 드래그하세요", CX, H - 20);
+        ctx.fillText("점토를 터치한 채 위로 밀면 넓어지고 아래로 당기면 좁아집니다", CX, H - 20);
       }
 
       // --- Overlay cards ---
@@ -555,7 +600,7 @@
         drawCard("도자기 빚기", [
           "물레 위 점토를 목표 형태로 빚으세요",
           "",
-          "조작: 화면 터치 드래그로 점토 성형",
+          "조작: 화면 터치 드래그 · 위로 밀면 넓게, 아래로 당기면 좁게",
           "클리어: 일치율 " + Math.floor(MATCH_THRESHOLD * 100) + "% 이상",
           "실패: 시간 초과 또는 점토 무너짐",
         ], COL.accent);
@@ -610,8 +655,7 @@
           if (Math.abs(p.x - CX) <= sliceR + 30) {
             touching = true;
             touchSlice = slice;
-            touchStartY = p.y;
-            touchStartR = clay[slice];
+            lastDragY = p.y;
             canvas.setPointerCapture(e.pointerId);
           }
         }
@@ -621,22 +665,27 @@
         if (!touching || mode !== "running") return;
         const p = getCanvasPos(e.clientX, e.clientY);
 
+        // Incremental shaping: screen-scale compensated so small phones keep precision
+        const rect = canvas.getBoundingClientRect();
+        const displayScale = clamp(rect.width / W, 0.2, 1);
+        const deltaY = lastDragY - p.y;
+        lastDragY = p.y;
+        const deltaR = deltaY * 0.3 * displayScale;
+
         // Determine new slice based on current Y
         const currentSlice = getSliceFromY(p.y);
-        const deltaY = touchStartY - p.y;
-        const deltaR = deltaY * 0.4;
+        touchSlice = currentSlice;
 
         // Apply to nearby slices with falloff
         const range = 3;
         for (let di = -range; di <= range; di++) {
           const si = clamp(currentSlice + di, 0, SLICES - 1);
           const influence = 1 - Math.abs(di) / (range + 1);
-          const targetR = clamp(touchStartR + deltaR * influence, MIN_R, MAX_R);
-          clay[si] = lerp(clay[si], targetR, 0.3 * influence);
+          clay[si] = clamp(clay[si] + deltaR * influence, MIN_R, MAX_R);
         }
 
         // Clay particles while shaping
-        if (Math.abs(deltaY) > 5 && Math.random() < 0.3) {
+        if (Math.abs(deltaR) > 0.35 && Math.random() < 0.3) {
           const sy = CLAY_BASE_Y - currentSlice * SLICE_H;
           spawnParticles(CX + clay[currentSlice] * (Math.random() > 0.5 ? 1 : -1), sy, 2, COL.clayLight);
         }
@@ -695,6 +744,7 @@
         return renderGameToText();
       };
       window.relayStageDebug = {
+        shapeInfo() { return { clay: clay.map((r) => Math.round(r * 10) / 10), target: target.map((r) => Math.round(r * 10) / 10), touching, touchSlice }; },
         forceClear() {
           reset(); mode = "running";
           for (let i = 0; i < SLICES; i++) clay[i] = target[i];
