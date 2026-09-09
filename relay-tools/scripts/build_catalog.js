@@ -14,7 +14,7 @@ const FORBIDDEN_AUTHOR_FIELDS = [
 
 // v1 레거시(커뮤니티 테스트 기여작)와 v2(정식 검수 대상)를 가르는 게시 시각 컷오프.
 // 컷오프 이전에 게시된 스테이지는 검수 면제 레거시로 묶는다. publishedAt이 없는 신규 스테이지는 v2.
-const GENERATION_V1_CUTOFF = "2026-09-10T00:00:00+09:00";
+const GENERATION_V1_CUTOFF = "2026-09-09T00:00:00+09:00";
 
 function generationFor(publishedAt) {
   const ms = publishedAt ? Date.parse(publishedAt) : NaN;

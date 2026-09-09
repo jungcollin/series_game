@@ -12,6 +12,7 @@
    - `python3 -m http.server 4173 &`
 2. 아래 스크립트를 `--pr` 플래그로 실행한다.
    - `node relay-tools/scripts/publish_stage.js --stage <stage-slug> --pr --base-url http://127.0.0.1:4173`
+   - 게시 시각은 `content/published-at.json`에 자동 기록되고(기존 값이 있으면 유지), `content/catalog.json`도 함께 재생성돼 같은 커밋에 포함된다.
 3. `--pr` 플래그는 아래를 자동 수행한다.
    - `sync_registry.js` 실행으로 registry를 메타 기준으로 갱신
    - `check_stage.js` 재실행 (검증 통과 필수, 설명 없는 플레이 썸네일 `community-stages/<slug>/thumbnail.png` 자동 갱신 포함)

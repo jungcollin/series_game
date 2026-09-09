@@ -158,6 +158,8 @@ test("gallery filters preserve query state and newest uses publishedAt", () => {
 
 test("catalog generations split v1 legacy from v2 and gallery can filter by generation", () => {
   assert.equal(generationFor("2026-07-12T20:33:19+09:00"), "v1");
+  assert.equal(generationFor("2026-09-08T23:59:59+09:00"), "v1");
+  assert.equal(generationFor("2026-09-09T16:32:55+09:00"), "v2");
   assert.equal(generationFor("2026-09-10T00:00:00+09:00"), "v2");
   assert.equal(generationFor(null), "v2");
   assert.equal(generationFor("not-a-date"), "v2");
