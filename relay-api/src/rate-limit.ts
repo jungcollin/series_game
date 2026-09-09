@@ -11,22 +11,28 @@ interface RateLimitOptions {
   maxEntries?: number;
 }
 
-export function createRateLimitMiddleware(options: RateLimitOptions = {}): MiddlewareHandler {
+export function createRateLimitMiddleware(
+  options: RateLimitOptions & { trustRelayClientIp?: boolean } = {},
+): MiddlewareHandler {
   const windowMs = options.windowMs ?? 60_000;
   const writeLimit = options.writeLimit ?? 30;
   const maxEntries = options.maxEntries ?? 10_000;
   const buckets = new Map<string, Bucket>();
+  const trustRelayClientIp = options.trustRelayClientIp === true;
 
   return async (c, next) => {
     const path = c.req.path;
     const method = c.req.method.toUpperCase();
-    if (!path.startsWith("/v1/") || path === "/v1/health" || method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    const isApiWrite = (path.startsWith("/v1/") || path.startsWith("/v2/"))
+      && path !== "/v1/health"
+      && path !== "/v1/ready";
+    if (!isApiWrite || method === "GET" || method === "HEAD" || method === "OPTIONS") {
       await next();
       return;
     }
 
     const now = Date.now();
-    const key = `write:${clientAddress(c)}`;
+    const key = `write:${clientAddress(c, trustRelayClientIp)}`;
     const bucket = buckets.get(key);
     const current = bucket && bucket.resetAt > now
       ? bucket
@@ -54,7 +60,8 @@ export function createRateLimitMiddleware(options: RateLimitOptions = {}): Middl
   };
 }
 
-function clientAddress(c: Context): string {
+function clientAddress(c: Context, trustRelayClientIp: boolean): string {
+  if (!trustRelayClientIp) return "unknown";
   return c.req.header("x-relay-client-ip")?.trim() || "unknown";
 }
 

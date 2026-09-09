@@ -1,5 +1,7 @@
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { DuplicateError } from "./validate.js";
+import { applyRunEvent, finalizeRun, type ChallengeRun, type RunEventInput } from "./runs.js";
 
 export interface LeaderboardRow {
   run_id: string;
@@ -32,9 +34,46 @@ export interface VoteRow {
 }
 
 export interface CommentRow {
+  id: string;
   author_name: string;
   body: string;
   created_at: string;
+  mine?: boolean;
+}
+
+export interface ReportRow {
+  id: string;
+  subject: string;
+  stage_id: string;
+  reason: string;
+  detail: string;
+  created_at: string;
+}
+
+export interface AuditRow {
+  id: string;
+  actor: string;
+  action: string;
+  target: string;
+  detail: Record<string, unknown>;
+  request_id: string | null;
+  created_at: string;
+}
+
+export interface AnalyticsRow {
+  name: string;
+  subject: string | null;
+  stage_id: string | null;
+  challenge_id: string | null;
+  technical: boolean;
+  created_at: string;
+}
+
+export interface CreatorStatsSummary {
+  sample_size: number;
+  play_starts: number;
+  clears: number;
+  tech_errors: number;
 }
 
 export interface RelayStore {
@@ -47,8 +86,21 @@ export interface RelayStore {
   listVotesForVisitor(visitorId: string): Promise<VoteRow[]>;
   upsertVote(stageId: string, visitorId: string, vote: 1 | -1): Promise<void>;
   deleteVote(stageId: string, visitorId: string): Promise<void>;
-  listComments(stageId: string, limit: number): Promise<CommentRow[]>;
+  listComments(stageId: string, limit: number, visitorId?: string): Promise<CommentRow[]>;
   insertComment(row: { stageId: string; visitorId: string; authorName: string; body: string }): Promise<CommentRow>;
+  hideComment(id: string, reason: string): Promise<CommentRow>;
+  deleteOwnComment(id: string, visitorId: string): Promise<boolean>;
+  revokeSession(subject: string, jti: string | null): Promise<void>;
+  isRevoked(subject: string, jti: string | null): Promise<boolean>;
+  insertReport(row: { subject: string; stageId: string; reason: string; detail: string }): Promise<ReportRow>;
+  insertAudit(row: { actor: string; action: string; target: string; detail?: Record<string, unknown>; requestId?: string | null }): Promise<AuditRow>;
+  insertAnalytics(row: { subject: string | null; name: string; stageId: string | null; challengeId: string | null; technical: boolean }): Promise<void>;
+  summarizeCreatorStats(stageIds: string[]): Promise<CreatorStatsSummary>;
+  createChallengeRun(row: { subject: string; challengeId: string; stageIds: string[] }): Promise<ChallengeRun>;
+  getChallengeRun(id: string): Promise<ChallengeRun | null>;
+  appendChallengeRunEvent(runId: string, subject: string, event: RunEventInput): Promise<ChallengeRun>;
+  finalizeChallengeRun(runId: string, subject: string): Promise<ChallengeRun>;
+  listFinalizedChallengeRuns(challengeId: string): Promise<ChallengeRun[]>;
 }
 
 function asNumber(value: unknown): number {
@@ -62,8 +114,55 @@ function asIso(value: unknown): string {
   return new Date().toISOString();
 }
 
+function emptyCreatorStats(): CreatorStatsSummary {
+  return { sample_size: 0, play_starts: 0, clears: 0, tech_errors: 0 };
+}
+
+function summarizeAnalyticsRows(rows: AnalyticsRow[], stageIds: string[]): CreatorStatsSummary {
+  if (!stageIds.length) return emptyCreatorStats();
+  const allowed = new Set(stageIds);
+  const events = rows.filter((row) => row.stage_id && allowed.has(row.stage_id));
+  return {
+    sample_size: events.filter((event) => event.name === "stage_ready").length,
+    play_starts: events.filter((event) => event.name === "run_start" || event.name === "stage_ready").length,
+    clears: events.filter((event) => event.name === "stage_clear").length,
+    tech_errors: events.filter((event) => event.name === "stage_invalid" || event.technical).length,
+  };
+}
+
 function isPgUniqueViolation(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code: string }).code === "23505");
+}
+
+function payloadHash(payload: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function mapComment(row: Record<string, unknown>, visitorId?: string): CommentRow {
+  return {
+    id: String(row.id),
+    author_name: String(row.author_name),
+    body: String(row.body),
+    created_at: asIso(row.created_at),
+    mine: visitorId ? String(row.visitor_id) === visitorId : undefined,
+  };
+}
+
+function mapChallengeRun(row: Record<string, unknown>): ChallengeRun {
+  return {
+    id: String(row.id),
+    subject: String(row.subject),
+    challenge_id: String(row.challenge_id),
+    stage_ids: Array.isArray(row.stage_ids) ? row.stage_ids.map(String) : [],
+    status: row.status as ChallengeRun["status"],
+    clear_count: asNumber(row.clear_count),
+    duration_sec: asNumber(row.duration_sec),
+    finished_all_clear: Boolean(row.finished_all_clear),
+    stages: Array.isArray(row.stages) ? row.stages.map(String) : [],
+    event_count: asNumber(row.event_count),
+    created_at: asIso(row.created_at),
+    finalized_at: row.finalized_at ? asIso(row.finalized_at) : null,
+  };
 }
 
 export function createPgStore(pool: Pool): RelayStore {
@@ -177,34 +276,213 @@ export function createPgStore(pool: Pool): RelayStore {
       );
     },
 
-    async listComments(stageId, limit) {
+    async listComments(stageId, limit, visitorId) {
       const result = await pool.query(
-        `select author_name, body, created_at
+        `select id, visitor_id, author_name, body, created_at
            from stage_comments
-          where stage_id = $1
+          where stage_id = $1 and hidden_at is null
           order by created_at desc
           limit $2`,
         [stageId, limit],
       );
-      return result.rows.map((row) => ({
-        author_name: String(row.author_name),
-        body: String(row.body),
-        created_at: asIso(row.created_at),
-      }));
+      return result.rows.map((row) => mapComment(row, visitorId));
     },
 
     async insertComment(row) {
       const result = await pool.query(
         `insert into stage_comments (stage_id, visitor_id, author_name, body)
          values ($1, $2, $3, $4)
-         returning author_name, body, created_at`,
+         returning id, visitor_id, author_name, body, created_at`,
         [row.stageId, row.visitorId, row.authorName, row.body],
       );
+      return mapComment(result.rows[0], row.visitorId);
+    },
+
+    async hideComment(id, reason) {
+      const result = await pool.query(
+        `update stage_comments
+            set hidden_at = timezone('utc', now()), hidden_reason = $2
+          where id = $1
+          returning id, visitor_id, author_name, body, created_at`,
+        [id, reason],
+      );
+      if (!result.rows[0]) throw new Error("not_found");
+      return mapComment(result.rows[0]);
+    },
+
+    async deleteOwnComment(id, visitorId) {
+      const result = await pool.query(
+        `delete from stage_comments where id = $1 and visitor_id = $2`,
+        [id, visitorId],
+      );
+      return (result.rowCount ?? 0) > 0;
+    },
+
+    async revokeSession(subject, jti) {
+      await pool.query(
+        `insert into session_revocations (subject, jti) values ($1, $2)
+         on conflict (subject, jti) do nothing`,
+        [subject, jti ?? ""],
+      );
+    },
+
+    async isRevoked(subject, jti) {
+      const result = await pool.query(
+        `select 1 from session_revocations
+          where subject = $1 and jti in ($2, '')
+          limit 1`,
+        [subject, jti ?? ""],
+      );
+      return result.rows.length > 0;
+    },
+
+    async insertReport(row) {
+      const result = await pool.query(
+        `insert into content_reports (subject, stage_id, reason, detail)
+         values ($1, $2, $3, $4)
+         returning id, subject, stage_id, reason, detail, created_at`,
+        [row.subject, row.stageId, row.reason, row.detail],
+      );
+      const saved = result.rows[0];
       return {
-        author_name: String(result.rows[0].author_name),
-        body: String(result.rows[0].body),
-        created_at: asIso(result.rows[0].created_at),
+        id: String(saved.id),
+        subject: String(saved.subject),
+        stage_id: String(saved.stage_id),
+        reason: String(saved.reason),
+        detail: String(saved.detail),
+        created_at: asIso(saved.created_at),
       };
+    },
+
+    async insertAudit(row) {
+      const result = await pool.query(
+        `insert into audit_events (actor, action, target, detail, request_id)
+         values ($1, $2, $3, $4::jsonb, $5)
+         returning id, actor, action, target, detail, request_id, created_at`,
+        [row.actor, row.action, row.target, JSON.stringify(row.detail ?? {}), row.requestId ?? null],
+      );
+      const saved = result.rows[0];
+      return {
+        id: String(saved.id),
+        actor: String(saved.actor),
+        action: String(saved.action),
+        target: String(saved.target),
+        detail: (saved.detail || {}) as Record<string, unknown>,
+        request_id: saved.request_id ? String(saved.request_id) : null,
+        created_at: asIso(saved.created_at),
+      };
+    },
+
+    async insertAnalytics(row) {
+      await pool.query(
+        `insert into analytics_events (subject, name, stage_id, challenge_id, technical)
+         values ($1, $2, $3, $4, $5)`,
+        [row.subject, row.name, row.stageId, row.challengeId, row.technical],
+      );
+    },
+
+    async summarizeCreatorStats(stageIds) {
+      if (!stageIds.length) return emptyCreatorStats();
+      const result = await pool.query(
+        `select
+           count(*) filter (where name = 'stage_ready')::int as sample_size,
+           count(*) filter (where name in ('run_start', 'stage_ready'))::int as play_starts,
+           count(*) filter (where name = 'stage_clear')::int as clears,
+           count(*) filter (where name = 'stage_invalid' or technical)::int as tech_errors
+         from analytics_events
+         where stage_id = any($1::text[])`,
+        [stageIds],
+      );
+      const row = result.rows[0] || {};
+      return {
+        sample_size: asNumber(row.sample_size),
+        play_starts: asNumber(row.play_starts),
+        clears: asNumber(row.clears),
+        tech_errors: asNumber(row.tech_errors),
+      };
+    },
+
+    async createChallengeRun(row) {
+      const id = `runv2-${randomUUID()}`;
+      try {
+        const result = await pool.query(
+          `insert into challenge_runs
+             (id, subject, challenge_id, stage_ids, status, clear_count, duration_sec, finished_all_clear, stages, event_count)
+           values ($1, $2, $3, $4, 'open', 0, 0, false, '{}', 0)
+           returning *`,
+          [id, row.subject, row.challengeId, row.stageIds],
+        );
+        return mapChallengeRun(result.rows[0]);
+      } catch (error) {
+        if (isPgUniqueViolation(error)) throw new DuplicateError("이미 진행 중인 런이 있습니다.");
+        throw error;
+      }
+    },
+
+    async getChallengeRun(id) {
+      const result = await pool.query(`select * from challenge_runs where id = $1`, [id]);
+      return result.rows[0] ? mapChallengeRun(result.rows[0]) : null;
+    },
+
+    async appendChallengeRunEvent(runId, subject, event) {
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        const current = await client.query(`select * from challenge_runs where id = $1 for update`, [runId]);
+        if (!current.rows[0]) throw new Error("not_found");
+        const run = mapChallengeRun(current.rows[0]);
+        if (run.subject !== subject) throw new Error("forbidden");
+        const existing = await client.query(
+          `select payload_hash from challenge_run_events where run_id = $1 and event_id = $2`,
+          [runId, event.eventId],
+        );
+        if (existing.rows[0]) {
+          if (String(existing.rows[0].payload_hash) !== event.payloadHash) throw new DuplicateError();
+          await client.query("commit");
+          return run;
+        }
+        const next = applyRunEvent(run, event);
+        await client.query(
+          `insert into challenge_run_events (run_id, event_id, seq, name, payload, payload_hash)
+           values ($1, $2, $3, $4, $5::jsonb, $6)`,
+          [runId, event.eventId, event.seq, event.name, JSON.stringify(event.payload), event.payloadHash],
+        );
+        const updated = await client.query(
+          `update challenge_runs
+              set status = $2, clear_count = $3, duration_sec = $4, finished_all_clear = $5, stages = $6, event_count = $7
+            where id = $1
+            returning *`,
+          [runId, next.status, next.clear_count, next.duration_sec, next.finished_all_clear, next.stages, next.event_count],
+        );
+        await client.query("commit");
+        return mapChallengeRun(updated.rows[0]);
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    async finalizeChallengeRun(runId, subject) {
+      const current = await pool.query(`select * from challenge_runs where id = $1`, [runId]);
+      if (!current.rows[0]) throw new Error("not_found");
+      const run = mapChallengeRun(current.rows[0]);
+      if (run.subject !== subject) throw new Error("forbidden");
+      const next = finalizeRun(run, new Date().toISOString());
+      const updated = await pool.query(
+        `update challenge_runs set status = $2, finalized_at = $3 where id = $1 returning *`,
+        [runId, next.status, next.finalized_at],
+      );
+      return mapChallengeRun(updated.rows[0]);
+    },
+
+    async listFinalizedChallengeRuns(challengeId) {
+      const result = await pool.query(
+        `select * from challenge_runs where challenge_id = $1 and finalized_at is not null and status in ('cleared', 'failed')`,
+        [challengeId],
+      );
+      return result.rows.map(mapChallengeRun);
     },
   };
 }
@@ -213,7 +491,16 @@ export function createMemoryStore(): RelayStore {
   const leaderboard: LeaderboardRow[] = [];
   const rankings = new Map<string, StageRankingRow>();
   const votes = new Map<string, { stage_id: string; visitor_id: string; vote: 1 | -1 }>();
-  const comments: Array<CommentRow & { stage_id: string }> = [];
+  const comments: Array<CommentRow & { stage_id: string; visitor_id: string; hidden?: boolean }> = [];
+  const revocations = new Set<string>();
+  const reports: ReportRow[] = [];
+  const audits: AuditRow[] = [];
+  const analytics: AnalyticsRow[] = [];
+  const runs = new Map<string, ChallengeRun>();
+  const runEvents = new Map<string, Map<string, RunEventInput>>();
+  let commentSeq = 1;
+  let reportSeq = 1;
+  let auditSeq = 1;
 
   function rankingKey(stageId: string, visitorId: string) {
     return `${stageId}\0${visitorId}`;
@@ -306,23 +593,156 @@ export function createMemoryStore(): RelayStore {
       votes.delete(voteKey(stageId, visitorId));
     },
 
-    async listComments(stageId, limit) {
+    async listComments(stageId, limit, visitorId) {
       return comments
-        .filter((row) => row.stage_id === stageId)
+        .filter((row) => row.stage_id === stageId && !row.hidden)
         .sort((left, right) => right.created_at.localeCompare(left.created_at))
         .slice(0, limit)
-        .map(({ author_name, body, created_at }) => ({ author_name, body, created_at }));
+        .map(({ id, author_name, body, created_at, visitor_id }) => ({
+          id,
+          author_name,
+          body,
+          created_at,
+          mine: visitorId ? visitor_id === visitorId : undefined,
+        }));
     },
 
     async insertComment(row) {
-      const saved: CommentRow & { stage_id: string } = {
+      const saved = {
+        id: String(commentSeq++),
         stage_id: row.stageId,
+        visitor_id: row.visitorId,
         author_name: row.authorName,
         body: row.body,
         created_at: new Date().toISOString(),
       };
       comments.push(saved);
-      return { author_name: saved.author_name, body: saved.body, created_at: saved.created_at };
+      return { id: saved.id, author_name: saved.author_name, body: saved.body, created_at: saved.created_at, mine: true };
+    },
+
+    async hideComment(id, _reason) {
+      const found = comments.find((row) => row.id === id);
+      if (!found) throw new Error("not_found");
+      found.hidden = true;
+      return { id: found.id, author_name: found.author_name, body: found.body, created_at: found.created_at };
+    },
+
+    async deleteOwnComment(id, visitorId) {
+      const index = comments.findIndex((row) => row.id === id && row.visitor_id === visitorId);
+      if (index === -1) return false;
+      comments.splice(index, 1);
+      return true;
+    },
+
+    async revokeSession(subject, jti) {
+      revocations.add(`${subject}\0${jti ?? ""}`);
+    },
+
+    async isRevoked(subject, jti) {
+      return revocations.has(`${subject}\0${jti ?? ""}`) || revocations.has(`${subject}\0`);
+    },
+
+    async insertReport(row) {
+      const saved: ReportRow = {
+        id: String(reportSeq++),
+        subject: row.subject,
+        stage_id: row.stageId,
+        reason: row.reason,
+        detail: row.detail,
+        created_at: new Date().toISOString(),
+      };
+      reports.push(saved);
+      return saved;
+    },
+
+    async insertAudit(row) {
+      const saved: AuditRow = {
+        id: String(auditSeq++),
+        actor: row.actor,
+        action: row.action,
+        target: row.target,
+        detail: row.detail ?? {},
+        request_id: row.requestId ?? null,
+        created_at: new Date().toISOString(),
+      };
+      audits.push(saved);
+      return saved;
+    },
+
+    async insertAnalytics(row) {
+      analytics.push({
+        name: row.name,
+        subject: row.subject,
+        stage_id: row.stageId,
+        challenge_id: row.challengeId,
+        technical: row.technical,
+        created_at: new Date().toISOString(),
+      });
+    },
+
+    async summarizeCreatorStats(stageIds) {
+      return summarizeAnalyticsRows(analytics, stageIds);
+    },
+
+    async createChallengeRun(row) {
+      const open = [...runs.values()].find(
+        (entry) => entry.subject === row.subject && entry.challenge_id === row.challengeId && !entry.finalized_at,
+      );
+      if (open) throw new DuplicateError("이미 진행 중인 런이 있습니다.");
+      const saved: ChallengeRun = {
+        id: `runv2-${randomUUID()}`,
+        subject: row.subject,
+        challenge_id: row.challengeId,
+        stage_ids: row.stageIds,
+        status: "open",
+        clear_count: 0,
+        duration_sec: 0,
+        finished_all_clear: false,
+        stages: [],
+        event_count: 0,
+        created_at: new Date().toISOString(),
+        finalized_at: null,
+      };
+      runs.set(saved.id, saved);
+      runEvents.set(saved.id, new Map());
+      return { ...saved, stages: [...saved.stages], stage_ids: [...saved.stage_ids] };
+    },
+
+    async getChallengeRun(id) {
+      const run = runs.get(id);
+      return run ? { ...run, stages: [...run.stages], stage_ids: [...run.stage_ids] } : null;
+    },
+
+    async appendChallengeRunEvent(runId, subject, event) {
+      const run = runs.get(runId);
+      if (!run) throw new Error("not_found");
+      if (run.subject !== subject) throw new Error("forbidden");
+      const events = runEvents.get(runId) ?? new Map();
+      const existing = events.get(event.eventId);
+      if (existing) {
+        if (existing.payloadHash !== event.payloadHash) throw new DuplicateError();
+        return { ...run, stages: [...run.stages], stage_ids: [...run.stage_ids] };
+      }
+      const next = applyRunEvent(run, event);
+      events.set(event.eventId, event);
+      runEvents.set(runId, events);
+      runs.set(runId, next);
+      return { ...next, stages: [...next.stages], stage_ids: [...next.stage_ids] };
+    },
+
+    async finalizeChallengeRun(runId, subject) {
+      const run = runs.get(runId);
+      if (!run) throw new Error("not_found");
+      if (run.subject !== subject) throw new Error("forbidden");
+      const next = finalizeRun(run, new Date().toISOString());
+      runs.set(runId, next);
+      return { ...next, stages: [...next.stages], stage_ids: [...next.stage_ids] };
+    },
+
+    async listFinalizedChallengeRuns(challengeId) {
+      return [...runs.values()]
+        .filter((row) => row.challenge_id === challengeId && row.finalized_at && (row.status === "cleared" || row.status === "failed"))
+        .map((row) => ({ ...row, stages: [...row.stages], stage_ids: [...row.stage_ids] }));
     },
   };
 }
@@ -348,3 +768,5 @@ function mapStageRanking(row: Record<string, unknown>): StageRankingRow {
     updated_at: asIso(row.updated_at),
   };
 }
+
+export { payloadHash };

@@ -14,6 +14,7 @@ export class DuplicateError extends Error {
 
 const STAGE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,79}$/i;
 const RUN_ID_RE = /^[a-z0-9][a-z0-9._:-]{7,79}$/i;
+const GITHUB_HANDLE_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -38,6 +39,14 @@ export function normalizeName(value: unknown, label: string, min: number, max: n
     throw new ValidationError(`${label}에 사용할 수 없는 문자가 있습니다.`);
   }
   return name;
+}
+
+export function normalizeGithubHandle(value: unknown): string {
+  const handle = readString(value, "GitHub").trim();
+  if (!GITHUB_HANDLE_RE.test(handle)) {
+    throw new ValidationError("GitHub 값이 올바르지 않습니다.");
+  }
+  return handle.toLowerCase();
 }
 
 export function normalizeStageId(value: unknown): string {
@@ -176,4 +185,99 @@ export function readCommentInput(stageId: string, value: unknown) {
     authorName: normalizeName(body.author_name, "닉네임", 1, 24),
     body: normalizeCommentBody(body.body),
   };
+}
+
+const REPORT_REASONS = new Set(["spam", "abuse", "spoiler", "broken", "other"]);
+const ANALYTICS_NAMES = new Set([
+  "run_start",
+  "stage_ready",
+  "stage_clear",
+  "stage_fail",
+  "stage_invalid",
+  "run_retry",
+]);
+const RUN_EVENT_NAMES = new Set(["stage_ready", "stage_clear", "stage_fail", "stage_invalid", "run_abort"]);
+const CHALLENGE_ID_RE = /^daily-\d{4}-\d{2}-\d{2}-r[1-9]\d*$/;
+const EVENT_ID_RE = /^[a-z0-9][a-z0-9._:-]{7,79}$/i;
+
+export function normalizeChallengeId(value: unknown): string {
+  const challengeId = readString(value, "코스").trim();
+  if (!CHALLENGE_ID_RE.test(challengeId)) {
+    throw new ValidationError("코스 ID가 올바르지 않습니다.");
+  }
+  return challengeId;
+}
+
+export function readReportInput(value: unknown) {
+  const body = asRecord(value);
+  const reason = readString(body.reason, "신고 사유").trim();
+  if (!REPORT_REASONS.has(reason)) {
+    throw new ValidationError("신고 사유가 올바르지 않습니다.");
+  }
+  const detail = body.detail == null ? "" : readString(body.detail, "신고 내용").trim();
+  if (detail.length > 500) {
+    throw new ValidationError("신고 내용이 너무 깁니다.");
+  }
+  return {
+    stageId: normalizeStageId(body.stage_id),
+    reason,
+    detail,
+  };
+}
+
+export function readAnalyticsInput(value: unknown) {
+  const body = asRecord(value);
+  const name = readString(body.name, "이벤트").trim();
+  if (!ANALYTICS_NAMES.has(name)) {
+    throw new ValidationError("이벤트 이름이 올바르지 않습니다.");
+  }
+  return {
+    name,
+    stageId: body.stage_id == null ? null : normalizeStageId(body.stage_id),
+    challengeId: body.challenge_id == null ? null : normalizeChallengeId(body.challenge_id),
+    technical: body.technical === true,
+  };
+}
+
+export function readCreateRunInput(value: unknown) {
+  const body = asRecord(value);
+  const stageIds = normalizeStages(body.stage_ids);
+  if (stageIds.length < 1 || stageIds.length > 8) {
+    throw new ValidationError("코스 스테이지 수가 올바르지 않습니다.");
+  }
+  return {
+    challengeId: normalizeChallengeId(body.challenge_id),
+    stageIds,
+  };
+}
+
+export function readRunEventInput(value: unknown) {
+  const body = asRecord(value);
+  const name = readString(body.name, "이벤트").trim();
+  if (!RUN_EVENT_NAMES.has(name)) {
+    throw new ValidationError("런 이벤트 이름이 올바르지 않습니다.");
+  }
+  const eventId = readString(body.event_id, "이벤트 ID").trim();
+  if (!EVENT_ID_RE.test(eventId)) {
+    throw new ValidationError("이벤트 ID가 올바르지 않습니다.");
+  }
+  if (typeof body.seq !== "number" || !Number.isInteger(body.seq) || body.seq < 1 || body.seq > 64) {
+    throw new ValidationError("이벤트 순서가 올바르지 않습니다.");
+  }
+  const payload = body.payload == null ? {} : asRecord(body.payload);
+  return {
+    eventId,
+    seq: body.seq,
+    name,
+    payload,
+  };
+}
+
+export function readHideInput(value: unknown) {
+  const body = asRecord(value);
+  const reason = readString(body.reason, "숨김 사유").trim();
+  if (reason.length < 1 || reason.length > 80) {
+    throw new ValidationError("숨김 사유가 올바르지 않습니다.");
+  }
+  return { reason };
 }

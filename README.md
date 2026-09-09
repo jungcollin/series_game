@@ -15,7 +15,9 @@
 - 실패하면 **이번 런은 끝**. 새 런으로 다시 도전할 수 있습니다
 - 클리어하면 다음 스테이지로
 
-커뮤니티 스테이지는 갤러리에서 따로 플레이할 수 있습니다. 데일리 루트에 들어가는 게임은 메인테이너가 고릅니다.
+커뮤니티 스테이지는 갤러리에서 따로 플레이할 수 있습니다. 데일리 루트에 들어가는 게임은 검수 풀과 편성 규칙으로 고릅니다. 공식 서버 기록 쓰기는 아직 닫혀 있습니다.
+
+현재 확인/미확인은 [docs/04-report/release-status.md](./docs/04-report/release-status.md)를 보세요.
 
 ## 저장소 구조
 
@@ -71,6 +73,7 @@ npm ci --prefix relay-api
 npm test
 npm run test:api
 npm run typecheck --prefix relay-api
+node relay-tools/scripts/build_catalog.js --check
 ```
 
 PR과 `main` Pages 배포는 위 검사와 공개 산출물 점검을 통과해야 합니다. 작업 브랜치는 production에 자동 배포되지 않습니다.

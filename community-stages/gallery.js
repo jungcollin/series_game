@@ -2,13 +2,22 @@
   var entries = window.COMMUNITY_STAGE_REGISTRY || [];
   var gridEl = document.querySelector("#gallery-grid");
   var feedbackEl = document.querySelector("#gallery-feedback");
-  var sortButtons = document.querySelectorAll(".sort-btn");
+  var sortButtons = document.querySelectorAll(".sort-btn[data-sort]");
+  var searchEl = document.querySelector("#gallery-search");
+  var genreEl = document.querySelector("#gallery-genre");
+  var favOnlyBtn = document.querySelector("#gallery-fav-only");
   var voteScores = new Map(); // stageId -> { score, upvotes, downvotes }
   var myVotes = {}; // stageId -> 1 | -1
   var SORT_STORAGE_KEY = "olr-gallery-sort";
   var SCROLL_STORAGE_KEY = "olr-gallery-scroll";
-  var savedSort = localStorage.getItem(SORT_STORAGE_KEY);
+  var urlState = window.RelayGalleryFilter
+    ? window.RelayGalleryFilter.readSearchParams(window.location.search)
+    : { q: "", genre: "", sort: "", fav: false };
+  var savedSort = urlState.sort || localStorage.getItem(SORT_STORAGE_KEY);
   var currentSort = (savedSort === "popular" || savedSort === "newest" || savedSort === "name") ? savedSort : "popular";
+  var currentQuery = urlState.q || "";
+  var currentGenre = urlState.genre || "";
+  var favOnly = Boolean(urlState.fav);
   var hasLoadedVoteScores = false;
 
   var GENRE_STYLES = {
@@ -132,13 +141,16 @@
       '<p class="stage-card-condition">' + escapeHtml(entry.clearCondition) + "</p>" +
       '<div class="stage-card-creator">' +
       renderCreatorAvatar(entry.creator) +
-      '<span class="creator-name">' + escapeHtml(creator.name) + "</span>" +
+      (creator.github
+        ? '<a class="creator-name" href="./creators.html?github=' + encodeURIComponent(creator.github) + '">' + escapeHtml(creator.name) + "</a>"
+        : '<span class="creator-name">' + escapeHtml(creator.name) + "</span>") +
       "</div>" +
       '<div class="stage-card-actions">' +
       '<div class="vote-group">' +
       '<button class="vote-btn vote-up magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="1" data-active="' + (myVote === 1) + '" type="button" aria-label="좋아요">+</button>' +
       '<button class="vote-btn vote-down magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="-1" data-active="' + (myVote === -1) + '" type="button" aria-label="싫어요">−</button>' +
       "</div>" +
+      '<button class="fav-btn magnetic-btn" type="button" data-stage-id="' + escapeHtml(entry.id) + '" aria-pressed="' + (window.RelayLocalStore && window.RelayLocalStore.isFavorite(entry.id) ? "true" : "false") + '" aria-label="즐겨찾기">' + (window.RelayLocalStore && window.RelayLocalStore.isFavorite(entry.id) ? "저장됨" : "저장") + "</button>" +
       '<a class="play-link magnetic-btn" href="./play.html?stage=' + encodeURIComponent(entry.id) + '">플레이</a>' +
       "</div>" +
       "</div>" +
@@ -146,7 +158,31 @@
     );
   }
 
+  function syncUrl() {
+    if (!window.RelayGalleryFilter || !window.history || !window.history.replaceState) return;
+    var query = window.RelayGalleryFilter.writeSearchParams({
+      q: currentQuery,
+      genre: currentGenre,
+      sort: currentSort,
+      fav: favOnly,
+    });
+    window.history.replaceState(null, "", window.location.pathname + query);
+  }
+
   function getSortedEntries() {
+    var scores = {};
+    voteScores.forEach(function (value, key) { scores[key] = value.score; });
+    var favorites = window.RelayLocalStore ? window.RelayLocalStore.readFavorites() : [];
+    if (window.RelayGalleryFilter) {
+      return window.RelayGalleryFilter.applyFilters(entries, {
+        q: currentQuery,
+        genre: currentGenre,
+        sort: currentSort,
+        fav: favOnly,
+        favorites: favorites,
+        scores: scores,
+      });
+    }
     var sorted = entries.slice();
     if (currentSort === "popular") {
       sorted.sort(function (a, b) { return getScore(b.id) - getScore(a.id); });
@@ -165,13 +201,23 @@
     }
     var sorted = getSortedEntries();
     if (!sorted.length) {
-      gridEl.innerHTML = '<p class="gallery-empty">등록된 스테이지가 없습니다.</p>';
+      gridEl.innerHTML = '<p class="gallery-empty">조건에 맞는 스테이지가 없습니다. 검색어나 필터를 바꿔 보세요.</p>';
       return;
     }
     gridEl.innerHTML = sorted.map(renderCard).join("");
   }
 
   function handleVoteClick(event) {
+    var favBtn = event.target.closest(".fav-btn");
+    if (favBtn && window.RelayLocalStore) {
+      event.preventDefault();
+      var favId = favBtn.dataset.stageId;
+      var result = window.RelayLocalStore.toggleFavorite(favId);
+      favBtn.setAttribute("aria-pressed", result.active ? "true" : "false");
+      favBtn.textContent = result.active ? "저장됨" : "저장";
+      if (favOnly) renderGrid();
+      return;
+    }
     var btn = event.target.closest(".vote-btn");
     if (!btn || btn.disabled) return;
 
@@ -248,6 +294,7 @@
     if (sort === currentSort) return;
     currentSort = sort;
     localStorage.setItem(SORT_STORAGE_KEY, sort);
+    syncUrl();
     sortButtons.forEach(function (b) {
       var isActive = b.dataset.sort === sort;
       b.dataset.active = isActive ? "true" : "false";
@@ -260,6 +307,60 @@
     gridEl.addEventListener("click", handleVoteClick);
   }
   sortButtons.forEach(function (btn) { btn.addEventListener("click", handleSortClick); });
+
+  if (searchEl) {
+    searchEl.value = currentQuery;
+    searchEl.addEventListener("input", function () {
+      currentQuery = searchEl.value;
+      syncUrl();
+      renderGrid();
+    });
+  }
+  if (genreEl) {
+    var genres = window.RelayGalleryFilter
+      ? window.RelayGalleryFilter.uniqueValues(entries, function (entry) { return entry.genre; })
+      : [];
+    genres.forEach(function (genre) {
+      var option = document.createElement("option");
+      option.value = genre;
+      option.textContent = genre;
+      genreEl.appendChild(option);
+    });
+    genreEl.value = currentGenre;
+    genreEl.addEventListener("change", function () {
+      currentGenre = genreEl.value;
+      syncUrl();
+      renderGrid();
+    });
+  }
+  if (favOnlyBtn) {
+    favOnlyBtn.setAttribute("aria-pressed", favOnly ? "true" : "false");
+    favOnlyBtn.dataset.active = favOnly ? "true" : "false";
+    favOnlyBtn.addEventListener("click", function () {
+      favOnly = !favOnly;
+      favOnlyBtn.setAttribute("aria-pressed", favOnly ? "true" : "false");
+      favOnlyBtn.dataset.active = favOnly ? "true" : "false";
+      syncUrl();
+      renderGrid();
+    });
+  }
+
+  fetch("../content/catalog.json").then(function (response) {
+    return response.ok ? response.json() : null;
+  }).then(function (catalog) {
+    if (!catalog || !catalog.entries) return;
+    var byId = new Map(catalog.entries.map(function (entry) { return [entry.id, entry]; }));
+    entries = entries.map(function (entry) {
+      var extra = byId.get(entry.id);
+      if (!extra) return entry;
+      return Object.assign({}, entry, {
+        publishedAt: extra.publishedAt,
+        review: extra.review,
+        description: extra.description,
+      });
+    });
+    renderGrid();
+  }).catch(function () {});
 
   // Apply saved sort to button states
   sortButtons.forEach(function (b) {

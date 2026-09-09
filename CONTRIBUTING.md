@@ -20,7 +20,9 @@ git remote add upstream https://github.com/jungcollin/series_game.git
 - 키보드만으로 끝내지 마세요. 모바일에서 터치로 시작하고, 진행 중 입력도 화면 버튼이나 제스처로 제공해야 합니다.
 - `../relay-runtime.js`를 불러오고, 준비되면 `window.RelayStageHost.onStageReady(...)`를 호출합니다.
 - 클리어 시 `window.RelayStageHost.onStageCleared(...)`, 실패 시 `window.RelayStageHost.onStageFailed(...)`.
+- 선택적으로 `sdk/v2/relay-sdk.js`를 쓸 수 있습니다. 기존 `RelayStageHost` 계약은 그대로 유지됩니다.
 - `window.parent`에 직접 접근하거나 임의 `postMessage`를 보내지 않습니다.
+- `meta.json`에 `dailyEligible` / `officialEligible` 같은 승인 표시를 넣지 마세요. 공식 편성은 운영 검수 데이터로만 결정합니다.
 - 추가 목숨, 이어하기, 체크포인트 리스폰은 넣지 않습니다.
 
 **`meta.json`**

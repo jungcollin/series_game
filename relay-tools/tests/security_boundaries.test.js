@@ -65,6 +65,14 @@ test("stage browser checks block HTTP, WebSocket, and service worker egress", ()
   assert.equal((checker.match(/serviceWorkers:\s*"block"/g) || []).length, 4);
 });
 
+test("session secrets are not placed on stage iframe URLs", () => {
+  const game = read("game.js");
+  const play = read("community-stages/play.html");
+  assert.match(game, /relayToken: state\.stageMessageToken/);
+  assert.doesNotMatch(game, /one-life-relay-session-v1/);
+  assert.doesNotMatch(play, /SESSION_KEY|relay_session=/);
+});
+
 test("public clients do not send caller-selected visitor ids or ranking writes", () => {
   const likes = read("community-stages/likes-client.js");
   const rankings = read("community-stages/ranking-client.js");

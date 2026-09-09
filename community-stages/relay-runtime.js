@@ -193,6 +193,7 @@
   }
 
   window.RelayRuntime = {
+    escapeHtml,
     readContext,
     pickRandomNext,
     goToRandomNext,

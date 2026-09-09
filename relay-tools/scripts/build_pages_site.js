@@ -23,7 +23,18 @@ const ROOT_FILES = [
   "icon-512.png",
 ];
 
-const DOMAIN_FILES = ["app/domain/run-state.js"];
+const DOMAIN_FILES = [
+  "app/domain/run-state.js",
+  "app/domain/result-policy.js",
+  "app/domain/gallery-filter.js",
+  "app/domain/daily-v2.js",
+  "app/domain/challenge-rank.js",
+  "app/infrastructure/api-client.js",
+  "app/infrastructure/local-storage.js",
+  "app/infrastructure/analytics.js",
+];
+
+const TREE_DIRS = ["app", "content"];
 
 const REQUIRED_PATHS = [
   "index.html",
@@ -31,8 +42,14 @@ const REQUIRED_PATHS = [
   "styles.css",
   "daily-relay.js",
   "app/domain/run-state.js",
+  "app/infrastructure/api-client.js",
+  "content/catalog.json",
+  "content/reviews.json",
+  "content/daily-rules.json",
   "community-stages/gallery.html",
   "community-stages/play.html",
+  "community-stages/creators.html",
+  "community-stages/sdk/v2/relay-sdk.js",
   "community-stages/registry.js",
   ".nojekyll",
   "CNAME",
@@ -107,6 +124,7 @@ function assertSafeOutputDirectory(repoRoot, outDir) {
   const sources = [
     ...ROOT_FILES.map((relative) => path.join(resolvedRoot, relative)),
     ...DOMAIN_FILES.map((relative) => path.join(resolvedRoot, relative)),
+    ...TREE_DIRS.map((relative) => path.join(resolvedRoot, relative)),
     path.join(resolvedRoot, "community-stages"),
   ];
   for (const source of sources) {
@@ -152,8 +170,8 @@ function buildPagesSite(repoRoot, outDir) {
   for (const relative of ROOT_FILES) {
     copyRegularFile(path.join(resolvedRoot, relative), path.join(resolvedOut, relative));
   }
-  for (const relative of DOMAIN_FILES) {
-    copyRegularFile(path.join(resolvedRoot, relative), path.join(resolvedOut, relative));
+  for (const relative of TREE_DIRS) {
+    copyTreeWithoutSymlinks(path.join(resolvedRoot, relative), path.join(resolvedOut, relative));
   }
   copyTreeWithoutSymlinks(
     path.join(resolvedRoot, "community-stages"),

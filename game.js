@@ -8,6 +8,8 @@ const relayOverlayTitleEl = document.querySelector("#relay-overlay-title");
 const relayOverlayCopyEl = document.querySelector("#relay-overlay-copy");
 const relayRestartBtn = document.querySelector("#relay-restart");
 const relaySecondaryActionBtn = document.querySelector("#relay-secondary-action");
+const relayShareActionBtn = document.querySelector("#relay-share-action");
+const relayOverlayStatusEl = document.querySelector("#relay-overlay-status");
 const leaderboardRefreshBtn = document.querySelector("#leaderboard-refresh");
 const leaderboardStatusEl = document.querySelector("#leaderboard-status");
 const leaderboardListEl = document.querySelector("#leaderboard-list");
@@ -50,6 +52,11 @@ const state = {
   likeCountsLoaded: false,
   dailyDateKey: "",
   dailyRoute: [],
+  challengeId: "",
+  todayChallengeId: "",
+  rulesRevision: 1,
+  courseReady: false,
+  rankedWrites: false,
   focusRequested: false,
   outcome: null,
   failedStageTitle: "",
@@ -57,11 +64,13 @@ const state = {
 
 function renderDailyRoute() {
   if (dailySeedEl) {
-    dailySeedEl.textContent = state.dailyDateKey.replaceAll("-", ".");
+    dailySeedEl.textContent = state.challengeId || state.dailyDateKey.replaceAll("-", ".");
   }
   if (!dailyRouteListEl) return;
   dailyRouteListEl.innerHTML = state.dailyRoute.map((stage, index) => {
-    const normalizedThumb = normalizeStagePath(stage.thumbnail || "");
+    const thumb = stage.thumbnail
+      ? `<img src="${escapeHtml(normalizeStagePath(stage.thumbnail))}" alt="" loading="lazy" />`
+      : "<span></span>";
     const status = state.history.includes(stage.id)
       ? "CLEARED"
       : state.currentStage?.id === stage.id
@@ -70,15 +79,47 @@ function renderDailyRoute() {
     return `
       <li class="route-card" data-status="${status.toLowerCase()}">
         <span class="route-index">0${index + 1}</span>
-        <img src="${escapeHtml(normalizedThumb)}" alt="" loading="lazy" />
+        ${thumb}
         <div><strong>${escapeHtml(stage.title)}</strong><span>${status}</span></div>
       </li>
     `;
   }).join("");
 }
 
-function prepareDailyRoute() {
-  state.dailyDateKey = window.DailyRelay?.getKstDateKey() || "KST DAILY";
+function setCourseControlsEnabled(enabled) {
+  if (startRelayBtn) startRelayBtn.disabled = !enabled;
+  if (relayRestartBtn) relayRestartBtn.disabled = !enabled;
+}
+
+function prepareDailyRoute(catalog, rules) {
+  const kstToday = window.DailyRelay?.getKstDateKey() || window.RelayDailyV2?.getKstDateKey() || "";
+  const params = new URLSearchParams(window.location.search);
+  const requested = window.RelayResultPolicy?.parseChallengeId(params.get("challenge") || "");
+  const publishedRevision = (rules && rules.revision) || 1;
+  const revision = requested ? requested.revision : publishedRevision;
+  const dateKey = requested ? requested.dateKey : kstToday;
+  state.dailyDateKey = dateKey || kstToday;
+  state.rulesRevision = publishedRevision;
+  state.todayChallengeId = window.RelayResultPolicy?.buildChallengeId(kstToday, publishedRevision) || "";
+  if (catalog && window.RelayDailyV2) {
+    try {
+      const entries = catalog.entries || catalog;
+      const effectiveRules = Object.assign({}, rules || {}, { revision });
+      const recentByDay = window.RelayDailyV2.historyBefore(entries, dateKey, effectiveRules);
+      const challenge = window.RelayDailyV2.buildChallenge(entries, dateKey, effectiveRules, recentByDay);
+      state.challengeId = challenge.id;
+      state.dailyRoute = challenge.stages.map((stage) => {
+        const registry = COMMUNITY_STAGE_REGISTRY.find((entry) => entry.id === stage.id) || stage;
+        return registry;
+      });
+      state.rankedWrites = false;
+      renderDailyRoute();
+      return;
+    } catch (error) {
+      console.warn("daily_v2_fallback", error);
+    }
+  }
+  state.challengeId = state.todayChallengeId || "";
   state.dailyRoute = window.DailyRelay?.buildRoute(COMMUNITY_STAGE_REGISTRY, state.dailyDateKey, 5)
     || COMMUNITY_STAGE_REGISTRY.slice(0, 5);
   renderDailyRoute();
@@ -401,6 +442,11 @@ function hideOverlay() {
     relaySecondaryActionBtn.setAttribute("aria-hidden", "true");
     relaySecondaryActionBtn.textContent = "";
   }
+  if (relayShareActionBtn) {
+    relayShareActionBtn.hidden = true;
+    relayShareActionBtn.setAttribute("aria-hidden", "true");
+  }
+  if (relayOverlayStatusEl) relayOverlayStatusEl.textContent = "";
   relayOverlayEl.hidden = true;
 }
 
@@ -412,6 +458,8 @@ function showOverlay({
   buttonAction = "restart",
   secondaryButtonLabel = "",
   secondaryButtonAction = "",
+  shareVisible = false,
+  status = "",
 }) {
   state.overlayPrimaryAction = buttonAction;
   state.overlaySecondaryAction = secondaryButtonAction;
@@ -432,7 +480,15 @@ function showOverlay({
       relaySecondaryActionBtn.textContent = "";
     }
   }
+  if (relayShareActionBtn) {
+    relayShareActionBtn.hidden = !shareVisible;
+    relayShareActionBtn.setAttribute("aria-hidden", shareVisible ? "false" : "true");
+  }
+  if (relayOverlayStatusEl) {
+    relayOverlayStatusEl.textContent = status || "";
+  }
   relayOverlayEl.hidden = false;
+  relayOverlayEl.removeAttribute("aria-busy");
   if (window.matchMedia("(max-width: 820px)").matches) {
     window.requestAnimationFrame(() => {
       relayOverlayEl.scrollIntoView({ behavior: "instant", block: "center" });
@@ -516,6 +572,52 @@ function applyRunEvent(event) {
   return next;
 }
 
+function currentTodayChallengeId() {
+  return state.todayChallengeId || window.RelayResultPolicy?.buildChallengeId(
+    window.RelayDailyV2?.getKstDateKey() || state.dailyDateKey,
+    state.rulesRevision || 1
+  ) || "";
+}
+
+function currentResultPolicy(outcome, extra = {}) {
+  if (!window.RelayResultPolicy) {
+    return { saveState: "writes-off", canSubmitOfficial: false };
+  }
+  return window.RelayResultPolicy.classifyRun({
+    challengeId: state.challengeId,
+    todayChallengeId: currentTodayChallengeId(),
+    outcome,
+    rankedWritesEnabled: state.rankedWrites,
+    technical: extra.technical === true || outcome === "incomplete",
+  });
+}
+
+function resultStatusLine(outcome, extra = {}) {
+  if (!window.RelayResultPolicy) return "";
+  return window.RelayResultPolicy.resultCopy({
+    challengeId: state.challengeId,
+    todayChallengeId: currentTodayChallengeId(),
+    outcome,
+    rankedWritesEnabled: state.rankedWrites,
+    technical: extra.technical === true || outcome === "incomplete",
+  });
+}
+
+function trackEvent(name, payload) {
+  if (!window.RelayAnalytics || !window.RelayApi || !window.RelayApi.features || !window.RelayApi.features.events) return;
+  if (window.RelayLocalStore?.isAnalyticsOptedOut()) return;
+  const event = window.RelayAnalytics.normalizeEvent(Object.assign({
+    name,
+    challenge_id: state.challengeId,
+  }, payload || {}));
+  if (!window.RelayAnalytics.shouldSend(event, { optOut: false })) return;
+  window.RelayApi.request("/v1/events", {
+    method: "POST",
+    auth: true,
+    body: event,
+  }).catch(function () {});
+}
+
 function showTerminalOverlay() {
   if (state.status === "complete") {
     updateRunResult("all-clear");
@@ -524,6 +626,8 @@ function showTerminalOverlay() {
       title: "ALL CLEAR",
       copy: `이번 플레이에서 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
       buttonLabel: "처음부터 다시",
+      shareVisible: true,
+      status: resultStatusLine("all-clear"),
     });
     return;
   }
@@ -535,18 +639,25 @@ function showTerminalOverlay() {
       title: "ROUTE BLOCKED",
       copy: `클리어 ${state.clearCount}개. 나머지 스테이지는 준비되지 않아 완주로 치지 않습니다. 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
       buttonLabel: "처음부터 다시",
+      shareVisible: true,
+      status: resultStatusLine("incomplete", { technical: true }),
     });
     return;
   }
 
   if (state.status === "gameover") {
     updateRunResult("failed", { failedStageTitle: state.failedStageTitle });
+    const failedId = state.currentStage?.id || "";
     showOverlay({
       kicker: "Run Over",
       title: "GAME OVER",
       copy: `${state.failedStageTitle || "현재 스테이지"}에서 실패했습니다. 이번 런은 끝났지만 처음부터 다시 도전할 수 있습니다. 총 ${state.clearCount}개 스테이지를 클리어했고, 누적 플레이 시간은 ${formatDurationLabel(state.runDurationSec)}입니다.`,
       buttonLabel: "처음부터 다시",
       buttonAction: "restart",
+      secondaryButtonLabel: failedId ? "실패 스테이지 연습" : "",
+      secondaryButtonAction: failedId ? "practice-failed" : "",
+      shareVisible: true,
+      status: resultStatusLine("failed"),
     });
   }
 }
@@ -608,6 +719,7 @@ function loadStage(stage) {
 function showIdlePrompt() {
   clearTransitionTimer();
   clearReadyTimer();
+  setCourseControlsEnabled(state.courseReady);
   showOverlay({
     kicker: "Today's Relay",
     title: "READY",
@@ -619,14 +731,15 @@ function showIdlePrompt() {
 }
 
 function startNewRun() {
+  if (!state.courseReady || !state.dailyRoute.length) return;
   clearTransitionTimer();
   clearReadyTimer();
   state.lastRunResult = null;
   state.stageMessageToken = "";
-  if (!state.dailyRoute.length) prepareDailyRoute();
   applyRunEvent({ type: "begin-run", runId: makeRunId() });
   hideOverlay();
   updateRunHeader();
+  trackEvent("run_start", { challenge_id: state.challengeId });
   if (state.status === "loading" && state.currentStage) {
     loadStage(state.currentStage);
     return;
@@ -645,6 +758,7 @@ function handleStageCleared(payload = {}) {
   if (state.status !== "await-advance") {
     return;
   }
+  trackEvent("stage_clear", { stage_id: stageId });
   clearReadyTimer();
   if (payload.stageTitle) {
     runStageTitleEl.textContent = `${payload.stageTitle} 클리어`;
@@ -667,20 +781,54 @@ function handleStageFailed(payload = {}) {
   if (state.status !== "gameover") {
     return;
   }
+  trackEvent("stage_fail", { stage_id: state.currentStage?.id });
   clearTransitionTimer();
   clearReadyTimer();
   updateRunHeader();
   showTerminalOverlay();
 }
 
+function shareChallengeLink() {
+  const challengeId = state.challengeId;
+  if (!challengeId) return;
+  const url = `${window.location.origin}${window.location.pathname}?challenge=${encodeURIComponent(challengeId)}`;
+  const done = (ok) => {
+    if (relayOverlayStatusEl) {
+      relayOverlayStatusEl.textContent = ok ? "코스 링크를 복사했습니다. 이 링크는 기록의 진위 증명이 아닙니다." : url;
+    }
+  };
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(url).then(() => done(true)).catch(() => done(false));
+    return;
+  }
+  done(false);
+}
+
 function performOverlayAction(action) {
   if (action === "skip-stage") {
     clearTransitionTimer();
     clearReadyTimer();
+    trackEvent("stage_invalid", { stage_id: state.currentStage?.id, technical: true });
     continueCurrentRun();
     return;
   }
 
+  if (action === "practice-failed") {
+    const stageId = state.currentStage?.id;
+    if (stageId) {
+      window.location.href = `./community-stages/play.html?stage=${encodeURIComponent(stageId)}&mode=practice`;
+    }
+    return;
+  }
+
+  if (action === "share") {
+    shareChallengeLink();
+    return;
+  }
+
+  if (state.status === "complete" || state.status === "gameover" || state.status === "incomplete") {
+    trackEvent("run_retry", { outcome: state.outcome });
+  }
   startNewRun();
 }
 
@@ -708,6 +856,7 @@ const stageMessageHandlers = {
         window.scrollTo({ top: 0, behavior: "instant" });
       }
     }, 80);
+    trackEvent("stage_ready", { stage_id: meta.id });
   },
   cleared(payload = {}) {
     handleStageCleared(payload);
@@ -746,6 +895,7 @@ relayRestartBtn?.addEventListener("click", () => performOverlayAction(state.over
 relaySecondaryActionBtn?.addEventListener("click", () => {
   performOverlayAction(state.overlaySecondaryAction || "restart");
 });
+relayShareActionBtn?.addEventListener("click", () => performOverlayAction("share"));
 leaderboardRefreshBtn?.addEventListener("click", loadLeaderboard);
 startRelayBtn?.addEventListener("click", () => {
   state.focusRequested = true;
@@ -830,7 +980,19 @@ async function loadLikeCounts() {
   }
 }
 
-prepareDailyRoute();
-showIdlePrompt();
 loadLeaderboard();
 loadLikeCounts().then(renderDailyRoute);
+
+async function bootDailyChallenge() {
+  setCourseControlsEnabled(false);
+  const [catalog, rules] = await Promise.all([
+    fetch("./content/catalog.json").then((response) => response.ok ? response.json() : null).catch(() => null),
+    fetch("./content/daily-rules.json").then((response) => response.ok ? response.json() : null).catch(() => null),
+  ]);
+  prepareDailyRoute(catalog, rules);
+  state.courseReady = Boolean(state.dailyRoute.length);
+  setCourseControlsEnabled(state.courseReady);
+  showIdlePrompt();
+}
+
+bootDailyChallenge();
