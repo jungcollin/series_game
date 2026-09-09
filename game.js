@@ -7,7 +7,9 @@ const relayOverlayKickerEl = document.querySelector("#relay-overlay-kicker");
 const relayOverlayTitleEl = document.querySelector("#relay-overlay-title");
 const relayOverlayCopyEl = document.querySelector("#relay-overlay-copy");
 const relayRestartBtn = document.querySelector("#relay-restart");
-const relaySecondaryActionBtn = document.querySelector("#relay-secondary-action");
+const relaySecondaryActionBtn = document.querySelector(
+  "#relay-secondary-action",
+);
 const relayShareActionBtn = document.querySelector("#relay-share-action");
 const relayOverlayStatusEl = document.querySelector("#relay-overlay-status");
 const leaderboardRefreshBtn = document.querySelector("#leaderboard-refresh");
@@ -23,7 +25,7 @@ const eventPeriodEl = document.querySelector("#event-period");
 const eventStageListEl = document.querySelector("#event-stage-list");
 const startRelayBtn = document.querySelector("#start-relay");
 
-const STAGE_READY_TIMEOUT_MS = 4000;
+const STAGE_READY_TIMEOUT_MS = 10000;
 const LEADERBOARD_LIMIT = 10;
 const LEADERBOARD_FETCH_LIMIT = 50;
 
@@ -70,27 +72,30 @@ const state = {
 
 function renderDailyRoute() {
   if (dailySeedEl) {
-    dailySeedEl.textContent = state.challengeId || state.dailyDateKey.replaceAll("-", ".");
+    dailySeedEl.textContent =
+      state.challengeId || state.dailyDateKey.replaceAll("-", ".");
   }
   if (!dailyRouteListEl) return;
   // pi-lens-ignore: no-inner-html-js
-  dailyRouteListEl.innerHTML = state.dailyRoute.map((stage, index) => {
-    const thumb = stage.thumbnail
-      ? `<img src="${escapeHtml(normalizeStagePath(stage.thumbnail))}" alt="" loading="lazy" />`
-      : "<span></span>";
-    const status = state.history.includes(stage.id)
-      ? "CLEARED"
-      : state.currentStage?.id === stage.id
-        ? "PLAYING"
-        : "LOCKED";
-    return `
+  dailyRouteListEl.innerHTML = state.dailyRoute
+    .map((stage, index) => {
+      const thumb = stage.thumbnail
+        ? `<img src="${escapeHtml(normalizeStagePath(stage.thumbnail))}" alt="" loading="lazy" />`
+        : "<span></span>";
+      const status = state.history.includes(stage.id)
+        ? "CLEARED"
+        : state.currentStage?.id === stage.id
+          ? "PLAYING"
+          : "LOCKED";
+      return `
       <li class="route-card" data-status="${status.toLowerCase()}">
         <span class="route-index">0${index + 1}</span>
         ${thumb}
         <div><strong>${escapeHtml(stage.title)}</strong><span>${status}</span></div>
       </li>
     `;
-  }).join("");
+    })
+    .join("");
 }
 
 function renderEventSection(eventsData, catalog) {
@@ -100,7 +105,8 @@ function renderEventSection(eventsData, catalog) {
     eventSectionEl.hidden = true;
     return;
   }
-  const entries = (catalog && catalog.entries) || catalog || COMMUNITY_STAGE_REGISTRY;
+  const entries =
+    (catalog && catalog.entries) || catalog || COMMUNITY_STAGE_REGISTRY;
   const stages = window.RelayEvents.resolveEventStages(event, entries);
   if (!stages.length) {
     eventSectionEl.hidden = true;
@@ -112,14 +118,17 @@ function renderEventSection(eventsData, catalog) {
   eventDescriptionEl.hidden = !event.description;
   eventPeriodEl.textContent = window.RelayEvents.formatPeriod(event, "ko-KR");
   // pi-lens-ignore: no-inner-html-js
-  eventStageListEl.innerHTML = stages.map((stage) => {
-    const registry = COMMUNITY_STAGE_REGISTRY.find((entry) => entry.id === stage.id) || stage;
-    const thumbnail = registry.thumbnail || stage.thumbnail;
-    const thumb = thumbnail
-      ? `<img src="${escapeHtml(normalizeStagePath(thumbnail))}" alt="" loading="lazy" />`
-      : "<span></span>";
-    const playHref = `./community-stages/play.html?stage=${encodeURIComponent(stage.id)}`;
-    return `
+  eventStageListEl.innerHTML = stages
+    .map((stage) => {
+      const registry =
+        COMMUNITY_STAGE_REGISTRY.find((entry) => entry.id === stage.id) ||
+        stage;
+      const thumbnail = registry.thumbnail || stage.thumbnail;
+      const thumb = thumbnail
+        ? `<img src="${escapeHtml(normalizeStagePath(thumbnail))}" alt="" loading="lazy" />`
+        : "<span></span>";
+      const playHref = `./community-stages/play.html?stage=${encodeURIComponent(stage.id)}`;
+      return `
       <li class="event-card">
         <a href="${playHref}" aria-label="${escapeHtml(stage.title)} 플레이 페이지로 이동">
           ${thumb}
@@ -127,7 +136,8 @@ function renderEventSection(eventsData, catalog) {
         </a>
       </li>
     `;
-  }).join("");
+    })
+    .join("");
   eventSectionEl.hidden = false;
   eventSectionEl.classList.add("reveal-up");
 }
@@ -138,24 +148,42 @@ function setCourseControlsEnabled(enabled) {
 }
 
 function prepareDailyRoute(catalog, rules) {
-  const kstToday = window.DailyRelay?.getKstDateKey() || window.RelayDailyV2?.getKstDateKey() || "";
+  const kstToday =
+    window.DailyRelay?.getKstDateKey() ||
+    window.RelayDailyV2?.getKstDateKey() ||
+    "";
   const params = new URLSearchParams(window.location.search);
-  const requested = window.RelayResultPolicy?.parseChallengeId(params.get("challenge") || "");
+  const requested = window.RelayResultPolicy?.parseChallengeId(
+    params.get("challenge") || "",
+  );
   const publishedRevision = (rules && rules.revision) || 1;
   const revision = requested ? requested.revision : publishedRevision;
   const dateKey = requested ? requested.dateKey : kstToday;
   state.dailyDateKey = dateKey || kstToday;
   state.rulesRevision = publishedRevision;
-  state.todayChallengeId = window.RelayResultPolicy?.buildChallengeId(kstToday, publishedRevision) || "";
+  state.todayChallengeId =
+    window.RelayResultPolicy?.buildChallengeId(kstToday, publishedRevision) ||
+    "";
   if (catalog && window.RelayDailyV2) {
     try {
       const entries = catalog.entries || catalog;
       const effectiveRules = Object.assign({}, rules || {}, { revision });
-      const recentByDay = window.RelayDailyV2.historyBefore(entries, dateKey, effectiveRules);
-      const challenge = window.RelayDailyV2.buildChallenge(entries, dateKey, effectiveRules, recentByDay);
+      const recentByDay = window.RelayDailyV2.historyBefore(
+        entries,
+        dateKey,
+        effectiveRules,
+      );
+      const challenge = window.RelayDailyV2.buildChallenge(
+        entries,
+        dateKey,
+        effectiveRules,
+        recentByDay,
+      );
       state.challengeId = challenge.id;
       state.dailyRoute = challenge.stages.map((stage) => {
-        const registry = COMMUNITY_STAGE_REGISTRY.find((entry) => entry.id === stage.id) || stage;
+        const registry =
+          COMMUNITY_STAGE_REGISTRY.find((entry) => entry.id === stage.id) ||
+          stage;
         return registry;
       });
       state.rankedWrites = false;
@@ -166,8 +194,12 @@ function prepareDailyRoute(catalog, rules) {
     }
   }
   state.challengeId = state.todayChallengeId || "";
-  state.dailyRoute = window.DailyRelay?.buildRoute(COMMUNITY_STAGE_REGISTRY, state.dailyDateKey, 5)
-    || COMMUNITY_STAGE_REGISTRY.slice(0, 5);
+  state.dailyRoute =
+    window.DailyRelay?.buildRoute(
+      COMMUNITY_STAGE_REGISTRY,
+      state.dailyDateKey,
+      5,
+    ) || COMMUNITY_STAGE_REGISTRY.slice(0, 5);
   renderDailyRoute();
 }
 
@@ -177,7 +209,7 @@ function escapeHtml(value) {
       "&": "&amp;",
       "<": "&lt;",
       ">": "&gt;",
-      "\"": "&quot;",
+      '"': "&quot;",
       "'": "&#39;",
     };
     return replacements[char] || char;
@@ -212,7 +244,10 @@ function setLeaderboardStatus(text) {
     leaderboardStatusEl.textContent = text;
   }
   if (leaderboardListEl) {
-    leaderboardListEl.setAttribute("aria-busy", text.includes("불러오는 중") ? "true" : "false");
+    leaderboardListEl.setAttribute(
+      "aria-busy",
+      text.includes("불러오는 중") ? "true" : "false",
+    );
   }
 }
 
@@ -222,7 +257,8 @@ function renderLeaderboard(entries = []) {
   }
 
   if (!entries.length) {
-    leaderboardListEl.innerHTML = '<li class="leaderboard-empty">아직 저장된 기록이 없습니다.</li>';
+    leaderboardListEl.innerHTML =
+      '<li class="leaderboard-empty">아직 저장된 기록이 없습니다.</li>';
     return;
   }
 
@@ -257,15 +293,28 @@ function sortLeaderboardEntries(entries) {
     if (right.clear_count !== left.clear_count) {
       return right.clear_count - left.clear_count;
     }
-    if (Number(Boolean(right.finished_all_clear)) !== Number(Boolean(left.finished_all_clear))) {
-      return Number(Boolean(right.finished_all_clear)) - Number(Boolean(left.finished_all_clear));
+    if (
+      Number(Boolean(right.finished_all_clear)) !==
+      Number(Boolean(left.finished_all_clear))
+    ) {
+      return (
+        Number(Boolean(right.finished_all_clear)) -
+        Number(Boolean(left.finished_all_clear))
+      );
     }
-    const leftDuration = Number.isFinite(left.duration_sec) ? left.duration_sec : Number.POSITIVE_INFINITY;
-    const rightDuration = Number.isFinite(right.duration_sec) ? right.duration_sec : Number.POSITIVE_INFINITY;
+    const leftDuration = Number.isFinite(left.duration_sec)
+      ? left.duration_sec
+      : Number.POSITIVE_INFINITY;
+    const rightDuration = Number.isFinite(right.duration_sec)
+      ? right.duration_sec
+      : Number.POSITIVE_INFINITY;
     if (leftDuration !== rightDuration) {
       return leftDuration - rightDuration;
     }
-    return new Date(left.created_at || 0).getTime() - new Date(right.created_at || 0).getTime();
+    return (
+      new Date(left.created_at || 0).getTime() -
+      new Date(right.created_at || 0).getTime()
+    );
   });
 }
 
@@ -280,7 +329,7 @@ async function loadLeaderboard() {
   setLeaderboardStatus("랭킹을 불러오는 중…");
   try {
     const payload = await relayApiRequest(
-      `/v1/leaderboard?limit=${LEADERBOARD_FETCH_LIMIT}`
+      `/v1/leaderboard?limit=${LEADERBOARD_FETCH_LIMIT}`,
     );
     const rows = Array.isArray(payload?.entries) ? payload.entries : [];
     const entries = sortLeaderboardEntries(rows).slice(0, LEADERBOARD_LIMIT);
@@ -289,11 +338,13 @@ async function loadLeaderboard() {
     setLeaderboardStatus(
       entries.length
         ? "저장된 상위 기록입니다."
-        : "아직 저장된 기록이 없습니다. 첫 번째 기록을 남겨보세요."
+        : "아직 저장된 기록이 없습니다. 첫 번째 기록을 남겨보세요.",
     );
   } catch {
     renderLeaderboard([]);
-    setLeaderboardStatus("지금은 랭킹 연결이 잠시 불안정합니다. 게임은 정상적으로 플레이할 수 있습니다.");
+    setLeaderboardStatus(
+      "지금은 랭킹 연결이 잠시 불안정합니다. 게임은 정상적으로 플레이할 수 있습니다.",
+    );
   }
 }
 
@@ -335,9 +386,13 @@ function getFocusableElements(container) {
 
   return Array.from(
     container.querySelectorAll(
-      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
-    )
-  ).filter((element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true");
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("hidden") &&
+      element.getAttribute("aria-hidden") !== "true",
+  );
 }
 
 function trapFocusInModal(event, modalEl) {
@@ -413,7 +468,10 @@ function setLeaderboardModal(open, options = {}) {
       const focusable = getFocusableElements(sheet);
       (focusable[0] || sheet)?.focus();
     });
-  } else if (restoreFocus && modalFocusState.leaderboard instanceof HTMLElement) {
+  } else if (
+    restoreFocus &&
+    modalFocusState.leaderboard instanceof HTMLElement
+  ) {
     modalFocusState.leaderboard.focus();
     modalFocusState.leaderboard = null;
   } else if (!open) {
@@ -424,13 +482,18 @@ function setLeaderboardModal(open, options = {}) {
 function syncModalBodyState() {
   const promptOpen = promptModalEl?.dataset.open === "true";
   const leaderboardOpen = leaderboardModalEl?.dataset.open === "true";
-  document.body.classList.toggle("modal-open", Boolean(promptOpen || leaderboardOpen));
+  document.body.classList.toggle(
+    "modal-open",
+    Boolean(promptOpen || leaderboardOpen),
+  );
 }
 
 function setNavActive(el) {
-  document.querySelectorAll(".navbar-actions .nav-link, .navbar-actions .nav-btn").forEach((n) => {
-    n.classList.remove("nav-link--active");
-  });
+  document
+    .querySelectorAll(".navbar-actions .nav-link, .navbar-actions .nav-btn")
+    .forEach((n) => {
+      n.classList.remove("nav-link--active");
+    });
   if (el) el.classList.add("nav-link--active");
 }
 
@@ -529,7 +592,10 @@ function showOverlay({
   }
   if (relayShareActionBtn) {
     relayShareActionBtn.hidden = !shareVisible;
-    relayShareActionBtn.setAttribute("aria-hidden", shareVisible ? "false" : "true");
+    relayShareActionBtn.setAttribute(
+      "aria-hidden",
+      shareVisible ? "false" : "true",
+    );
   }
   if (relayOverlayStatusEl) {
     relayOverlayStatusEl.textContent = status || "";
@@ -595,18 +661,21 @@ function clearReadyTimer() {
 }
 
 function applyRunEvent(event) {
-  const next = window.RelayRunState.reduce({
-    dailyRoute: state.dailyRoute,
-    runId: state.runId,
-    status: state.status,
-    clearCount: state.clearCount,
-    history: state.history,
-    unavailableStageIds: state.unavailableStageIds,
-    currentStage: state.currentStage,
-    runDurationSec: state.runDurationSec,
-    outcome: state.outcome,
-    failedStageTitle: state.failedStageTitle,
-  }, event);
+  const next = window.RelayRunState.reduce(
+    {
+      dailyRoute: state.dailyRoute,
+      runId: state.runId,
+      status: state.status,
+      clearCount: state.clearCount,
+      history: state.history,
+      unavailableStageIds: state.unavailableStageIds,
+      currentStage: state.currentStage,
+      runDurationSec: state.runDurationSec,
+      outcome: state.outcome,
+      failedStageTitle: state.failedStageTitle,
+    },
+    event,
+  );
   state.runId = next.runId;
   state.status = next.status;
   state.clearCount = next.clearCount;
@@ -620,10 +689,14 @@ function applyRunEvent(event) {
 }
 
 function currentTodayChallengeId() {
-  return state.todayChallengeId || window.RelayResultPolicy?.buildChallengeId(
-    window.RelayDailyV2?.getKstDateKey() || state.dailyDateKey,
-    state.rulesRevision || 1
-  ) || "";
+  return (
+    state.todayChallengeId ||
+    window.RelayResultPolicy?.buildChallengeId(
+      window.RelayDailyV2?.getKstDateKey() || state.dailyDateKey,
+      state.rulesRevision || 1,
+    ) ||
+    ""
+  );
 }
 
 function resultStatusLine(outcome, extra = {}) {
@@ -638,12 +711,23 @@ function resultStatusLine(outcome, extra = {}) {
 }
 
 function trackEvent(name, payload) {
-  if (!window.RelayAnalytics || !window.RelayApi || !window.RelayApi.features || !window.RelayApi.features.events) return;
+  if (
+    !window.RelayAnalytics ||
+    !window.RelayApi ||
+    !window.RelayApi.features ||
+    !window.RelayApi.features.events
+  )
+    return;
   if (window.RelayLocalStore?.isAnalyticsOptedOut()) return;
-  const event = window.RelayAnalytics.normalizeEvent(Object.assign({
-    name,
-    challenge_id: state.challengeId,
-  }, payload || {}));
+  const event = window.RelayAnalytics.normalizeEvent(
+    Object.assign(
+      {
+        name,
+        challenge_id: state.challengeId,
+      },
+      payload || {},
+    ),
+  );
   if (!window.RelayAnalytics.shouldSend(event, { optOut: false })) return;
   window.RelayApi.request("/v1/events", {
     method: "POST",
@@ -828,11 +912,16 @@ function shareChallengeLink() {
   const url = `${window.location.origin}${window.location.pathname}?challenge=${encodeURIComponent(challengeId)}`;
   const done = (ok) => {
     if (relayOverlayStatusEl) {
-      relayOverlayStatusEl.textContent = ok ? "코스 링크를 복사했습니다. 이 링크는 기록의 진위 증명이 아닙니다." : url;
+      relayOverlayStatusEl.textContent = ok
+        ? "코스 링크를 복사했습니다. 이 링크는 기록의 진위 증명이 아닙니다."
+        : url;
     }
   };
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(url).then(() => done(true)).catch(() => done(false));
+    navigator.clipboard
+      .writeText(url)
+      .then(() => done(true))
+      .catch(() => done(false));
     return;
   }
   done(false);
@@ -842,7 +931,10 @@ function performOverlayAction(action) {
   if (action === "skip-stage") {
     clearTransitionTimer();
     clearReadyTimer();
-    trackEvent("stage_invalid", { stage_id: state.currentStage?.id, technical: true });
+    trackEvent("stage_invalid", {
+      stage_id: state.currentStage?.id,
+      technical: true,
+    });
     continueCurrentRun();
     return;
   }
@@ -861,7 +953,11 @@ function performOverlayAction(action) {
     return;
   }
 
-  if (state.status === "complete" || state.status === "gameover" || state.status === "incomplete") {
+  if (
+    state.status === "complete" ||
+    state.status === "gameover" ||
+    state.status === "incomplete"
+  ) {
     trackEvent("run_retry", { outcome: state.outcome });
   }
   startNewRun();
@@ -871,7 +967,9 @@ function makeStageMessageToken() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
   const bytes = new Uint8Array(24);
   window.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 const stageMessageHandlers = {
@@ -907,10 +1005,18 @@ window.addEventListener("message", (event) => {
     event.source !== relayFrameEl?.contentWindow ||
     !message ||
     message.token !== state.stageMessageToken
-  ) return;
-  if (!window.RelayRunState.isCurrentStageMessage({
-    currentStage: state.currentStage,
-  }, message, state.stageMessageToken)) return;
+  )
+    return;
+  if (
+    !window.RelayRunState.isCurrentStageMessage(
+      {
+        currentStage: state.currentStage,
+      },
+      message,
+      state.stageMessageToken,
+    )
+  )
+    return;
   stageMessageHandlers[message.type]?.(message.payload);
 });
 
@@ -926,28 +1032,39 @@ relayFrameEl?.addEventListener("load", () => {
 });
 relayFrameEl?.addEventListener("error", handleStageLoadTimeout);
 
-relayRestartBtn?.addEventListener("click", () => performOverlayAction(state.overlayPrimaryAction));
+relayRestartBtn?.addEventListener("click", () =>
+  performOverlayAction(state.overlayPrimaryAction),
+);
 relaySecondaryActionBtn?.addEventListener("click", () => {
   performOverlayAction(state.overlaySecondaryAction || "restart");
 });
-relayShareActionBtn?.addEventListener("click", () => performOverlayAction("share"));
+relayShareActionBtn?.addEventListener("click", () =>
+  performOverlayAction("share"),
+);
 leaderboardRefreshBtn?.addEventListener("click", loadLeaderboard);
 startRelayBtn?.addEventListener("click", () => {
   state.focusRequested = true;
   startNewRun();
 });
 
-window.addEventListener("keydown", (e) => {
-  // 32: Space, 37: Left, 38: Up, 39: Right, 40: Down
-  if ([32, 37, 38, 39, 40].includes(e.keyCode)) {
-    const active = document.activeElement;
-    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
-      return; // Allow typing
+window.addEventListener(
+  "keydown",
+  (e) => {
+    // 32: Space, 37: Left, 38: Up, 39: Right, 40: Down
+    if ([32, 37, 38, 39, 40].includes(e.keyCode)) {
+      const active = document.activeElement;
+      if (
+        active &&
+        (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
+      ) {
+        return; // Allow typing
+      }
+      // Prevent the parent page from scrolling while playing
+      e.preventDefault();
     }
-    // Prevent the parent page from scrolling while playing
-    e.preventDefault();
-  }
-}, { capture: false });
+  },
+  { capture: false },
+);
 
 promptStepCopyButtons.forEach((button) => {
   button.addEventListener("click", () => copyPromptStep(button));
@@ -961,12 +1078,18 @@ if (location.hash === "#leaderboard") {
   history.replaceState(null, "", location.pathname + location.search);
 }
 promptModalEl?.addEventListener("click", (event) => {
-  if (event.target instanceof HTMLElement && event.target.dataset.closePrompt === "true") {
+  if (
+    event.target instanceof HTMLElement &&
+    event.target.dataset.closePrompt === "true"
+  ) {
     closePromptModal();
   }
 });
 leaderboardModalEl?.addEventListener("click", (event) => {
-  if (event.target instanceof HTMLElement && event.target.dataset.closeLeaderboard === "true") {
+  if (
+    event.target instanceof HTMLElement &&
+    event.target.dataset.closeLeaderboard === "true"
+  ) {
     closeLeaderboardModal();
   }
 });
@@ -992,11 +1115,16 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (event.key === "Enter" && window.RelayRunState.shouldAcceptOverlayShortcut({
-    overlayHidden: Boolean(relayOverlayEl?.hidden),
-    modalOpen: promptModalEl?.dataset.open === "true" || leaderboardModalEl?.dataset.open === "true",
-    target: event.target,
-  })) {
+  if (
+    event.key === "Enter" &&
+    window.RelayRunState.shouldAcceptOverlayShortcut({
+      overlayHidden: Boolean(relayOverlayEl?.hidden),
+      modalOpen:
+        promptModalEl?.dataset.open === "true" ||
+        leaderboardModalEl?.dataset.open === "true",
+      target: event.target,
+    })
+  ) {
     event.preventDefault();
     performOverlayAction(state.overlayPrimaryAction);
   }
@@ -1021,9 +1149,15 @@ loadLikeCounts().then(renderDailyRoute);
 async function bootDailyChallenge() {
   setCourseControlsEnabled(false);
   const [catalog, rules, eventsData] = await Promise.all([
-    fetch("./content/catalog.json").then((response) => response.ok ? response.json() : null).catch(() => null),
-    fetch("./content/daily-rules.json").then((response) => response.ok ? response.json() : null).catch(() => null),
-    fetch("./content/events.json").then((response) => response.ok ? response.json() : null).catch(() => null),
+    fetch("./content/catalog.json")
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null),
+    fetch("./content/daily-rules.json")
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null),
+    fetch("./content/events.json")
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null),
   ]);
   prepareDailyRoute(catalog, rules);
   renderEventSection(eventsData, catalog);

@@ -126,7 +126,7 @@ async function waitForStageReady(page) {
       );
     },
     null,
-    { timeout: 8000 },
+    { timeout: 25000 },
   );
 
   return getRelayFrame(page);
