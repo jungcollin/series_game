@@ -76,7 +76,8 @@ const BINARY_EXTENSIONS = new Set([
   ".zip",
 ]);
 
-const SECRET_RE = /DATABASE_URL|SESSION_SIGNING_SECRET|BEGIN (?:RSA |OPENSSH )?PRIVATE KEY/;
+const SECRET_RE =
+  /DATABASE_URL|SESSION_SIGNING_SECRET|BEGIN (?:RSA |OPENSSH )?PRIVATE KEY/;
 const SECRET_SCAN_BYTES = 64 * 1024;
 const FORBIDDEN_NAMES = new Set([
   ".env",
@@ -113,14 +114,19 @@ function repoRootFrom(filePath) {
 
 function isInsideOrEqual(parent, child) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
 }
 
 function assertSafeOutputDirectory(repoRoot, outDir) {
   const resolvedRoot = path.resolve(repoRoot);
   const resolvedOut = path.resolve(outDir);
   if (isInsideOrEqual(resolvedOut, resolvedRoot)) {
-    throw new Error("Pages output directory must not be the repository root or a parent of it");
+    throw new Error(
+      "Pages output directory must not be the repository root or a parent of it",
+    );
   }
   const sources = [
     ...ROOT_FILES.map((relative) => path.join(resolvedRoot, relative)),
@@ -129,7 +135,10 @@ function assertSafeOutputDirectory(repoRoot, outDir) {
     path.join(resolvedRoot, "community-stages"),
   ];
   for (const source of sources) {
-    if (isInsideOrEqual(resolvedOut, source) || isInsideOrEqual(source, resolvedOut)) {
+    if (
+      isInsideOrEqual(resolvedOut, source) ||
+      isInsideOrEqual(source, resolvedOut)
+    ) {
       throw new Error("Pages output directory overlaps a source path");
     }
   }
@@ -156,7 +165,9 @@ function copyTreeWithoutSymlinks(src, dest) {
     return;
   }
   if (!stat.isFile()) {
-    throw new Error(`Pages artifact source has an unsupported file type: ${src}`);
+    throw new Error(
+      `Pages artifact source has an unsupported file type: ${src}`,
+    );
   }
   copyRegularFile(src, dest);
 }
@@ -169,14 +180,20 @@ function buildPagesSite(repoRoot, outDir) {
   fs.mkdirSync(resolvedOut, { recursive: true });
 
   for (const relative of ROOT_FILES) {
-    copyRegularFile(path.join(resolvedRoot, relative), path.join(resolvedOut, relative));
+    copyRegularFile(
+      path.join(resolvedRoot, relative),
+      path.join(resolvedOut, relative),
+    );
   }
   for (const relative of TREE_DIRS) {
-    copyTreeWithoutSymlinks(path.join(resolvedRoot, relative), path.join(resolvedOut, relative));
+    copyTreeWithoutSymlinks(
+      path.join(resolvedRoot, relative),
+      path.join(resolvedOut, relative),
+    );
   }
   copyTreeWithoutSymlinks(
     path.join(resolvedRoot, "community-stages"),
-    path.join(resolvedOut, "community-stages")
+    path.join(resolvedOut, "community-stages"),
   );
   fs.writeFileSync(path.join(resolvedOut, ".nojekyll"), "");
   return resolvedOut;
@@ -194,7 +211,9 @@ function walkFiles(dir, files = [], root = dir) {
     } else if (entry.isFile()) {
       files.push(full);
     } else {
-      throw new Error(`Pages artifact contains an unsupported file type: ${relative}`);
+      throw new Error(
+        `Pages artifact contains an unsupported file type: ${relative}`,
+      );
     }
   }
   return files;
@@ -222,7 +241,11 @@ function assertPagesArtifact(outDir) {
   for (const filePath of walkFiles(outDir)) {
     const relative = path.relative(outDir, filePath).split(path.sep).join("/");
     const base = path.basename(filePath);
-    if (FORBIDDEN_NAMES.has(base) || relative.startsWith("relay-api/") || relative.includes("/.env")) {
+    if (
+      FORBIDDEN_NAMES.has(base) ||
+      relative.startsWith("relay-api/") ||
+      relative.includes("/.env")
+    ) {
       throw new Error(`Pages artifact contains a forbidden path: ${relative}`);
     }
 
@@ -235,7 +258,9 @@ function assertPagesArtifact(outDir) {
       continue;
     }
     if (SECRET_RE.test(sample.toString("utf8"))) {
-      throw new Error(`Pages artifact contains a secret-like value in ${relative}`);
+      throw new Error(
+        `Pages artifact contains a secret-like value in ${relative}`,
+      );
     }
   }
 }

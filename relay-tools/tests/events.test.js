@@ -20,21 +20,38 @@ function eventsData(events) {
 
 test("selectActiveEvent returns the event covering the KST date key", () => {
   const data = eventsData([sampleEvent]);
-  assert.equal(RelayEvents.selectActiveEvent(data, "2026-09-09").id, "sample-event");
-  assert.equal(RelayEvents.selectActiveEvent(data, "2026-09-15").id, "sample-event");
+  assert.equal(
+    RelayEvents.selectActiveEvent(data, "2026-09-09").id,
+    "sample-event",
+  );
+  assert.equal(
+    RelayEvents.selectActiveEvent(data, "2026-09-15").id,
+    "sample-event",
+  );
 });
 
 test("selectActiveEvent returns null outside the period", () => {
   const data = eventsData([sampleEvent]);
   assert.equal(RelayEvents.selectActiveEvent(data, "2026-09-08"), null);
   assert.equal(RelayEvents.selectActiveEvent(data, "2026-09-16"), null);
-  assert.equal(RelayEvents.selectActiveEvent(eventsData([]), "2026-09-10"), null);
+  assert.equal(
+    RelayEvents.selectActiveEvent(eventsData([]), "2026-09-10"),
+    null,
+  );
   assert.equal(RelayEvents.selectActiveEvent(null, "2026-09-10"), null);
 });
 
 test("selectActiveEvent prefers the most recently started overlapping event", () => {
-  const older = Object.assign({}, sampleEvent, { id: "older", startsOn: "2026-09-01", endsOn: "2026-09-30" });
-  const newer = Object.assign({}, sampleEvent, { id: "newer", startsOn: "2026-09-10", endsOn: "2026-09-20" });
+  const older = Object.assign({}, sampleEvent, {
+    id: "older",
+    startsOn: "2026-09-01",
+    endsOn: "2026-09-30",
+  });
+  const newer = Object.assign({}, sampleEvent, {
+    id: "newer",
+    startsOn: "2026-09-10",
+    endsOn: "2026-09-20",
+  });
   const data = eventsData([older, newer]);
   assert.equal(RelayEvents.selectActiveEvent(data, "2026-09-12").id, "newer");
   assert.equal(RelayEvents.selectActiveEvent(data, "2026-09-05").id, "older");
@@ -46,7 +63,10 @@ test("resolveEventStages preserves stageIds order and drops unknown ids", () => 
     { id: "alpha", title: "A" },
   ];
   const stages = RelayEvents.resolveEventStages(sampleEvent, entries);
-  assert.deepEqual(stages.map((stage) => stage.id), ["alpha", "gamma"]);
+  assert.deepEqual(
+    stages.map((stage) => stage.id),
+    ["alpha", "gamma"],
+  );
   assert.equal(RelayEvents.resolveEventStages(null, entries).length, 0);
 });
 
@@ -61,15 +81,21 @@ test("validateEvent rejects malformed events", () => {
   assert.ok(RelayEvents.validateEvent(sampleEvent).length === 0);
   assert.ok(RelayEvents.validateEvent(null).length > 0);
   assert.ok(
-    RelayEvents.validateEvent(Object.assign({}, sampleEvent, { startsOn: "2026-13-40" })).length > 0,
-  );
-  assert.ok(
     RelayEvents.validateEvent(
-      Object.assign({}, sampleEvent, { startsOn: "2026-09-16", endsOn: "2026-09-09" }),
+      Object.assign({}, sampleEvent, { startsOn: "2026-13-40" }),
     ).length > 0,
   );
   assert.ok(
-    RelayEvents.validateEvent(Object.assign({}, sampleEvent, { stageIds: [] })).length > 0,
+    RelayEvents.validateEvent(
+      Object.assign({}, sampleEvent, {
+        startsOn: "2026-09-16",
+        endsOn: "2026-09-09",
+      }),
+    ).length > 0,
+  );
+  assert.ok(
+    RelayEvents.validateEvent(Object.assign({}, sampleEvent, { stageIds: [] }))
+      .length > 0,
   );
   assert.ok(
     RelayEvents.validateEvent(
@@ -79,7 +105,10 @@ test("validateEvent rejects malformed events", () => {
 });
 
 test("formatPeriod renders an inclusive Korean date range", () => {
-  assert.equal(RelayEvents.formatPeriod(sampleEvent, "ko-KR"), "9월 9일 ~ 9월 15일");
+  assert.equal(
+    RelayEvents.formatPeriod(sampleEvent, "ko-KR"),
+    "9월 9일 ~ 9월 15일",
+  );
   assert.equal(RelayEvents.formatPeriod(null, "ko-KR"), "");
 });
 
@@ -111,9 +140,13 @@ test("gallery filter restricts entries to active event stage ids", () => {
 
 test("content/events.json is valid and references catalog stages", () => {
   const root = path.join(__dirname, "..", "..");
-  const data = JSON.parse(fs.readFileSync(path.join(root, "content", "events.json"), "utf8"));
+  const data = JSON.parse(
+    fs.readFileSync(path.join(root, "content", "events.json"), "utf8"),
+  );
   assert.deepEqual(RelayEvents.validateEventsData(data), []);
-  const catalog = JSON.parse(fs.readFileSync(path.join(root, "content", "catalog.json"), "utf8"));
+  const catalog = JSON.parse(
+    fs.readFileSync(path.join(root, "content", "catalog.json"), "utf8"),
+  );
   const knownIds = new Set((catalog.entries || []).map((entry) => entry.id));
   for (const event of data.events) {
     for (const id of event.stageIds) {

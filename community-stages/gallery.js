@@ -478,12 +478,14 @@
   }
 
   fetch("../content/events.json")
-    .then((response) => response.ok ? response.json() : null)
+    .then((response) => (response.ok ? response.json() : null))
     .then((eventsData) => {
       if (!window.RelayEvents) return;
       var activeEvent = window.RelayEvents.selectActiveEvent(eventsData);
       if (!activeEvent) return;
-      activeEventStageIds = Array.from(window.RelayEvents.stageIdSet(activeEvent));
+      activeEventStageIds = Array.from(
+        window.RelayEvents.stageIdSet(activeEvent),
+      );
       if (eventOnlyBtn) {
         eventOnlyBtn.hidden = false;
         eventOnlyBtn.setAttribute("aria-pressed", eventOnly ? "true" : "false");
@@ -497,12 +499,10 @@
     .catch(() => {});
 
   fetch("../content/catalog.json")
-    .then((response) => response.ok ? response.json() : null)
+    .then((response) => (response.ok ? response.json() : null))
     .then((catalog) => {
       if (!catalog || !catalog.entries) return;
-      var byId = new Map(
-        catalog.entries.map((entry) => [entry.id, entry]),
-      );
+      var byId = new Map(catalog.entries.map((entry) => [entry.id, entry]));
       entries = entries.map((entry) => {
         var extra = byId.get(entry.id);
         if (!extra) return entry;
