@@ -394,16 +394,24 @@ async function main() {
     viewport: { width: 1440, height: 1400 },
   });
   const consoleErrors = [];
+  const pageErrors = [];
+  page.on("pageerror", (error) => {
+    pageErrors.push(String(error && error.message ? error.message : error));
+  });
   page.on("console", (msg) => {
     if (msg.type() === "error" && !isExpectedLocalApiError(msg.text())) {
       consoleErrors.push(msg.text());
     }
   });
 
+  let currentStep = "goto-home";
+  try {
   await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
+  currentStep = "start-daily-run";
   await startDailyRun(page);
 
   const visitedStageIds = [];
+  currentStep = "stage-loop";
   for (;;) {
     const frame = await waitForStageReady(page);
     const stageId = await frame.evaluate(() => window.relayStageMeta.id);
@@ -430,8 +438,10 @@ async function main() {
     outputDir,
     "main-host-flow-all-clear.png",
   );
+  currentStep = "all-clear-screenshot";
   await page.screenshot({ path: allClearScreenshot, fullPage: true });
 
+  currentStep = "restart-flow";
   await page.click("#relay-restart");
   const restartFrame = await waitForStageReady(page);
   const restartedStageId = await restartFrame.evaluate(
@@ -454,18 +464,21 @@ async function main() {
 
   await page.close();
 
+  currentStep = "mobile-checks";
   const mobile = includeMobile
     ? await runMobileChecks(browser, baseUrl, outputDir, consoleErrors)
     : null;
 
   await browser.close();
 
+  currentStep = "console-errors";
   if (consoleErrors.length) {
     throw new Error(
       `Console errors detected during host flow check:\n${consoleErrors.join("\n")}`,
     );
   }
 
+  currentStep = "done";
   process.stdout.write(
     JSON.stringify(
       {
@@ -495,6 +508,37 @@ async function main() {
       2,
     ) + "\n",
   );
+  } catch (error) {
+    const overlayState = await page
+      .evaluate(() => {
+        const overlay = document.querySelector("#relay-overlay");
+        return {
+          hidden: overlay ? overlay.hidden : null,
+          title:
+            document.querySelector("#relay-overlay-title")?.textContent || "",
+          stageTitle:
+            document.querySelector("#run-stage-title")?.textContent || "",
+        };
+      })
+      .catch(() => null);
+    process.stdout.write(
+      JSON.stringify(
+        {
+          ok: false,
+          step: currentStep,
+          overlayState,
+          pageErrors,
+          consoleErrors,
+          error: String(
+            error && error.message ? error.message : error,
+          ),
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    process.exit(1);
+  }
 }
 
 main().catch((error) => {
