@@ -5,14 +5,35 @@ const fs = require("fs");
 const path = require("path");
 const { loadAllStageMetas } = require("./stage_metadata");
 
-const FORBIDDEN_AUTHOR_FIELDS = ["dailyEligible", "officialEligible", "reviewStatus", "approved"];
+const FORBIDDEN_AUTHOR_FIELDS = [
+  "dailyEligible",
+  "officialEligible",
+  "reviewStatus",
+  "approved",
+];
+
+// v1 레거시(커뮤니티 테스트 기여작)와 v2(정식 검수 대상)를 가르는 게시 시각 컷오프.
+// 컷오프 이전에 게시된 스테이지는 검수 면제 레거시로 묶는다. publishedAt이 없는 신규 스테이지는 v2.
+const GENERATION_V1_CUTOFF = "2026-09-10T00:00:00+09:00";
+
+function generationFor(publishedAt) {
+  const ms = publishedAt ? Date.parse(publishedAt) : NaN;
+  if (!Number.isFinite(ms)) return "v2";
+  return ms < Date.parse(GENERATION_V1_CUTOFF) ? "v1" : "v2";
+}
 
 function repoRootFrom(filePath) {
   return path.resolve(path.dirname(filePath), "../..");
 }
 
 function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Failed to parse JSON: ${path.relative(process.cwd(), filePath)} (${error.message})`,
+    );
+  }
 }
 
 function canonicalStringify(value) {
@@ -27,12 +48,15 @@ function canonicalStringify(value) {
 }
 
 function catalogHash(catalog) {
-  return crypto.createHash("sha256").update(canonicalStringify(catalog)).digest("hex");
+  return crypto
+    .createHash("sha256")
+    .update(canonicalStringify(catalog))
+    .digest("hex");
 }
 
 function assertNoAuthorApprovals(rawMeta, id) {
   for (const field of FORBIDDEN_AUTHOR_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(rawMeta, field)) {
+    if (Object.hasOwn(rawMeta, field)) {
       throw new Error(`Author metadata cannot set ${field}: ${id}`);
     }
   }
@@ -60,11 +84,20 @@ function buildCatalog(repoRoot, options = {}) {
   const metas = loadAllStageMetas(repoRoot);
   const packagesDir = path.join(repoRoot, "content", "packages");
   const entries = metas.map((meta) => {
-    const rawMeta = readJson(path.join(repoRoot, "community-stages", meta.id, "meta.json"));
+    const rawMeta = readJson(
+      path.join(repoRoot, "community-stages", meta.id, "meta.json"),
+    );
     assertNoAuthorApprovals(rawMeta, meta.id);
-    const review = reviews.stages && reviews.stages[meta.id] ? reviews.stages[meta.id] : null;
+    const review =
+      reviews.stages && reviews.stages[meta.id]
+        ? reviews.stages[meta.id]
+        : null;
     const packageFile = path.join(packagesDir, `${meta.id}.json`);
-    const packageInfo = fs.existsSync(packageFile) ? readJson(packageFile) : null;
+    const packageInfo = fs.existsSync(packageFile)
+      ? readJson(packageFile)
+      : null;
+    const publishedAt =
+      options.publishedAt?.[meta.id] || gitPublishedAt(repoRoot, meta.id);
     return {
       id: meta.id,
       title: meta.title,
@@ -77,7 +110,8 @@ function buildCatalog(repoRoot, options = {}) {
       estimatedSeconds: meta.estimatedSeconds,
       thumbnail: meta.thumbnail,
       path: meta.path,
-      publishedAt: options.publishedAt?.[meta.id] || gitPublishedAt(repoRoot, meta.id),
+      publishedAt,
+      generation: generationFor(publishedAt),
       packageHash: packageInfo && packageInfo.hash ? packageInfo.hash : null,
       review: review
         ? {
@@ -98,7 +132,10 @@ function buildCatalog(repoRoot, options = {}) {
     generatedFrom: "meta.json + content/reviews.json",
     entries,
   };
-  catalog.hash = catalogHash({ version: catalog.version, entries: catalog.entries });
+  catalog.hash = catalogHash({
+    version: catalog.version,
+    entries: catalog.entries,
+  });
   return catalog;
 }
 
@@ -112,7 +149,9 @@ function writeCatalog(repoRoot, catalog) {
 function checkCatalogSync(repoRoot) {
   const expected = buildCatalog(repoRoot);
   const filePath = path.join(repoRoot, "content", "catalog.json");
-  const current = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+  const current = fs.existsSync(filePath)
+    ? fs.readFileSync(filePath, "utf8")
+    : "";
   const rendered = `${JSON.stringify(expected, null, 2)}\n`;
   return {
     ok: current === rendered,
@@ -127,7 +166,9 @@ function main() {
   if (checkOnly) {
     const result = checkCatalogSync(repoRoot);
     if (!result.ok) {
-      throw new Error("content/catalog.json is out of date. Run node relay-tools/scripts/build_catalog.js");
+      throw new Error(
+        "content/catalog.json is out of date. Run node relay-tools/scripts/build_catalog.js",
+      );
     }
     process.stdout.write(`${result.expected.hash}\n`);
     return;
@@ -139,9 +180,11 @@ function main() {
 
 module.exports = {
   FORBIDDEN_AUTHOR_FIELDS,
+  GENERATION_V1_CUTOFF,
   buildCatalog,
   catalogHash,
   checkCatalogSync,
+  generationFor,
   writeCatalog,
 };
 

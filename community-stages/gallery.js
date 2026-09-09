@@ -5,6 +5,7 @@
   var sortButtons = document.querySelectorAll(".sort-btn[data-sort]");
   var searchEl = document.querySelector("#gallery-search");
   var genreEl = document.querySelector("#gallery-genre");
+  var genEl = document.querySelector("#gallery-generation");
   var favOnlyBtn = document.querySelector("#gallery-fav-only");
   var voteScores = new Map(); // stageId -> { score, upvotes, downvotes }
   var myVotes = {}; // stageId -> 1 | -1
@@ -12,11 +13,15 @@
   var SCROLL_STORAGE_KEY = "olr-gallery-scroll";
   var urlState = window.RelayGalleryFilter
     ? window.RelayGalleryFilter.readSearchParams(window.location.search)
-    : { q: "", genre: "", sort: "", fav: false };
+    : { q: "", genre: "", gen: "", sort: "", fav: false };
   var savedSort = urlState.sort || localStorage.getItem(SORT_STORAGE_KEY);
-  var currentSort = (savedSort === "popular" || savedSort === "newest" || savedSort === "name") ? savedSort : "popular";
+  var currentSort =
+    savedSort === "popular" || savedSort === "newest" || savedSort === "name"
+      ? savedSort
+      : "popular";
   var currentQuery = urlState.q || "";
   var currentGenre = urlState.genre || "";
+  var currentGen = urlState.gen || "";
   var favOnly = Boolean(urlState.fav);
   var hasLoadedVoteScores = false;
 
@@ -33,9 +38,14 @@
     if (window.RelayRuntime && window.RelayRuntime.normalizeCreator) {
       return window.RelayRuntime.normalizeCreator(creator);
     }
-    if (typeof creator === "string") return { name: creator, avatar: null, github: null };
+    if (typeof creator === "string")
+      return { name: creator, avatar: null, github: null };
     if (!creator) return { name: "Unknown", avatar: null, github: null };
-    return { name: creator.name || "Unknown", avatar: creator.avatar || null, github: creator.github || null };
+    return {
+      name: creator.name || "Unknown",
+      avatar: creator.avatar || null,
+      github: creator.github || null,
+    };
   }
 
   function getAvatarUrl(creator) {
@@ -49,7 +59,12 @@
   }
 
   function escapeHtml(value) {
-    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function getGenreStyle(genre) {
@@ -68,10 +83,20 @@
     var c = normalizeCreator(creator);
     var url = getAvatarUrl(creator);
     if (url) {
-      return '<img class="creator-avatar" src="' + escapeHtml(url) + '" alt="" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'grid\'" />' +
-        '<span class="creator-avatar-placeholder" style="display:none">' + escapeHtml(c.name.charAt(0).toUpperCase()) + "</span>";
+      return (
+        '<img class="creator-avatar" src="' +
+        escapeHtml(url) +
+        '" alt="" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'grid\'" />' +
+        '<span class="creator-avatar-placeholder" style="display:none">' +
+        escapeHtml(c.name.charAt(0).toUpperCase()) +
+        "</span>"
+      );
     }
-    return '<span class="creator-avatar-placeholder">' + escapeHtml(c.name.charAt(0).toUpperCase()) + "</span>";
+    return (
+      '<span class="creator-avatar-placeholder">' +
+      escapeHtml(c.name.charAt(0).toUpperCase()) +
+      "</span>"
+    );
   }
 
   function getScore(stageId) {
@@ -89,7 +114,8 @@
 
   function getScoreHeartIcon(score) {
     var state = getScoreState(score);
-    if (state === "negative" || state === "negative-strong") return "\uD83D\uDDA4";
+    if (state === "negative" || state === "negative-strong")
+      return "\uD83D\uDDA4";
     if (state === "neutral") return "\uD83E\uDD0D";
     return "\u2764\uFE0F";
   }
@@ -120,38 +146,99 @@
     var heartIcon = getScoreHeartIcon(score);
     var playHref = "./play.html?stage=" + encodeURIComponent(entry.id);
     var thumbnailMarkup = thumbnailUrl
-      ? '<img class="stage-card-thumb-image" src="' + escapeHtml(thumbnailUrl) + '" alt="" loading="lazy" decoding="async" onerror="this.remove()" />'
+      ? '<img class="stage-card-thumb-image" src="' +
+        escapeHtml(thumbnailUrl) +
+        '" alt="" loading="lazy" decoding="async" onerror="this.remove()" />'
       : "";
     var genreIconMarkup = thumbnailUrl
       ? ""
       : '<span class="stage-card-thumb-icon">' + genre.icon + "</span>";
 
     return (
-      '<article class="stage-card tilt-card reveal-up glow-target" data-stage-id="' + escapeHtml(entry.id) + '">' +
-      '<a class="stage-card-media-link" href="' + playHref + '" aria-label="' + escapeHtml(entry.title) + ' 플레이 페이지로 이동">' +
-      '<div class="stage-card-thumb" data-has-image="' + (thumbnailUrl ? "true" : "false") + '" style="background:' + genre.bg + '">' +
+      '<article class="stage-card tilt-card reveal-up glow-target" data-stage-id="' +
+      escapeHtml(entry.id) +
+      '">' +
+      '<a class="stage-card-media-link" href="' +
+      playHref +
+      '" aria-label="' +
+      escapeHtml(entry.title) +
+      ' 플레이 페이지로 이동">' +
+      '<div class="stage-card-thumb" data-has-image="' +
+      (thumbnailUrl ? "true" : "false") +
+      '" style="background:' +
+      genre.bg +
+      '">' +
       thumbnailMarkup +
       genreIconMarkup +
-      '<span class="stage-card-genre">' + escapeHtml(entry.genre) + "</span>" +
-      '<span class="stage-card-heart" data-stage-id="' + escapeHtml(entry.id) + '" data-score-state="' + scoreState + '" aria-label="좋아요 점수 ' + score + '"><span class="heart-icon" aria-hidden="true">' + heartIcon + '</span> <span class="vote-score">' + score + "</span></span>" +
+      '<span class="stage-card-genre">' +
+      escapeHtml(entry.genre) +
+      "</span>" +
+      '<span class="stage-card-gen" aria-label="버전 ' +
+      escapeHtml(entry.generation || "v1") +
+      '">' +
+      escapeHtml(entry.generation || "v1") +
+      "</span>" +
+      '<span class="stage-card-heart" data-stage-id="' +
+      escapeHtml(entry.id) +
+      '" data-score-state="' +
+      scoreState +
+      '" aria-label="좋아요 점수 ' +
+      score +
+      '"><span class="heart-icon" aria-hidden="true">' +
+      heartIcon +
+      '</span> <span class="vote-score">' +
+      score +
+      "</span></span>" +
       "</div>" +
       "</a>" +
       '<div class="stage-card-body">' +
-      '<h3 class="stage-card-title"><a class="stage-card-title-link" href="' + playHref + '">' + escapeHtml(entry.title) + "</a></h3>" +
-      '<p class="stage-card-condition">' + escapeHtml(entry.clearCondition) + "</p>" +
+      '<h3 class="stage-card-title"><a class="stage-card-title-link" href="' +
+      playHref +
+      '">' +
+      escapeHtml(entry.title) +
+      "</a></h3>" +
+      '<p class="stage-card-condition">' +
+      escapeHtml(entry.clearCondition) +
+      "</p>" +
       '<div class="stage-card-creator">' +
       renderCreatorAvatar(entry.creator) +
       (creator.github
-        ? '<a class="creator-name" href="./creators.html?github=' + encodeURIComponent(creator.github) + '">' + escapeHtml(creator.name) + "</a>"
-        : '<span class="creator-name">' + escapeHtml(creator.name) + "</span>") +
+        ? '<a class="creator-name" href="./creators.html?github=' +
+          encodeURIComponent(creator.github) +
+          '">' +
+          escapeHtml(creator.name) +
+          "</a>"
+        : '<span class="creator-name">' +
+          escapeHtml(creator.name) +
+          "</span>") +
       "</div>" +
       '<div class="stage-card-actions">' +
       '<div class="vote-group">' +
-      '<button class="vote-btn vote-up magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="1" data-active="' + (myVote === 1) + '" type="button" aria-label="좋아요">+</button>' +
-      '<button class="vote-btn vote-down magnetic-btn" data-stage-id="' + escapeHtml(entry.id) + '" data-vote="-1" data-active="' + (myVote === -1) + '" type="button" aria-label="싫어요">−</button>' +
+      '<button class="vote-btn vote-up magnetic-btn" data-stage-id="' +
+      escapeHtml(entry.id) +
+      '" data-vote="1" data-active="' +
+      (myVote === 1) +
+      '" type="button" aria-label="좋아요">+</button>' +
+      '<button class="vote-btn vote-down magnetic-btn" data-stage-id="' +
+      escapeHtml(entry.id) +
+      '" data-vote="-1" data-active="' +
+      (myVote === -1) +
+      '" type="button" aria-label="싫어요">−</button>' +
       "</div>" +
-      '<button class="fav-btn magnetic-btn" type="button" data-stage-id="' + escapeHtml(entry.id) + '" aria-pressed="' + (window.RelayLocalStore && window.RelayLocalStore.isFavorite(entry.id) ? "true" : "false") + '" aria-label="즐겨찾기">' + (window.RelayLocalStore && window.RelayLocalStore.isFavorite(entry.id) ? "저장됨" : "저장") + "</button>" +
-      '<a class="play-link magnetic-btn" href="./play.html?stage=' + encodeURIComponent(entry.id) + '">플레이</a>' +
+      '<button class="fav-btn magnetic-btn" type="button" data-stage-id="' +
+      escapeHtml(entry.id) +
+      '" aria-pressed="' +
+      (window.RelayLocalStore && window.RelayLocalStore.isFavorite(entry.id)
+        ? "true"
+        : "false") +
+      '" aria-label="즐겨찾기">' +
+      (window.RelayLocalStore && window.RelayLocalStore.isFavorite(entry.id)
+        ? "저장됨"
+        : "저장") +
+      "</button>" +
+      '<a class="play-link magnetic-btn" href="./play.html?stage=' +
+      encodeURIComponent(entry.id) +
+      '">플레이</a>' +
       "</div>" +
       "</div>" +
       "</article>"
@@ -159,10 +246,16 @@
   }
 
   function syncUrl() {
-    if (!window.RelayGalleryFilter || !window.history || !window.history.replaceState) return;
+    if (
+      !window.RelayGalleryFilter ||
+      !window.history ||
+      !window.history.replaceState
+    )
+      return;
     var query = window.RelayGalleryFilter.writeSearchParams({
       q: currentQuery,
       genre: currentGenre,
+      gen: currentGen,
       sort: currentSort,
       fav: favOnly,
     });
@@ -171,12 +264,17 @@
 
   function getSortedEntries() {
     var scores = {};
-    voteScores.forEach(function (value, key) { scores[key] = value.score; });
-    var favorites = window.RelayLocalStore ? window.RelayLocalStore.readFavorites() : [];
+    voteScores.forEach(function (value, key) {
+      scores[key] = value.score;
+    });
+    var favorites = window.RelayLocalStore
+      ? window.RelayLocalStore.readFavorites()
+      : [];
     if (window.RelayGalleryFilter) {
       return window.RelayGalleryFilter.applyFilters(entries, {
         q: currentQuery,
         genre: currentGenre,
+        gen: currentGen,
         sort: currentSort,
         fav: favOnly,
         favorites: favorites,
@@ -185,9 +283,13 @@
     }
     var sorted = entries.slice();
     if (currentSort === "popular") {
-      sorted.sort(function (a, b) { return getScore(b.id) - getScore(a.id); });
+      sorted.sort(function (a, b) {
+        return getScore(b.id) - getScore(a.id);
+      });
     } else if (currentSort === "name") {
-      sorted.sort(function (a, b) { return a.title.localeCompare(b.title); });
+      sorted.sort(function (a, b) {
+        return a.title.localeCompare(b.title);
+      });
     }
     if (currentSort === "newest") sorted.reverse();
     return sorted;
@@ -196,14 +298,17 @@
   function renderGrid() {
     if (!gridEl) return;
     if (currentSort === "popular" && !hasLoadedVoteScores) {
-      gridEl.innerHTML = '<p class="gallery-status" role="status">인기순을 불러오는 중…</p>';
+      gridEl.innerHTML =
+        '<p class="gallery-status" role="status">인기순을 불러오는 중…</p>';
       return;
     }
     var sorted = getSortedEntries();
     if (!sorted.length) {
-      gridEl.innerHTML = '<p class="gallery-empty">조건에 맞는 스테이지가 없습니다. 검색어나 필터를 바꿔 보세요.</p>';
+      gridEl.innerHTML =
+        '<p class="gallery-empty">조건에 맞는 스테이지가 없습니다. 검색어나 필터를 바꿔 보세요.</p>';
       return;
     }
+    // pi-lens-ignore: no-inner-html-js, no-inner-html, ts-xss-dom-sink
     gridEl.innerHTML = sorted.map(renderCard).join("");
   }
 
@@ -281,7 +386,9 @@
         downBtn.dataset.active = (oldVote === -1).toString();
         s.score = oldScore;
         voteScores.set(stageId, s);
-        announceFeedback("투표를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+        announceFeedback(
+          "투표를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        );
         upBtn.disabled = false;
         downBtn.disabled = false;
       });
@@ -306,7 +413,9 @@
   if (gridEl) {
     gridEl.addEventListener("click", handleVoteClick);
   }
-  sortButtons.forEach(function (btn) { btn.addEventListener("click", handleSortClick); });
+  sortButtons.forEach(function (btn) {
+    btn.addEventListener("click", handleSortClick);
+  });
 
   if (searchEl) {
     searchEl.value = currentQuery;
@@ -318,7 +427,9 @@
   }
   if (genreEl) {
     var genres = window.RelayGalleryFilter
-      ? window.RelayGalleryFilter.uniqueValues(entries, function (entry) { return entry.genre; })
+      ? window.RelayGalleryFilter.uniqueValues(entries, function (entry) {
+          return entry.genre;
+        })
       : [];
     genres.forEach(function (genre) {
       var option = document.createElement("option");
@@ -329,6 +440,14 @@
     genreEl.value = currentGenre;
     genreEl.addEventListener("change", function () {
       currentGenre = genreEl.value;
+      syncUrl();
+      renderGrid();
+    });
+  }
+  if (genEl) {
+    genEl.value = currentGen;
+    genEl.addEventListener("change", function () {
+      currentGen = genEl.value;
       syncUrl();
       renderGrid();
     });
@@ -345,22 +464,30 @@
     });
   }
 
-  fetch("../content/catalog.json").then(function (response) {
-    return response.ok ? response.json() : null;
-  }).then(function (catalog) {
-    if (!catalog || !catalog.entries) return;
-    var byId = new Map(catalog.entries.map(function (entry) { return [entry.id, entry]; }));
-    entries = entries.map(function (entry) {
-      var extra = byId.get(entry.id);
-      if (!extra) return entry;
-      return Object.assign({}, entry, {
-        publishedAt: extra.publishedAt,
-        review: extra.review,
-        description: extra.description,
+  fetch("../content/catalog.json")
+    .then(function (response) {
+      return response.ok ? response.json() : null;
+    })
+    .then(function (catalog) {
+      if (!catalog || !catalog.entries) return;
+      var byId = new Map(
+        catalog.entries.map(function (entry) {
+          return [entry.id, entry];
+        }),
+      );
+      entries = entries.map(function (entry) {
+        var extra = byId.get(entry.id);
+        if (!extra) return entry;
+        return Object.assign({}, entry, {
+          publishedAt: extra.publishedAt,
+          generation: extra.generation,
+          review: extra.review,
+          description: extra.description,
+        });
       });
-    });
-    renderGrid();
-  }).catch(function () {});
+      renderGrid();
+    })
+    .catch(function () {});
 
   // Apply saved sort to button states
   sortButtons.forEach(function (b) {
@@ -387,8 +514,12 @@
 
   // Fetch fresh data
   Promise.all([
-    window.LikesClient.fetchVoteScores().catch(function () { return new Map(); }),
-    window.LikesClient.fetchMyVotes().catch(function () { return {}; }),
+    window.LikesClient.fetchVoteScores().catch(function () {
+      return new Map();
+    }),
+    window.LikesClient.fetchMyVotes().catch(function () {
+      return {};
+    }),
   ]).then(function (results) {
     hasLoadedVoteScores = true;
     voteScores = results[0];
