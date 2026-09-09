@@ -521,7 +521,7 @@ async function main() {
         };
       })
       .catch(() => null);
-    process.stdout.write(
+    process.stderr.write(
       JSON.stringify(
         {
           ok: false,
