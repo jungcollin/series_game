@@ -78,10 +78,46 @@ function resolveStageSlug(args, repoRoot) {
   );
 }
 
-function stageAndVerify(repoRoot, stageDir) {
+function kstIsoNow() {
+  const kst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return `${kst.toISOString().slice(0, 19)}+09:00`;
+}
+
+function ensurePublishedAt(repoRoot, stageId) {
+  const publishedPath = path.join(repoRoot, "content", "published-at.json");
+  let map = {};
+  if (fs.existsSync(publishedPath)) {
+    try {
+      map = JSON.parse(fs.readFileSync(publishedPath, "utf8"));
+    } catch {
+      map = {};
+    }
+  }
+  if (map[stageId]) return false;
+  map[stageId] = kstIsoNow();
+  const sorted = Object.fromEntries(
+    Object.entries(map).sort(([left], [right]) => left.localeCompare(right))
+  );
+  fs.writeFileSync(publishedPath, `${JSON.stringify(sorted, null, 2)}\n`);
+  return true;
+}
+
+function stageAndVerify(repoRoot, stageDir, stageId) {
   const stageDirPath = `community-stages/${stageDir}`;
   const registryPath = "community-stages/registry.js";
-  run("git", ["add", stageDirPath, registryPath], repoRoot);
+  ensurePublishedAt(repoRoot, stageId || stageDir);
+  run("node", ["relay-tools/scripts/build_catalog.js"], repoRoot);
+  run(
+    "git",
+    [
+      "add",
+      stageDirPath,
+      registryPath,
+      "content/published-at.json",
+      "content/catalog.json",
+    ],
+    repoRoot
+  );
   const staged = run("git", ["diff", "--cached", "--name-only"], repoRoot);
   if (!staged.trim()) {
     throw new Error(`No changes staged for stage directory: ${stageDirPath}`);
@@ -151,6 +187,7 @@ function findExistingPr(repoRoot, repositoryFullName, branch, headOwner) {
     repoRoot
   );
 
+  // pi-lens-ignore: unchecked-throwing-call-js
   const prs = JSON.parse(raw).filter((pr) => {
     const ownerLogin = pr.headRepositoryOwner?.login || null;
     return (
@@ -172,6 +209,7 @@ function findExistingPr(repoRoot, repositoryFullName, branch, headOwner) {
 }
 
 function readPrStatus(repoRoot, repositoryFullName, prRef) {
+  // pi-lens-ignore: unchecked-throwing-call-js
   return JSON.parse(
     run(
       "gh",
@@ -200,7 +238,7 @@ function enableAutoMerge(repoRoot, repositoryFullName, prRef) {
       ["pr", "merge", String(prRef), "--repo", repositoryFullName, "--auto", "--squash"],
       repoRoot
     );
-  } catch (_error) {
+  } catch {
     // gh may return non-zero even when auto-merge is already enabled.
   }
 
@@ -287,7 +325,7 @@ function main() {
       branch = ensureBranch(repoRoot, stageMeta.dir);
     }
 
-    stageAndVerify(repoRoot, stageMeta.dir);
+    stageAndVerify(repoRoot, stageMeta.dir, stageMeta.id);
     run("git", ["commit", "-m", commitMessage], repoRoot);
     committed = true;
   }
@@ -358,7 +396,7 @@ function main() {
         ok: true,
         stage: stageMeta.id,
         stageDir: stageMeta.dir,
-        check: JSON.parse(checkOutput),
+        check: JSON.parse(checkOutput), // pi-lens-ignore: unchecked-throwing-call-js
         changedFiles: gitStatus ? gitStatus.split("\n") : [],
         commitMessage,
         prTitle,
