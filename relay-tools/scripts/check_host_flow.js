@@ -406,108 +406,112 @@ async function main() {
 
   let currentStep = "goto-home";
   try {
-  await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
-  currentStep = "start-daily-run";
-  await startDailyRun(page);
+    await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
+    currentStep = "start-daily-run";
+    await startDailyRun(page);
 
-  const visitedStageIds = [];
-  currentStep = "stage-loop";
-  for (;;) {
-    const frame = await waitForStageReady(page);
-    const stageId = await frame.evaluate(() => window.relayStageMeta.id);
-    if (visitedStageIds.includes(stageId)) {
-      throw new Error(`Relay repeated a stage before all-clear: ${stageId}`);
+    const visitedStageIds = [];
+    currentStep = "stage-loop";
+    for (;;) {
+      const frame = await waitForStageReady(page);
+      const stageId = await frame.evaluate(() => window.relayStageMeta.id);
+      if (visitedStageIds.includes(stageId)) {
+        throw new Error(`Relay repeated a stage before all-clear: ${stageId}`);
+      }
+
+      visitedStageIds.push(stageId);
+      await frame.evaluate(() => {
+        window.relayStageDebug.forceClear();
+      });
+
+      try {
+        await waitForOverlay(page, "ALL CLEAR");
+        break;
+      } catch {
+        // Another stage should load next; continue the loop.
+      }
     }
 
-    visitedStageIds.push(stageId);
-    await frame.evaluate(() => {
-      window.relayStageDebug.forceClear();
-    });
-
-    try {
-      await waitForOverlay(page, "ALL CLEAR");
-      break;
-    } catch {
-      // Another stage should load next; continue the loop.
-    }
-  }
-
-  const allClearCount = await page.locator("#run-clear-count").textContent();
-  const allClearCopy = await page.locator("#relay-overlay-copy").textContent();
-  const allClearScreenshot = path.join(
-    outputDir,
-    "main-host-flow-all-clear.png",
-  );
-  currentStep = "all-clear-screenshot";
-  await page.screenshot({ path: allClearScreenshot, fullPage: true });
-
-  currentStep = "restart-flow";
-  await page.click("#relay-restart");
-  const restartFrame = await waitForStageReady(page);
-  const restartedStageId = await restartFrame.evaluate(
-    () => window.relayStageMeta.id,
-  );
-  const restartedClearCount = await page
-    .locator("#run-clear-count")
-    .textContent();
-
-  await restartFrame.evaluate(() => {
-    window.relayStageDebug.forceFail();
-  });
-  await waitForOverlay(page, "GAME OVER");
-  const gameOverCopy = await page.locator("#relay-overlay-copy").textContent();
-  const gameOverScreenshot = path.join(
-    outputDir,
-    "main-host-flow-game-over.png",
-  );
-  await page.screenshot({ path: gameOverScreenshot, fullPage: true });
-
-  await page.close();
-
-  currentStep = "mobile-checks";
-  const mobile = includeMobile
-    ? await runMobileChecks(browser, baseUrl, outputDir, consoleErrors)
-    : null;
-
-  await browser.close();
-
-  currentStep = "console-errors";
-  if (consoleErrors.length) {
-    throw new Error(
-      `Console errors detected during host flow check:\n${consoleErrors.join("\n")}`,
+    const allClearCount = await page.locator("#run-clear-count").textContent();
+    const allClearCopy = await page
+      .locator("#relay-overlay-copy")
+      .textContent();
+    const allClearScreenshot = path.join(
+      outputDir,
+      "main-host-flow-all-clear.png",
     );
-  }
+    currentStep = "all-clear-screenshot";
+    await page.screenshot({ path: allClearScreenshot, fullPage: true });
 
-  currentStep = "done";
-  process.stdout.write(
-    JSON.stringify(
-      {
-        ok: true,
-        visitedStageIds,
-        restart: {
-          stageId: restartedStageId,
-          clearCount: restartedClearCount,
+    currentStep = "restart-flow";
+    await page.click("#relay-restart");
+    const restartFrame = await waitForStageReady(page);
+    const restartedStageId = await restartFrame.evaluate(
+      () => window.relayStageMeta.id,
+    );
+    const restartedClearCount = await page
+      .locator("#run-clear-count")
+      .textContent();
+
+    await restartFrame.evaluate(() => {
+      window.relayStageDebug.forceFail();
+    });
+    await waitForOverlay(page, "GAME OVER");
+    const gameOverCopy = await page
+      .locator("#relay-overlay-copy")
+      .textContent();
+    const gameOverScreenshot = path.join(
+      outputDir,
+      "main-host-flow-game-over.png",
+    );
+    await page.screenshot({ path: gameOverScreenshot, fullPage: true });
+
+    await page.close();
+
+    currentStep = "mobile-checks";
+    const mobile = includeMobile
+      ? await runMobileChecks(browser, baseUrl, outputDir, consoleErrors)
+      : null;
+
+    await browser.close();
+
+    currentStep = "console-errors";
+    if (consoleErrors.length) {
+      throw new Error(
+        `Console errors detected during host flow check:\n${consoleErrors.join("\n")}`,
+      );
+    }
+
+    currentStep = "done";
+    process.stdout.write(
+      JSON.stringify(
+        {
+          ok: true,
+          visitedStageIds,
+          restart: {
+            stageId: restartedStageId,
+            clearCount: restartedClearCount,
+          },
+          overlays: {
+            allClearCount,
+            allClearCopy,
+            gameOverCopy,
+          },
+          mobile,
+          screenshots: [
+            path.relative(repoRoot, allClearScreenshot),
+            path.relative(repoRoot, gameOverScreenshot),
+            ...(mobile
+              ? mobile.screenshots.map((screenshotPath) =>
+                  path.relative(repoRoot, screenshotPath),
+                )
+              : []),
+          ],
         },
-        overlays: {
-          allClearCount,
-          allClearCopy,
-          gameOverCopy,
-        },
-        mobile,
-        screenshots: [
-          path.relative(repoRoot, allClearScreenshot),
-          path.relative(repoRoot, gameOverScreenshot),
-          ...(mobile
-            ? mobile.screenshots.map((screenshotPath) =>
-                path.relative(repoRoot, screenshotPath),
-              )
-            : []),
-        ],
-      },
-      null,
-      2,
-    ) + "\n",
-  );
+        null,
+        2,
+      ) + "\n",
+    );
   } catch (error) {
     const overlayState = await page
       .evaluate(() => {
@@ -529,9 +533,7 @@ async function main() {
           overlayState,
           pageErrors,
           consoleErrors,
-          error: String(
-            error && error.message ? error.message : error,
-          ),
+          error: String(error && error.message ? error.message : error),
         },
         null,
         2,

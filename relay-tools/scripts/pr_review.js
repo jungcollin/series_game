@@ -52,22 +52,30 @@ function extractStageIds(changedFiles, registryEntries) {
 
 function collectNonStageFiles(changedFiles, registryEntries, stageIds) {
   const changedStageDirs = new Set(
-    registryEntries.filter((entry) => stageIds.includes(entry.id)).map((entry) => entry.dir)
+    registryEntries
+      .filter((entry) => stageIds.includes(entry.id))
+      .map((entry) => entry.dir),
   );
   return changedFiles.filter((file) => {
     if (file === "community-stages/registry.js") {
       return false;
     }
-    return ![...changedStageDirs].some((dir) => file.startsWith(`community-stages/${dir}/`));
+    return ![...changedStageDirs].some((dir) =>
+      file.startsWith(`community-stages/${dir}/`),
+    );
   });
 }
 
 function scanStageRisks(repoRoot, registryEntries, stageIds, changedFiles) {
   const changedStageDirs = new Set(
-    registryEntries.filter((entry) => stageIds.includes(entry.id)).map((entry) => entry.dir)
+    registryEntries
+      .filter((entry) => stageIds.includes(entry.id))
+      .map((entry) => entry.dir),
   );
   const scanTargets = changedFiles.filter((file) =>
-    [...changedStageDirs].some((dir) => file.startsWith(`community-stages/${dir}/`))
+    [...changedStageDirs].some((dir) =>
+      file.startsWith(`community-stages/${dir}/`),
+    ),
   );
   const patterns = [
     { label: "external-script", regex: /<script[^>]+src=["']https?:\/\//i },
@@ -103,8 +111,14 @@ function runStageChecks(repoRoot, stageSlugs, baseUrl) {
   return stageSlugs.map((slug) => {
     const output = run(
       "node",
-      ["relay-tools/scripts/check_stage.js", "--stage", slug, "--base-url", baseUrl],
-      repoRoot
+      [
+        "relay-tools/scripts/check_stage.js",
+        "--stage",
+        slug,
+        "--base-url",
+        baseUrl,
+      ],
+      repoRoot,
     );
     // pi-lens-ignore: unchecked-throwing-call-js
     return JSON.parse(output);
@@ -127,8 +141,13 @@ function shouldRunHostUiCheck(changedFiles) {
 function runHostUiCheck(repoRoot, baseUrl) {
   const output = run(
     "node",
-    ["relay-tools/scripts/check_host_flow.js", "--base-url", baseUrl, "--mobile"],
-    repoRoot
+    [
+      "relay-tools/scripts/check_host_flow.js",
+      "--base-url",
+      baseUrl,
+      "--mobile",
+    ],
+    repoRoot,
   );
   // pi-lens-ignore: unchecked-throwing-call-js
   return JSON.parse(output);
@@ -142,7 +161,7 @@ function buildSummary(report) {
   }
   if (report.risks.length) {
     lines.push(
-      `Risk findings: ${report.risks.map((entry) => `${entry.file} (${entry.risk})`).join(", ")}`
+      `Risk findings: ${report.risks.map((entry) => `${entry.file} (${entry.risk})`).join(", ")}`,
     );
   }
   if (report.hostUiCheck) {
@@ -161,16 +180,26 @@ function main() {
   const changedFiles = listChangedFiles(repoRoot, baseRef, headRef);
   const registryEntries = loadAllStageMetas(repoRoot);
   const stageSlugs = extractStageIds(changedFiles, registryEntries);
-  const nonStageFiles = collectNonStageFiles(changedFiles, registryEntries, stageSlugs);
-  const risks = scanStageRisks(repoRoot, registryEntries, stageSlugs, changedFiles);
-  const checks = stageSlugs.length ? runStageChecks(repoRoot, stageSlugs, baseUrl) : [];
+  const nonStageFiles = collectNonStageFiles(
+    changedFiles,
+    registryEntries,
+    stageSlugs,
+  );
+  const risks = scanStageRisks(
+    repoRoot,
+    registryEntries,
+    stageSlugs,
+    changedFiles,
+  );
+  const checks = stageSlugs.length
+    ? runStageChecks(repoRoot, stageSlugs, baseUrl)
+    : [];
   const hostUiCheck = shouldRunHostUiCheck(changedFiles)
     ? runHostUiCheck(repoRoot, baseUrl)
     : null;
 
   const ok =
-    checks.every((entry) => entry.ok) &&
-    (!hostUiCheck || hostUiCheck.ok);
+    checks.every((entry) => entry.ok) && (!hostUiCheck || hostUiCheck.ok);
   const safeToApprove = false;
 
   const report = {
@@ -202,8 +231,8 @@ try {
         error: error.message,
       },
       null,
-      2
-    )}\n`
+      2,
+    )}\n`,
   );
   process.exit(1);
 }
