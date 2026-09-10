@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>낙하 투하</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">낙하 투하. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 터치로 투하 입니다. 항공기가 지나갈 때 화면을 터치하면 짐을 투하하고, 낙하산이 펴지며 바람에 밀려 낙하합니다. 키보드는 스페이스로 투하합니다. 짐 5개를 목표 안에 떨구면 클리어, 3개를 빗나가면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="낙하 투하" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const GROUND_Y = 470;
+      const HIT_RADIUS = 45;
+      const TARGET_SUCCESS = 5;
+      const TARGET_FAIL = 3;
+      const relayContext = window.RelayRuntime?.readContext("parachute-drop") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        successes: 0,
+        fails: 0,
+        attempts: 0,
+        wind: 0,
+        plane: { x: -80, y: 74, speed: 150 },
+        target: { x: 480 },
+        cargo: null,
+        effects: [],
+        failReason: "",
+        note: "바람을 읽어 짐을 목표 지점에 떨구세요",
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function newAttempt() {
+        state.attempts += 1;
+        state.target.x = 150 + Math.random() * 660;
+        state.wind = Math.round((Math.random() * 2 - 1) * 45);
+        state.cargo = null;
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.successes = 0;
+        state.fails = 0;
+        state.attempts = 0;
+        state.plane.x = -80;
+        state.plane.speed = 150;
+        state.effects = [];
+        state.failReason = "";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+        newAttempt();
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.failReason = reason;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function dropCargo() {
+        if (state.mode !== "running" || state.cargo) {
+          return;
+        }
+        state.cargo = {
+          x: state.plane.x,
+          y: state.plane.y + 16,
+          vx: state.plane.speed,
+          vy: 0,
+          chute: false,
+          t: 0,
+        };
+      }
+
+      function stepCargo(cargo, dt, wind) {
+        cargo.t += dt;
+        if (!cargo.chute) {
+          cargo.vy += 380 * dt;
+          if (cargo.t > 0.35) {
+            cargo.chute = true;
+          }
+        } else {
+          cargo.vy += (135 - cargo.vy) * Math.min(1, 3 * dt);
+          cargo.vx += (wind - cargo.vx) * Math.min(1, 1.2 * dt);
+        }
+        cargo.x += cargo.vx * dt;
+        cargo.y += cargo.vy * dt;
+      }
+
+      function resolveLanding() {
+        const cargo = state.cargo;
+        const dist = Math.abs(cargo.x - state.target.x);
+        const hit = dist <= HIT_RADIUS;
+        state.effects.push({
+          x: cargo.x,
+          y: GROUND_Y,
+          t: 0,
+          hit,
+        });
+        state.cargo = null;
+        if (hit) {
+          state.successes += 1;
+          if (state.successes >= TARGET_SUCCESS) {
+            clearStage();
+            return;
+          }
+        } else {
+          state.fails += 1;
+          if (state.fails >= TARGET_FAIL) {
+            failStage("cargo_missed_3");
+            return;
+          }
+        }
+        newAttempt();
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        state.plane.x += state.plane.speed * dt;
+        if (state.plane.x > VIEW.width + 90) {
+          state.plane.x = -90;
+        }
+        if (state.cargo) {
+          stepCargo(state.cargo, dt, state.wind);
+          if (state.cargo.y >= GROUND_Y) {
+            resolveLanding();
+          }
+        }
+        for (const effect of state.effects) {
+          effect.t += dt;
+        }
+        state.effects = state.effects.filter((effect) => effect.t < 0.9);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 226 + index * 44);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function renderScene() {
+        const sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+        sky.addColorStop(0, "#0c1e3e");
+        sky.addColorStop(0.6, "#1d4e89");
+        sky.addColorStop(1, "#7cb8e8");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, VIEW.width, GROUND_Y);
+
+        ctx.fillStyle = "rgba(255, 255, 255, 0.75)";
+        for (let i = 0; i < 5; i += 1) {
+          const cx = ((i * 217 + 120) % 900) + 30;
+          const cy = 40 + (i % 3) * 55;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, 46, 14, 0, 0, Math.PI * 2);
+          ctx.ellipse(cx + 34, cy + 6, 30, 10, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = "#3f6212";
+        ctx.fillRect(0, GROUND_Y, VIEW.width, VIEW.height - GROUND_Y);
+        ctx.fillStyle = "#4d7c0f";
+        ctx.fillRect(0, GROUND_Y, VIEW.width, 8);
+
+        const tx = state.target.x;
+        const rings = [
+          { r: 72, color: "rgba(248, 250, 252, 0.9)" },
+          { r: 52, color: "#ef4444" },
+          { r: HIT_RADIUS - 13, color: "rgba(248, 250, 252, 0.95)" },
+          { r: 14, color: "#ef4444" },
+        ];
+        for (const ring of rings) {
+          ctx.fillStyle = ring.color;
+          ctx.beginPath();
+          ctx.ellipse(tx, GROUND_Y + 10, ring.r, ring.r * 0.28, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        const poleX = tx + 96;
+        ctx.strokeStyle = "#e2e8f0";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(poleX, GROUND_Y + 4);
+        ctx.lineTo(poleX, GROUND_Y - 56);
+        ctx.stroke();
+        const windDir = state.wind >= 0 ? 1 : -1;
+        const flagLen = 16 + Math.min(28, Math.abs(state.wind) * 0.6);
+        ctx.fillStyle = "#f97316";
+        ctx.beginPath();
+        ctx.moveTo(poleX, GROUND_Y - 56);
+        ctx.lineTo(poleX + flagLen * windDir, GROUND_Y - 48);
+        ctx.lineTo(poleX, GROUND_Y - 40);
+        ctx.closePath();
+        ctx.fill();
+
+        if (state.mode === "running" && !state.cargo) {
+          const ghost = {
+            x: state.plane.x,
+            y: state.plane.y + 16,
+            vx: state.plane.speed,
+            vy: 0,
+            chute: false,
+            t: 0,
+          };
+          const points = [];
+          let guard = 0;
+          while (ghost.y < GROUND_Y && guard < 600) {
+            stepCargo(ghost, 1 / 30, state.wind);
+            guard += 1;
+            if (guard % 4 === 0) {
+              points.push({ x: ghost.x, y: ghost.y });
+            }
+          }
+          points.push({ x: ghost.x, y: GROUND_Y });
+          ctx.fillStyle = "rgba(254, 240, 138, 0.9)";
+          for (const point of points) {
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 3.4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        const plane = state.plane;
+        ctx.save();
+        ctx.translate(plane.x, plane.y);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.beginPath();
+        ctx.moveTo(-34, 6);
+        ctx.lineTo(30, 6);
+        ctx.quadraticCurveTo(44, 0, 30, -6);
+        ctx.lineTo(-30, -6);
+        ctx.quadraticCurveTo(-40, 0, -34, 6);
+        ctx.fill();
+        ctx.fillStyle = "#94a3b8";
+        ctx.fillRect(-12, -18, 10, 12);
+        ctx.fillStyle = "#0ea5e9";
+        ctx.beginPath();
+        ctx.ellipse(16, -4, 8, 4, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#cbd5e1";
+        ctx.fillRect(-6, -3, 26, 5);
+        ctx.restore();
+
+        if (state.cargo) {
+          const cargo = state.cargo;
+          if (cargo.chute) {
+            ctx.strokeStyle = "rgba(248, 250, 252, 0.85)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cargo.x - 22, cargo.y - 22);
+            ctx.lineTo(cargo.x - 7, cargo.y - 4);
+            ctx.moveTo(cargo.x + 22, cargo.y - 22);
+            ctx.lineTo(cargo.x + 7, cargo.y - 4);
+            ctx.moveTo(cargo.x, cargo.y - 26);
+            ctx.lineTo(cargo.x, cargo.y - 4);
+            ctx.stroke();
+            ctx.fillStyle = "#f97316";
+            ctx.beginPath();
+            ctx.arc(cargo.x, cargo.y - 22, 26, Math.PI, 0);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = "#fdba74";
+            ctx.beginPath();
+            ctx.arc(cargo.x, cargo.y - 22, 26, Math.PI * 1.15, Math.PI * 1.35);
+            ctx.lineTo(cargo.x, cargo.y - 22);
+            ctx.fill();
+          }
+          ctx.fillStyle = "#a16207";
+          ctx.fillRect(cargo.x - 9, cargo.y - 8, 18, 16);
+          ctx.strokeStyle = "#713f12";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(cargo.x - 9, cargo.y - 8, 18, 16);
+        }
+
+        for (const effect of state.effects) {
+          const progress = effect.t / 0.9;
+          const radius = 12 + progress * 46;
+          ctx.strokeStyle = effect.hit
+            ? `rgba(74, 222, 128, ${1 - progress})`
+            : `rgba(248, 113, 113, ${1 - progress})`;
+          ctx.lineWidth = 5 * (1 - progress) + 1;
+          ctx.beginPath();
+          ctx.ellipse(effect.x, effect.y + 6, radius, radius * 0.35, 0, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, 46);
+        ctx.fillStyle = "#4ade80";
+        ctx.font = "800 22px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`성공 ${state.successes}/${TARGET_SUCCESS}`, 18, 31);
+        ctx.fillStyle = "#f87171";
+        ctx.fillText(`실패 ${state.fails}/${TARGET_FAIL}`, 150, 31);
+
+        const windLabel = state.wind === 0 ? "바람 없음" : `풍속 ${Math.abs(state.wind)} ${state.wind > 0 ? "→" : "←"}`;
+        ctx.fillStyle = "#fde68a";
+        ctx.textAlign = "center";
+        ctx.fillText(windLabel, VIEW.width / 2, 31);
+        const arrowY = 23;
+        const arrowX = VIEW.width / 2 + 118;
+        if (state.wind !== 0) {
+          ctx.strokeStyle = "#fde68a";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(arrowX - 22, arrowY);
+          ctx.lineTo(arrowX + 22, arrowY);
+          ctx.stroke();
+          ctx.fillStyle = "#fde68a";
+          const tipX = state.wind > 0 ? arrowX + 22 : arrowX - 22;
+          const backX = state.wind > 0 ? arrowX + 12 : arrowX - 12;
+          ctx.beginPath();
+          ctx.moveTo(tipX, arrowY);
+          ctx.lineTo(backX, arrowY - 7);
+          ctx.lineTo(backX, arrowY + 7);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        ctx.fillStyle = "#e2e8f0";
+        ctx.textAlign = "right";
+        ctx.fillText("터치로 투하", VIEW.width - 18, 31);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderScene();
+          renderCard("낙하 투하", [
+            "바람을 읽어 짐을 목표 지점에 떨구세요",
+            "조작: 터치로 투하",
+            "클리어 조건: 짐 5개를 목표 안에 떨구면 클리어",
+            "실패 조건: 3개를 빗나가면 실패",
+            "점선은 예상 낙하 궤적이에요",
+            "터치 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderScene();
+          renderHud();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderScene();
+          renderCard("실패", [
+            "3개를 빗나가면 실패",
+            `성공 ${state.successes}/${TARGET_SUCCESS} · 실패 ${state.fails}/${TARGET_FAIL}`,
+            "공유 목숨 1개가 즉시 종료되었습니다.",
+            "터치 또는 Enter로 다시 도전할 수 있어요",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderScene();
+        renderCard("클리어", [
+          "짐 5개를 목표 안에 떨구면 클리어",
+          `시도 ${state.attempts}회 · ${state.lastRunTime.toFixed(1)}초`,
+          "호스트가 다음 미플레이 스테이지를 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down, ground_y=470",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          successes: state.successes,
+          fails: state.fails,
+          wind: state.wind,
+          plane_x: Math.round(state.plane.x),
+          target_x: Math.round(state.target.x),
+          cargo: state.cargo
+            ? { x: Math.round(state.cargo.x), y: Math.round(state.cargo.y), chute: state.cargo.chute }
+            : null,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+          return;
+        }
+        if ((event.key === " " || event.key === "Enter") && state.mode === "running") {
+          event.preventDefault();
+          dropCargo();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "parachute-drop",
+        title: "낙하 투하",
+        creator: "Anonymous Creator",
+        genre: "Drop timing",
+        clearCondition: "짐 5개를 목표 안에 떨구면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        dropCargo();
+      });
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

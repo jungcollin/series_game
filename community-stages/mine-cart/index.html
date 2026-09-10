@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=0.0, user-scalable=no" />
+    <title>광산 카트</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">광산 카트. 화면을 터치하거나 Enter로 시작하세요. 카트는 자동으로 전진하며, 화면 터치 또는 스페이스 키로 분기 레일의 방향(위/아래)을 전환합니다. 보석이 있는 레일로 가면 보석을 수집하고, 끊어진 레일로 가면 추락합니다. 보석 10개를 모두 수집하면 클리어, 3회 추락 또는 90초 초과 시 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="광산 카트" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("mine-cart") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const GEM_GOAL = 10;
+      const CRASH_LIMIT = 3;
+      const TIME_LIMIT = 90;
+      const CART_SCREEN_X = 220;
+      const LANE_MAIN = 380;
+      const LANE_UP = 292;
+      const LANE_DOWN = 452;
+      const STRAIGHT_LEN = 170;
+      const BRANCH_LEN = 360;
+      const SPLIT_LEN = 70;
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        worldX: 0,
+        cartY: LANE_MAIN,
+        selectedLane: 0, // 0 = up, 1 = down
+        gems: 0,
+        crashes: 0,
+        segmentsPassed: 0,
+        invuln: 0,
+        failReason: "",
+        note: "분기점에서 레일을 바꿔 보석을 모으세요",
+        shake: 0,
+      };
+
+      let segments = [];
+      let particles = [];
+
+      function speed() {
+        return Math.min(330, 170 + state.segmentsPassed * 6);
+      }
+
+      function pushSegment() {
+        const last = segments[segments.length - 1];
+        const startX = last ? last.startX + last.len : 0;
+        const index = segments.length;
+        if (index === 0) {
+          segments.push({ startX, len: 480, branch: false, entered: false });
+          return;
+        }
+        const branch = index % 2 === 0; // alternate: straight, branch, straight, branch...
+        if (!branch) {
+          segments.push({ startX, len: STRAIGHT_LEN, branch: false, entered: false });
+          return;
+        }
+        const gemLane = Math.random() < 0.5 ? 0 : 1;
+        const otherLane = 1 - gemLane;
+        const brokenLane = Math.random() < 0.55 ? otherLane : -1;
+        segments.push({
+          startX,
+          len: BRANCH_LEN,
+          branch: true,
+          entered: false,
+          lockedLane: 0,
+          gemLane,
+          gemX: startX + SPLIT_LEN + (BRANCH_LEN - SPLIT_LEN * 2) * 0.5,
+          gemTaken: false,
+          brokenLane,
+          pitX: startX + SPLIT_LEN + (BRANCH_LEN - SPLIT_LEN * 2) * 0.45,
+          counted: false,
+        });
+      }
+
+      function ensureSegments() {
+        while (segments.length === 0 || segments[segments.length - 1].startX + segments[segments.length - 1].len < state.worldX + VIEW.width + 600) {
+          pushSegment();
+        }
+      }
+
+      function segmentAt(x) {
+        for (const seg of segments) {
+          if (x >= seg.startX && x < seg.startX + seg.len) return seg;
+        }
+        return segments[segments.length - 1];
+      }
+
+      function laneY(lane) {
+        return lane === 0 ? LANE_UP : LANE_DOWN;
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.worldX = 0;
+        state.cartY = LANE_MAIN;
+        state.selectedLane = 0;
+        state.gems = 0;
+        state.crashes = 0;
+        state.segmentsPassed = 0;
+        state.invuln = 0;
+        state.failReason = "";
+        state.shake = 0;
+        segments = [];
+        particles = [];
+        ensureSegments();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.failReason = reason;
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function toggleLane() {
+        state.selectedLane = 1 - state.selectedLane;
+      }
+
+      function spawnBurst(x, y, color, count) {
+        for (let i = 0; i < count; i += 1) {
+          particles.push({
+            x, y,
+            vx: (Math.random() - 0.5) * 240,
+            vy: -60 - Math.random() * 180,
+            life: 0.6 + Math.random() * 0.4,
+            age: 0,
+            color,
+          });
+        }
+      }
+
+      function crash(seg) {
+        state.crashes += 1;
+        state.shake = 1;
+        spawnBurst(CART_SCREEN_X, state.cartY, "#94a3b8", 20);
+        if (state.crashes >= CRASH_LIMIT) {
+          failStage("카트가 3회 추락했습니다");
+          return;
+        }
+        // restart just before this branch (single run rule: crash count only)
+        state.worldX = Math.max(0, seg.startX - 140);
+        state.cartY = LANE_MAIN;
+        state.invuln = 1.2;
+      }
+
+      function update(dt) {
+        particles.forEach((p) => {
+          p.age += dt;
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 480 * dt;
+        });
+        particles = particles.filter((p) => p.age < p.life);
+
+        if (state.mode !== "running") return;
+
+        state.elapsed += dt;
+        if (state.elapsed >= TIME_LIMIT) {
+          failStage("제한 시간 90초를 초과했습니다");
+          return;
+        }
+        if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 3);
+        if (state.invuln > 0) state.invuln = Math.max(0, state.invuln - dt);
+
+        state.worldX += speed() * dt;
+        ensureSegments();
+
+        const seg = segmentAt(state.worldX);
+        if (!seg.counted && state.worldX > seg.startX + seg.len * 0.5) {
+          seg.counted = true;
+          state.segmentsPassed += 1;
+        }
+
+        let targetY = LANE_MAIN;
+        if (seg.branch) {
+          if (!seg.entered) {
+            seg.entered = true;
+            seg.lockedLane = state.selectedLane;
+          }
+          targetY = laneY(seg.lockedLane);
+
+          // gem pickup
+          if (!seg.gemTaken && seg.lockedLane === seg.gemLane && state.worldX >= seg.gemX) {
+            seg.gemTaken = true;
+            state.gems += 1;
+            spawnBurst(CART_SCREEN_X, targetY - 26, "#7dd3fc", 16);
+            if (state.gems >= GEM_GOAL) {
+              clearStage();
+              return;
+            }
+          }
+
+          // broken rail pit
+          if (state.invuln <= 0 && seg.brokenLane === seg.lockedLane && state.worldX >= seg.pitX) {
+            crash(seg);
+            return;
+          }
+        }
+        state.cartY += (targetY - state.cartY) * Math.min(1, dt * 10);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(148, 82, 664, 376);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(148, 82, 664, 376);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 152);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 23px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 224 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function drawRail(x1, y1, x2, y2) {
+        ctx.strokeStyle = "#78716c";
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1 - 5);
+        ctx.lineTo(x2, y2 - 5);
+        ctx.moveTo(x1, y1 + 5);
+        ctx.lineTo(x2, y2 + 5);
+        ctx.stroke();
+      }
+
+      function renderScene() {
+        // cave background
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#111827");
+        grad.addColorStop(1, "#1c1917");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // parallax rock specks and support beams
+        const par = state.worldX * 0.35;
+        ctx.fillStyle = "rgba(148,163,184,0.18)";
+        for (let i = 0; i < 40; i += 1) {
+          const rx = ((i * 173 - par) % (VIEW.width + 80) + VIEW.width + 80) % (VIEW.width + 80) - 40;
+          const ry = 60 + ((i * 97) % 400);
+          ctx.fillRect(rx, ry, 6, 6);
+        }
+        ctx.strokeStyle = "#44403c";
+        ctx.lineWidth = 10;
+        for (let i = 0; i < 8; i += 1) {
+          const bx = ((i * 260 - par * 1.6) % (VIEW.width + 300) + VIEW.width + 300) % (VIEW.width + 300) - 150;
+          ctx.beginPath();
+          ctx.moveTo(bx, 40);
+          ctx.lineTo(bx, 200);
+          ctx.stroke();
+          ctx.fillStyle = "#44403c";
+          ctx.fillRect(bx - 40, 36, 80, 12);
+        }
+
+        if (state.shake > 0) {
+          ctx.save();
+          ctx.translate((Math.random() - 0.5) * 10 * state.shake, (Math.random() - 0.5) * 10 * state.shake);
+        }
+
+        const camX = state.worldX - CART_SCREEN_X;
+
+        // rails
+        for (const seg of segments) {
+          const sx = seg.startX - camX;
+          const ex = seg.startX + seg.len - camX;
+          if (ex < -80 || sx > VIEW.width + 80) continue;
+
+          if (!seg.branch) {
+            drawRail(sx, LANE_MAIN, ex, LANE_MAIN);
+          } else {
+            // split from main to both lanes
+            drawRail(sx, LANE_MAIN, sx + SPLIT_LEN, LANE_UP);
+            drawRail(sx, LANE_MAIN, sx + SPLIT_LEN, LANE_DOWN);
+            // lane bodies
+            const pitGapX = seg.pitX - camX;
+            for (let lane = 0; lane < 2; lane += 1) {
+              const ly = laneY(lane);
+              const laneStart = sx + SPLIT_LEN;
+              const laneEnd = ex - SPLIT_LEN;
+              if (seg.brokenLane === lane) {
+                // rail stops before the pit and resumes after
+                drawRail(laneStart, ly, pitGapX - 10, ly);
+                drawRail(pitGapX + 100, ly, laneEnd, ly);
+                // pit hole
+                ctx.fillStyle = "#020617";
+                ctx.beginPath();
+                ctx.ellipse(pitGapX + 45, ly + 22, 62, 26, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = "#7f1d1d";
+                ctx.lineWidth = 3;
+                ctx.stroke();
+                ctx.fillStyle = "#fca5a5";
+                ctx.font = "700 15px Trebuchet MS";
+                ctx.textAlign = "center";
+                ctx.fillText("단선!", pitGapX + 45, ly - 22);
+              } else {
+                drawRail(laneStart, ly, laneEnd, ly);
+              }
+            }
+            // merge back to main
+            drawRail(ex - SPLIT_LEN, LANE_UP, ex, LANE_MAIN);
+            drawRail(ex - SPLIT_LEN, LANE_DOWN, ex, LANE_MAIN);
+
+            // gem
+            if (!seg.gemTaken) {
+              const gx = seg.gemX - camX;
+              const gy = laneY(seg.gemLane) - 30;
+              const tw = 0.7 + 0.3 * Math.sin(state.elapsed * 5 + seg.startX);
+              ctx.save();
+              ctx.translate(gx, gy);
+              ctx.scale(tw, 1);
+              ctx.fillStyle = "#38bdf8";
+              ctx.beginPath();
+              ctx.moveTo(0, -16);
+              ctx.lineTo(12, 0);
+              ctx.lineTo(0, 16);
+              ctx.lineTo(-12, 0);
+              ctx.closePath();
+              ctx.fill();
+              ctx.fillStyle = "rgba(224,242,254,0.9)";
+              ctx.beginPath();
+              ctx.moveTo(0, -16);
+              ctx.lineTo(6, -4);
+              ctx.lineTo(-6, -4);
+              ctx.closePath();
+              ctx.fill();
+              ctx.restore();
+            }
+
+            // switch signpost just before the branch
+            const signX = sx - 60;
+            ctx.strokeStyle = "#a16207";
+            ctx.lineWidth = 6;
+            ctx.beginPath();
+            ctx.moveTo(signX, 210);
+            ctx.lineTo(signX, 470);
+            ctx.stroke();
+            const activeLane = seg.entered ? seg.lockedLane : state.selectedLane;
+            for (let lane = 0; lane < 2; lane += 1) {
+              const ay = lane === 0 ? 250 : 420;
+              const active = activeLane === lane;
+              ctx.fillStyle = active ? "#4ade80" : "rgba(148,163,184,0.5)";
+              ctx.beginPath();
+              if (lane === 0) {
+                ctx.moveTo(signX - 18, ay + 12);
+                ctx.lineTo(signX, ay - 14);
+                ctx.lineTo(signX + 18, ay + 12);
+              } else {
+                ctx.moveTo(signX - 18, ay - 12);
+                ctx.lineTo(signX, ay + 14);
+                ctx.lineTo(signX + 18, ay - 12);
+              }
+              ctx.closePath();
+              ctx.fill();
+            }
+          }
+        }
+
+        // rail ties along main line area
+        ctx.fillStyle = "#57534e";
+        for (let wx = Math.floor(camX / 46) * 46; wx < camX + VIEW.width + 46; wx += 46) {
+          const seg = segmentAt(wx + 23);
+          const ys = seg && seg.branch ? [LANE_UP, LANE_DOWN] : [LANE_MAIN];
+          ys.forEach((ly) => {
+            ctx.fillRect(wx - camX - 3, ly - 12, 8, 24);
+          });
+        }
+
+        // cart
+        const blink = state.invuln > 0 && Math.floor(state.invuln * 10) % 2 === 0;
+        if (!blink) {
+          const cy = state.cartY;
+          ctx.save();
+          ctx.translate(CART_SCREEN_X, cy);
+          ctx.fillStyle = "#b45309";
+          ctx.beginPath();
+          ctx.roundRect(-34, -38, 68, 34, 6);
+          ctx.fill();
+          ctx.strokeStyle = "#78350f";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          ctx.fillStyle = "#fbbf24";
+          ctx.font = "700 18px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText(`💎${state.gems}`, 0, -14);
+          const wheelRot = state.worldX / 14;
+          for (const wxOff of [-20, 20]) {
+            ctx.save();
+            ctx.translate(wxOff, 0);
+            ctx.rotate(wheelRot);
+            ctx.fillStyle = "#1c1917";
+            ctx.beginPath();
+            ctx.arc(0, 0, 11, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#a8a29e";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(-8, 0);
+            ctx.lineTo(8, 0);
+            ctx.moveTo(0, -8);
+            ctx.lineTo(0, 8);
+            ctx.stroke();
+            ctx.restore();
+          }
+          ctx.restore();
+
+          // next-direction indicator above cart
+          ctx.fillStyle = "rgba(15,23,42,0.85)";
+          ctx.beginPath();
+          ctx.roundRect(CART_SCREEN_X - 40, state.cartY - 100, 80, 40, 10);
+          ctx.fill();
+          ctx.fillStyle = "#4ade80";
+          ctx.font = "800 24px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText(state.selectedLane === 0 ? "▲ 위" : "▼ 아래", CART_SCREEN_X, state.cartY - 71);
+        }
+
+        // particles
+        particles.forEach((p) => {
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = 1 - p.age / p.life;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        });
+
+        if (state.shake > 0) ctx.restore();
+
+        // HUD
+        const timeLeft = Math.max(0, TIME_LIMIT - state.elapsed);
+        ctx.fillStyle = "rgba(15,23,42,0.8)";
+        ctx.fillRect(0, 0, VIEW.width, 56);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 24px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`보석 ${state.gems}/${GEM_GOAL}`, 24, 38);
+        ctx.fillStyle = state.crashes > 0 ? "#f87171" : "#f8fafc";
+        ctx.fillText(`추락 ${state.crashes}/${CRASH_LIMIT}`, 210, 38);
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillText(`속도 ${Math.round(speed())}`, 390, 38);
+        ctx.fillStyle = timeLeft < 15 ? "#f87171" : "#f8fafc";
+        ctx.textAlign = "right";
+        ctx.fillText(`남은 시간 ${timeLeft.toFixed(1)}초`, VIEW.width - 24, 38);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("광산 카트", [
+            "카트는 자동 전진! 분기점에서 위/아래 레일을 전환하세요",
+            "조작: 터치로 분기 레일 전환",
+            "모바일: 화면 아무 곳이나 터치하면 방향이 바뀝니다",
+            "클리어 조건: 보석 10개를 모두 수집하면 클리어",
+            "실패 조건: 3회 추락 또는 시간 초과(90초) 시 실패",
+            "터치 또는 Enter로 시작",
+          ], "#38bdf8");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderScene();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "3회 추락 또는 시간 초과 시 실패",
+            `사유: ${state.failReason || "추락"}`,
+            `수집한 보석: ${state.gems}개`,
+            "화면을 터치해 다시 도전하세요",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderCard("클리어", [
+          "보석 10개를 모두 수집했습니다!",
+          `걸린 시간: ${state.lastRunTime.toFixed(1)}초`,
+          `추락: ${state.crashes}회`,
+          "화면을 터치해 다시 플레이할 수 있습니다",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        const seg = state.mode === "running" ? segmentAt(state.worldX) : null;
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540, cart fixed at screen x=220, world scrolls left; lanes y: main=380 up=292 down=452",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          time_left: Math.round(Math.max(0, TIME_LIMIT - state.elapsed) * 10) / 10,
+          world_x: Math.round(state.worldX),
+          cart_y: Math.round(state.cartY),
+          selected_lane: state.selectedLane === 0 ? "up" : "down",
+          speed: Math.round(speed()),
+          gems: state.gems,
+          gem_goal: GEM_GOAL,
+          crashes: state.crashes,
+          crash_limit: CRASH_LIMIT,
+          current_segment: seg
+            ? {
+                branch: seg.branch,
+                gem_lane: seg.branch ? (seg.gemLane === 0 ? "up" : "down") : null,
+                broken_lane: seg.branch ? (seg.brokenLane === -1 ? "none" : seg.brokenLane === 0 ? "up" : "down") : null,
+                gem_taken: !!seg.gemTaken,
+              }
+            : null,
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (state.mode !== "running") return;
+        if (event.key === " " || event.key === "ArrowUp" || event.key === "ArrowDown") {
+          event.preventDefault();
+          toggleLane();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "mine-cart",
+        title: "광산 카트",
+        creator: "Anonymous Creator",
+        genre: "Switch timing",
+        clearCondition: "보석 10개를 모두 수집하면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+          return;
+        }
+        toggleLane();
+      });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

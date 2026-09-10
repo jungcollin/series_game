@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>관람차 탑승</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">관람차 탑승. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 터치로 탑승 입니다. 회전하는 캐빈이 아래 녹색 탑승구에 들어올 때 터치하면 손님이 탑니다. 타이밍이 어긋나면 미스 1회입니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="관람차 탑승" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("ferris-wheel") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const CENTER = { x: VIEW.width / 2, y: 250 };
+      const RADIUS = 170;
+      const CABIN_COUNT = 6;
+      const ZONE_CENTER = Math.PI / 2; // 바닥 방향
+      const ZONE_HALF = 0.28; // 라디안, 녹색 존 반폭
+      const BASE_SPEED = 0.55; // rad/s
+
+      const CABIN_COLORS = ["#f87171", "#fbbf24", "#4ade80", "#60a5fa", "#c084fc", "#f472b6"];
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "돌아가는 캐빈이 아래에 올 때 손님을 태우세요",
+        angle: 0,
+        direction: 1,
+        boarded: 0,
+        missed: 0,
+        cabins: [],
+        flash: 0,
+        flashKind: "",
+        sparks: [],
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function resetCabins() {
+        state.cabins = [];
+        for (let i = 0; i < CABIN_COUNT; i += 1) {
+          state.cabins.push({ offset: (i / CABIN_COUNT) * Math.PI * 2, wasInZone: false });
+        }
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.angle = 0;
+        state.direction = 1;
+        state.boarded = 0;
+        state.missed = 0;
+        state.flash = 0;
+        state.sparks = [];
+        resetCabins();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function rotationSpeed() {
+        return BASE_SPEED + state.boarded * 0.12;
+      }
+
+      function cabinAngle(cabin) {
+        return (cabin.offset + state.angle) % (Math.PI * 2);
+      }
+
+      function angleDistance(a, b) {
+        let d = (a - b) % (Math.PI * 2);
+        if (d > Math.PI) d -= Math.PI * 2;
+        if (d < -Math.PI) d += Math.PI * 2;
+        return Math.abs(d);
+      }
+
+      function cabinInZone(cabin) {
+        return angleDistance(cabinAngle(cabin), ZONE_CENTER) <= ZONE_HALF;
+      }
+
+      function addSparks(x, y, color) {
+        for (let i = 0; i < 14; i += 1) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 60 + Math.random() * 140;
+          state.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.7, color });
+        }
+      }
+
+      function tryBoard() {
+        if (state.mode !== "running") {
+          return;
+        }
+        const target = state.cabins.find((cabin) => cabinInZone(cabin));
+        if (target) {
+          state.boarded += 1;
+          state.flash = 0.35;
+          state.flashKind = "boarded";
+          addSparks(CENTER.x + Math.cos(cabinAngle(target)) * RADIUS, CENTER.y + Math.sin(cabinAngle(target)) * RADIUS + 20, "#4ade80");
+          target.served = true; // 이 패스는 미스로 세지 않음
+          // 진행에 따라 가끔 방향 전환
+          if (state.boarded === 4 || state.boarded === 6) {
+            state.direction *= -1;
+          }
+          if (state.boarded >= 8) {
+            clearStage();
+          }
+        } else {
+          state.missed += 1;
+          state.flash = 0.35;
+          state.flashKind = "miss";
+          if (state.missed >= 3) {
+            failStage("missed_3_guests");
+          }
+        }
+      }
+
+      function update(dt) {
+        if (state.flash > 0) state.flash = Math.max(0, state.flash - dt);
+        for (const s of state.sparks) {
+          s.x += s.vx * dt;
+          s.y += s.vy * dt;
+          s.vy += 300 * dt;
+          s.life -= dt;
+        }
+        state.sparks = state.sparks.filter((s) => s.life > 0);
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        state.angle = (state.angle + state.direction * rotationSpeed() * dt) % (Math.PI * 2);
+
+        // 존을 그냥 지나친 캐빈은 미스 처리 (패스당 1회)
+        for (const cabin of state.cabins) {
+          const inZone = cabinInZone(cabin);
+          if (inZone && !cabin.wasInZone) {
+            cabin.served = false;
+          }
+          if (!inZone && cabin.wasInZone && !cabin.served) {
+            state.missed += 1;
+            state.flash = 0.35;
+            state.flashKind = "miss";
+            if (state.missed >= 3) {
+              failStage("missed_3_guests");
+              return;
+            }
+          }
+          cabin.wasInZone = inZone;
+        }
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 46);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function renderScene() {
+        // 야경
+        const sky = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        sky.addColorStop(0, "#0b1026");
+        sky.addColorStop(1, "#1e1b4b");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        ctx.fillStyle = "#fef9c3";
+        for (let i = 0; i < 40; i += 1) {
+          const sx = (i * 197) % VIEW.width;
+          const sy = (i * 89) % 200;
+          ctx.globalAlpha = 0.3 + 0.3 * Math.sin(state.elapsed * 2 + i);
+          ctx.fillRect(sx, sy, 2, 2);
+        }
+        ctx.globalAlpha = 1;
+        // 지면
+        ctx.fillStyle = "#14532d";
+        ctx.fillRect(0, 470, VIEW.width, 70);
+
+        // 탑승구 녹색 존 (바닥 호)
+        ctx.save();
+        ctx.strokeStyle = "rgba(74, 222, 128, 0.9)";
+        ctx.lineWidth = 14;
+        ctx.beginPath();
+        ctx.arc(CENTER.x, CENTER.y, RADIUS + 26, ZONE_CENTER - ZONE_HALF, ZONE_CENTER + ZONE_HALF);
+        ctx.stroke();
+        ctx.restore();
+
+        // 관람차 구조물
+        ctx.strokeStyle = "#94a3b8";
+        ctx.lineWidth = 8;
+        ctx.beginPath();
+        ctx.moveTo(CENTER.x - 90, 470);
+        ctx.lineTo(CENTER.x, CENTER.y);
+        ctx.lineTo(CENTER.x + 90, 470);
+        ctx.stroke();
+        ctx.strokeStyle = "#64748b";
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.arc(CENTER.x, CENTER.y, RADIUS, 0, Math.PI * 2);
+        ctx.stroke();
+        for (const cabin of state.cabins) {
+          const a = cabinAngle(cabin);
+          ctx.beginPath();
+          ctx.moveTo(CENTER.x, CENTER.y);
+          ctx.lineTo(CENTER.x + Math.cos(a) * RADIUS, CENTER.y + Math.sin(a) * RADIUS);
+          ctx.stroke();
+        }
+
+        // 캐빈
+        state.cabins.forEach((cabin, i) => {
+          const a = cabinAngle(cabin);
+          const cx = CENTER.x + Math.cos(a) * RADIUS;
+          const cy = CENTER.y + Math.sin(a) * RADIUS;
+          const inZone = cabinInZone(cabin);
+          ctx.save();
+          if (inZone && state.mode === "running") {
+            ctx.shadowColor = "#4ade80";
+            ctx.shadowBlur = 24;
+          }
+          ctx.fillStyle = CABIN_COLORS[i % CABIN_COLORS.length];
+          ctx.beginPath();
+          ctx.roundRect(cx - 24, cy - 6, 48, 40, 10);
+          ctx.fill();
+          ctx.restore();
+          ctx.fillStyle = "rgba(15, 23, 42, 0.55)";
+          ctx.fillRect(cx - 14, cy + 2, 28, 16);
+        });
+
+        // 대기 손님
+        const waiting = 8 - state.boarded;
+        ctx.font = "28px Trebuchet MS";
+        for (let i = 0; i < Math.min(waiting, 5); i += 1) {
+          ctx.fillText("🧍", CENTER.x - 60 + i * 30, 505);
+        }
+
+        // 파티클
+        for (const s of state.sparks) {
+          ctx.globalAlpha = Math.max(0, s.life / 0.7);
+          ctx.fillStyle = s.color;
+          ctx.fillRect(s.x - 2, s.y - 2, 4, 4);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, 56);
+        ctx.fillStyle = "#4ade80";
+        ctx.font = "800 24px Trebuchet MS";
+        ctx.fillText(`탑승 ${state.boarded}/8`, 24, 38);
+        ctx.fillStyle = "#f87171";
+        ctx.textAlign = "right";
+        ctx.fillText(`미스 ${state.missed}/3`, VIEW.width - 24, 38);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "700 20px Trebuchet MS";
+        ctx.fillText("캐빈이 녹색 존에 오면 터치!", VIEW.width / 2, 36);
+        ctx.textAlign = "left";
+
+        if (state.flash > 0) {
+          ctx.fillStyle = state.flashKind === "boarded"
+            ? `rgba(34, 197, 94, ${state.flash * 0.5})`
+            : `rgba(239, 68, 68, ${state.flash * 0.5})`;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderScene();
+          renderCard("관람차 탑승", [
+            "돌아가는 캐빈이 아래에 올 때 손님을 태우세요",
+            "조작: 터치로 탑승",
+            "키보드: 스페이스 또는 Enter로 탑승",
+            "클리어 조건: 손님 8명을 태우면 클리어",
+            "실패 조건: 3명을 놓치면 실패",
+            "터치 또는 Enter로 시작",
+          ], "#c084fc");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderScene();
+          renderHud();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderScene();
+          renderCard("실패", [
+            "3명을 놓치면 실패",
+            `탑승 ${state.boarded}/8 · 소요 ${state.lastRunTime.toFixed(1)}초`,
+            "캐빈이 녹색 존에 들어올 때만 터치하세요.",
+            "터치 또는 Enter로 다시 도전",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderScene();
+        renderCard("클리어", [
+          "손님 8명을 태우면 클리어",
+          `미스 ${state.missed}/3 · 소요 ${state.lastRunTime.toFixed(1)}초`,
+          "모든 손님이 야경을 즐깁니다!",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down, ferris wheel center (480,250) r170",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          boarded: state.boarded,
+          missed: state.missed,
+          rotation_speed: Number(rotationSpeed().toFixed(2)),
+          direction: state.direction,
+          cabins_in_zone: state.cabins.filter((c) => cabinInZone(c)).length,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (state.mode !== "running") {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            startStage();
+          }
+          return;
+        }
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          tryBoard();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "ferris-wheel",
+        title: "관람차 탑승",
+        creator: "Anonymous Creator",
+        genre: "Rotation timing",
+        clearCondition: "손님 8명을 태우면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        if (state.mode !== "running") {
+          startFromTouch();
+        } else {
+          tryBoard();
+        }
+      });
+      canvas.addEventListener("touchstart", (event) => {
+        event.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

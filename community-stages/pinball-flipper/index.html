@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>핀볼</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">핀볼. 캔버스를 터치하거나 Enter로 시작하세요. 화면 좌우 터치로 플리퍼 조작: 화면 왼쪽 절반을 터치하면 왼쪽 플리퍼, 오른쪽 절반을 터치하면 오른쪽 플리퍼가 올라갑니다. 키보드는 왼쪽/오른쪽 화살표 키입니다. 범퍼는 200점, 타깃은 300점입니다. 5000점을 달성하면 클리어, 공 3개를 아래로 떨구면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="핀볼" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("pinball-flipper") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const TARGET_SCORE = 5000;
+      const MAX_BALLS = 3;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        score: 0,
+        ballsLeft: MAX_BALLS,
+        note: "플리퍼로 공을 지키며 타깃을 맞혀 점수를 올리세요",
+        lastEvent: "",
+      };
+
+      // 테이블 레이아웃 (960x540 캔버스 기준)
+      const TABLE = {
+        left: 300,
+        right: 660,
+        top: 50,
+        drainY: 536,
+      };
+
+      const bumpers = [
+        { x: 420, y: 180, r: 30, flash: 0 },
+        { x: 540, y: 150, r: 30, flash: 0 },
+        { x: 480, y: 250, r: 30, flash: 0 },
+      ];
+
+      const targets = [];
+      for (let i = 0; i < 5; i += 1) {
+        targets.push({ x: 340 + i * 70, y: 70, w: 44, h: 16, flash: 0 });
+      }
+
+      const flippers = {
+        left: { pivotX: 392, pivotY: 496, len: 84, rest: 0.45, active: -0.55, angle: 0.45, pressed: false, side: -1 },
+        right: { pivotX: 568, pivotY: 496, len: 84, rest: Math.PI - 0.45, active: Math.PI + 0.55, angle: Math.PI - 0.45, pressed: false, side: 1 },
+      };
+
+      const ball = { x: 620, y: 420, vx: 0, vy: 0, r: 11, live: false, waiting: 0 };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function speedScale() {
+        return 1 + Math.min(state.score / TARGET_SCORE, 1) * 0.45;
+      }
+
+      function spawnBall() {
+        ball.x = TABLE.right - 26;
+        ball.y = 300;
+        ball.vx = 0;
+        ball.vy = -140;
+        ball.live = true;
+        ball.waiting = 0;
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.score = 0;
+        state.ballsLeft = MAX_BALLS;
+        state.lastEvent = "";
+        bumpers.forEach((b) => (b.flash = 0));
+        targets.forEach((t) => (t.flash = 0));
+        flippers.left.pressed = false;
+        flippers.right.pressed = false;
+        spawnBall();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function flipperTip(f) {
+        return { x: f.pivotX + Math.cos(f.angle) * f.len, y: f.pivotY + Math.sin(f.angle) * f.len };
+      }
+
+      function collideSegment(f) {
+        const tip = flipperTip(f);
+        const sx = tip.x - f.pivotX;
+        const sy = tip.y - f.pivotY;
+        const segLenSq = sx * sx + sy * sy;
+        let t = ((ball.x - f.pivotX) * sx + (ball.y - f.pivotY) * sy) / segLenSq;
+        t = Math.max(0, Math.min(1, t));
+        const cx = f.pivotX + sx * t;
+        const cy = f.pivotY + sy * t;
+        const dx = ball.x - cx;
+        const dy = ball.y - cy;
+        const dist = Math.hypot(dx, dy);
+        if (dist >= ball.r + 5) {
+          return;
+        }
+        const nx = dist > 0.001 ? dx / dist : 0;
+        const ny = dist > 0.001 ? dy / dist : -1;
+        ball.x = cx + nx * (ball.r + 5);
+        ball.y = cy + ny * (ball.r + 5);
+        const vn = ball.vx * nx + ball.vy * ny;
+        if (vn < 0) {
+          ball.vx -= 1.8 * vn * nx;
+          ball.vy -= 1.8 * vn * ny;
+        }
+        if (f.pressed) {
+          // 플리퍼 스윙 킥
+          ball.vy -= 620 * Math.abs(Math.cos(f.angle));
+          ball.vx += f.side * -60;
+        }
+      }
+
+      function loseBall() {
+        ball.live = false;
+        state.ballsLeft -= 1;
+        state.lastEvent = "공을 떨궜어요";
+        if (state.ballsLeft <= 0) {
+          failStage("ball_drain");
+        } else {
+          ball.waiting = 0.8;
+        }
+      }
+
+      function addScore(points, label) {
+        state.score += points;
+        state.lastEvent = `${label} +${points}`;
+        if (state.score >= TARGET_SCORE) {
+          clearStage();
+        }
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+
+        bumpers.forEach((b) => (b.flash = Math.max(0, b.flash - dt * 3)));
+        targets.forEach((t) => (t.flash = Math.max(0, t.flash - dt * 3)));
+
+        // 플리퍼 각도 보간
+        ["left", "right"].forEach((key) => {
+          const f = flippers[key];
+          const goal = f.pressed ? f.active : f.rest;
+          f.angle += (goal - f.angle) * Math.min(1, dt * 18);
+        });
+
+        if (!ball.live) {
+          if (ball.waiting > 0) {
+            ball.waiting -= dt;
+            if (ball.waiting <= 0) {
+              spawnBall();
+            }
+          }
+          return;
+        }
+
+        const scale = speedScale();
+        const gravity = 980 * scale;
+        ball.vy += gravity * dt;
+        ball.x += ball.vx * dt;
+        ball.y += ball.vy * dt;
+
+        // 좌우 벽
+        if (ball.x - ball.r < TABLE.left) {
+          ball.x = TABLE.left + ball.r;
+          ball.vx = Math.abs(ball.vx) * 0.82;
+        }
+        if (ball.x + ball.r > TABLE.right) {
+          ball.x = TABLE.right - ball.r;
+          ball.vx = -Math.abs(ball.vx) * 0.82;
+        }
+        // 천장
+        if (ball.y - ball.r < TABLE.top) {
+          ball.y = TABLE.top + ball.r;
+          ball.vy = Math.abs(ball.vy) * 0.82;
+        }
+
+        // 하단 경사면 (플리퍼 쪽으로 공을 몰아주는 슬로프)
+        const slopeTopY = 420;
+        const slopeBottomY = 500;
+        const leftSlopeX0 = TABLE.left;
+        const leftSlopeX1 = flippers.left.pivotX - 6;
+        const rightSlopeX0 = TABLE.right;
+        const rightSlopeX1 = flippers.right.pivotX + 6;
+        if (ball.y > slopeTopY) {
+          const k = (ball.y - slopeTopY) / (slopeBottomY - slopeTopY);
+          const leftX = leftSlopeX0 + (leftSlopeX1 - leftSlopeX0) * k;
+          const rightX = rightSlopeX0 + (rightSlopeX1 - rightSlopeX0) * k;
+          if (ball.x - ball.r < leftX && ball.vx < 0) {
+            ball.x = leftX + ball.r;
+            ball.vx = Math.abs(ball.vx) * 0.6;
+          }
+          if (ball.x + ball.r > rightX && ball.vx > 0) {
+            ball.x = rightX - ball.r;
+            ball.vx = -Math.abs(ball.vx) * 0.6;
+          }
+        }
+
+        // 범퍼
+        bumpers.forEach((b) => {
+          const dx = ball.x - b.x;
+          const dy = ball.y - b.y;
+          const dist = Math.hypot(dx, dy);
+          const minDist = b.r + ball.r;
+          if (dist < minDist && dist > 0.001) {
+            const nx = dx / dist;
+            const ny = dy / dist;
+            ball.x = b.x + nx * minDist;
+            ball.y = b.y + ny * minDist;
+            const vn = ball.vx * nx + ball.vy * ny;
+            ball.vx -= 2 * vn * nx;
+            ball.vy -= 2 * vn * ny;
+            ball.vx += nx * 160 * scale;
+            ball.vy += ny * 160 * scale;
+            b.flash = 1;
+            addScore(200, "범퍼");
+          }
+        });
+
+        // 타깃 (상단 띠 아래 판)
+        targets.forEach((t) => {
+          if (
+            ball.x > t.x &&
+            ball.x < t.x + t.w &&
+            ball.y - ball.r < t.y + t.h &&
+            ball.y > t.y &&
+            ball.vy < 0
+          ) {
+            ball.vy = Math.abs(ball.vy) * 0.9 + 60;
+            t.flash = 1;
+            addScore(300, "타깃");
+          }
+        });
+
+        // 플리퍼
+        collideSegment(flippers.left);
+        collideSegment(flippers.right);
+
+        // 속도 상한
+        const speed = Math.hypot(ball.vx, ball.vy);
+        const cap = 900 * scale;
+        if (speed > cap) {
+          ball.vx = (ball.vx / speed) * cap;
+          ball.vy = (ball.vy / speed) * cap;
+        }
+
+        // 드레인
+        if (ball.y - ball.r > TABLE.drainY) {
+          loseBall();
+        }
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 46);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function drawFlipper(f, color) {
+        const tip = flipperTip(f);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 14;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(f.pivotX, f.pivotY);
+        ctx.lineTo(tip.x, tip.y);
+        ctx.stroke();
+        ctx.lineCap = "butt";
+      }
+
+      function renderTable() {
+        // 배경
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#1e1b4b");
+        grad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // 테이블 본체
+        ctx.fillStyle = "#312e81";
+        ctx.fillRect(TABLE.left, TABLE.top, TABLE.right - TABLE.left, VIEW.height - TABLE.top);
+        ctx.strokeStyle = "#818cf8";
+        ctx.lineWidth = 6;
+        ctx.strokeRect(TABLE.left, TABLE.top, TABLE.right - TABLE.left, VIEW.height - TABLE.top);
+
+        // 하단 경사면
+        ctx.fillStyle = "#4338ca";
+        ctx.beginPath();
+        ctx.moveTo(TABLE.left, 420);
+        ctx.lineTo(flippers.left.pivotX - 6, 500);
+        ctx.lineTo(flippers.left.pivotX - 6, VIEW.height);
+        ctx.lineTo(TABLE.left, VIEW.height);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(TABLE.right, 420);
+        ctx.lineTo(flippers.right.pivotX + 6, 500);
+        ctx.lineTo(flippers.right.pivotX + 6, VIEW.height);
+        ctx.lineTo(TABLE.right, VIEW.height);
+        ctx.closePath();
+        ctx.fill();
+
+        // 타깃
+        targets.forEach((t) => {
+          ctx.fillStyle = t.flash > 0 ? "#fde047" : "#f97316";
+          ctx.fillRect(t.x, t.y, t.w, t.h);
+        });
+
+        // 범퍼
+        bumpers.forEach((b) => {
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r + 6, 0, Math.PI * 2);
+          ctx.fillStyle = b.flash > 0 ? "rgba(253, 224, 71, 0.9)" : "rgba(129, 140, 248, 0.5)";
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+          ctx.fillStyle = b.flash > 0 ? "#facc15" : "#6366f1";
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(b.x - 8, b.y - 8, b.r * 0.35, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(255,255,255,0.55)";
+          ctx.fill();
+        });
+
+        // 플리퍼
+        drawFlipper(flippers.left, flippers.left.pressed ? "#fb7185" : "#e2e8f0");
+        drawFlipper(flippers.right, flippers.right.pressed ? "#fb7185" : "#e2e8f0");
+
+        // 공
+        if (ball.live) {
+          ctx.beginPath();
+          ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+          ctx.fillStyle = "#f8fafc";
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(ball.x - 3, ball.y - 3, ball.r * 0.35, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(148,163,184,0.9)";
+          ctx.fill();
+        }
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.9)";
+        ctx.fillRect(0, 0, VIEW.width, 44);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "800 22px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`점수 ${state.score} / ${TARGET_SCORE}`, 20, 30);
+        ctx.textAlign = "center";
+        ctx.fillText(state.lastEvent, VIEW.width / 2, 30);
+        ctx.textAlign = "right";
+        ctx.fillText(`남은 공 ${state.ballsLeft} / ${MAX_BALLS}`, VIEW.width - 20, 30);
+        ctx.textAlign = "left";
+
+        // 점수 진행 바
+        ctx.fillStyle = "rgba(148, 163, 184, 0.35)";
+        ctx.fillRect(300, 8, 360 * 0, 0); // placeholder no-op
+        const barX = TABLE.left;
+        const barW = TABLE.right - TABLE.left;
+        ctx.fillStyle = "rgba(148, 163, 184, 0.35)";
+        ctx.fillRect(barX, 44, barW, 6);
+        ctx.fillStyle = "#f97316";
+        ctx.fillRect(barX, 44, barW * Math.min(state.score / TARGET_SCORE, 1), 6);
+
+        // 터치 가이드
+        ctx.fillStyle = "rgba(226, 232, 240, 0.45)";
+        ctx.font = "600 18px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("◀ 왼쪽 터치", 140, VIEW.height - 20);
+        ctx.fillText("오른쪽 터치 ▶", VIEW.width - 140, VIEW.height - 20);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderTable();
+          renderCard("핀볼", [
+            "조작: 화면 좌우 터치로 플리퍼 조작",
+            "키보드: ← / → 화살표로 플리퍼 조작",
+            "범퍼 +200점, 타깃 +300점",
+            "클리어 조건: 목표 점수 5000점 달성 시 클리어",
+            "실패 조건: 공 3개를 떨구면 실패",
+            "터치 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderTable();
+          renderHud();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderTable();
+          renderCard("실패", [
+            "공 3개를 떨구면 실패",
+            `최종 점수: ${state.score} / ${TARGET_SCORE}`,
+            `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+            "터치 또는 Enter로 다시 도전",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderTable();
+        renderCard("클리어!", [
+          "목표 점수 5000점 달성 시 클리어",
+          `최종 점수: ${state.score}`,
+          `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+          "터치 또는 Enter로 다시 플레이",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          score: state.score,
+          target_score: TARGET_SCORE,
+          balls_left: state.ballsLeft,
+          ball: ball.live
+            ? { x: Math.round(ball.x), y: Math.round(ball.y), vx: Math.round(ball.vx), vy: Math.round(ball.vy) }
+            : null,
+          flippers: { left_pressed: flippers.left.pressed, right_pressed: flippers.right.pressed },
+          last_event: state.lastEvent,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function pressFlipper(side, pressed) {
+        if (state.mode !== "running") {
+          return;
+        }
+        flippers[side].pressed = pressed;
+      }
+
+      function pointerSide(event) {
+        const rect = canvas.getBoundingClientRect();
+        const x = (event.clientX - rect.left) / rect.width;
+        return x < 0.5 ? "left" : "right";
+      }
+
+      const activeTouches = new Map();
+
+      function onPointerDown(event) {
+        event.preventDefault();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        const side = pointerSide(event);
+        activeTouches.set(event.pointerId, side);
+        pressFlipper(side, true);
+      }
+
+      function onPointerUp(event) {
+        const side = activeTouches.get(event.pointerId);
+        if (side) {
+          activeTouches.delete(event.pointerId);
+          const stillHeld = [...activeTouches.values()].includes(side);
+          if (!stillHeld) {
+            pressFlipper(side, false);
+          }
+        }
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (event.key === "ArrowLeft" || event.key === "z" || event.key === "Z") {
+          event.preventDefault();
+          pressFlipper("left", true);
+        }
+        if (event.key === "ArrowRight" || event.key === "/" || event.key === "m" || event.key === "M") {
+          event.preventDefault();
+          pressFlipper("right", true);
+        }
+      }
+
+      function onKeyUp(event) {
+        if (event.key === "ArrowLeft" || event.key === "z" || event.key === "Z") {
+          pressFlipper("left", false);
+        }
+        if (event.key === "ArrowRight" || event.key === "/" || event.key === "m" || event.key === "M") {
+          pressFlipper("right", false);
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "pinball-flipper",
+        title: "핀볼",
+        creator: "Anonymous Creator",
+        genre: "Pinball",
+        clearCondition: "목표 점수 5000점 달성 시 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("touchstart", (event) => {
+        event.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener("pointerdown", onPointerDown);
+      canvas.addEventListener("pointerup", onPointerUp);
+      canvas.addEventListener("pointercancel", onPointerUp);
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

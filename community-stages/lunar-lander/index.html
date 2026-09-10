@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>달 착륙선</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">달 착륙선. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 터치 유지로 추력, 좌우 드래그로 기울기 입니다. 화면을 누르고 있으면 추력이 켜지고 연료가 소모되며, 누른 채 좌우로 드래그하면 착륙선이 기울어집니다. 키보드는 위 화살표 또는 스페이스로 추력, 좌우 화살표로 기울기를 조절합니다. 녹색 착륙 패드 위에 수평·수직 속도와 기울기가 안전 범위일 때 접지하면 성공입니다. 착륙 3회를 성공하면 클리어, 충돌 시 즉시 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="달 착륙선" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const GRAVITY = 40;
+      const THRUST_ACCEL = 135;
+      const FUEL_BURN = 24;
+      const SAFE_VX = 28;
+      const SAFE_VY = 45;
+      const SAFE_ANGLE = 0.25;
+      const MAX_ANGLE = 0.55;
+      const PAD_W = 190;
+      const TARGET_LANDINGS = 3;
+      const relayContext = window.RelayRuntime?.readContext("lunar-lander") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const stars = Array.from({ length: 70 }, (_, i) => ({
+        x: (i * 137 + 53) % VIEW.width,
+        y: (i * 89 + 31) % 380,
+        r: 0.8 + ((i * 7) % 3) * 0.6,
+      }));
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        landings: 0,
+        terrain: null,
+        pad: { x: 400, y: 460 },
+        ship: null,
+        thrusting: false,
+        keyTilt: 0,
+        pointerTilt: 0,
+        effects: [],
+        failReason: "",
+        note: "추력을 조절해 착륙선을 부드럽게 내려놓으세요",
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function buildTerrain() {
+        const phase1 = Math.random() * Math.PI * 2;
+        const phase2 = Math.random() * Math.PI * 2;
+        const amp1 = 26 + Math.random() * 18;
+        const amp2 = 12 + Math.random() * 10;
+        const padX = 90 + Math.random() * (VIEW.width - 180 - PAD_W);
+        const padY = 440 + Math.random() * 50;
+        const terrain = (x) => {
+          if (x >= padX && x <= padX + PAD_W) {
+            return padY;
+          }
+          const edge = Math.min(Math.abs(x - padX), Math.abs(x - (padX + PAD_W)));
+          const blend = Math.min(1, edge / 70);
+          const raw = 460 + amp1 * Math.sin(x / 140 + phase1) + amp2 * Math.sin(x / 55 + phase2);
+          const clamped = Math.min(520, Math.max(400, raw));
+          return padY + (clamped - padY) * blend;
+        };
+        state.terrain = terrain;
+        state.pad = { x: padX + PAD_W / 2, y: padY, left: padX, right: padX + PAD_W };
+      }
+
+      function newRound() {
+        buildTerrain();
+        state.ship = {
+          x: 140 + Math.random() * (VIEW.width - 280),
+          y: 66,
+          vx: (Math.random() * 2 - 1) * 22,
+          vy: 8,
+          angle: 0,
+          fuel: 130 + Math.random() * 45,
+        };
+        state.thrusting = false;
+        state.pointerTilt = 0;
+        state.keyTilt = 0;
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.landings = 0;
+        state.effects = [];
+        state.failReason = "";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+        newRound();
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.failReason = reason;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function currentTiltTarget() {
+        return Math.max(-MAX_ANGLE, Math.min(MAX_ANGLE, state.pointerTilt + state.keyTilt));
+      }
+
+      function spawnBurst(x, y, color, count) {
+        for (let i = 0; i < count; i += 1) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 40 + Math.random() * 130;
+          state.effects.push({
+            x,
+            y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed - 40,
+            t: 0,
+            life: 0.7 + Math.random() * 0.4,
+            color,
+          });
+        }
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        const ship = state.ship;
+        if (!ship) {
+          return;
+        }
+
+        const tiltTarget = currentTiltTarget();
+        ship.angle += (tiltTarget - ship.angle) * Math.min(1, 6 * dt);
+
+        const thrustOn = state.thrusting && ship.fuel > 0;
+        ship.vy += GRAVITY * dt;
+        if (thrustOn) {
+          ship.vx += -Math.sin(ship.angle) * THRUST_ACCEL * dt;
+          ship.vy += -Math.cos(ship.angle) * THRUST_ACCEL * dt;
+          ship.fuel = Math.max(0, ship.fuel - FUEL_BURN * dt);
+        }
+        ship.x += ship.vx * dt;
+        ship.y += ship.vy * dt;
+
+        if (ship.x < 14) {
+          ship.x = 14;
+          ship.vx = Math.abs(ship.vx) * 0.4;
+        } else if (ship.x > VIEW.width - 14) {
+          ship.x = VIEW.width - 14;
+          ship.vx = -Math.abs(ship.vx) * 0.4;
+        }
+
+        const groundY = state.terrain(ship.x);
+        if (ship.y + 16 >= groundY) {
+          ship.y = groundY - 16;
+          const onPad = ship.x >= state.pad.left + 6 && ship.x <= state.pad.right - 6;
+          const gentle = Math.abs(ship.vx) <= SAFE_VX && ship.vy <= SAFE_VY && Math.abs(ship.angle) <= SAFE_ANGLE;
+          if (onPad && gentle) {
+            state.landings += 1;
+            spawnBurst(ship.x, groundY, "#4ade80", 18);
+            if (state.landings >= TARGET_LANDINGS) {
+              clearStage();
+              return;
+            }
+            newRound();
+          } else {
+            spawnBurst(ship.x, groundY, "#f87171", 30);
+            failStage(onPad ? "hard_landing" : "crashed_off_pad");
+            return;
+          }
+        }
+
+        for (const effect of state.effects) {
+          effect.t += dt;
+          effect.x += effect.vx * dt;
+          effect.y += effect.vy * dt;
+          effect.vy += 120 * dt;
+        }
+        state.effects = state.effects.filter((effect) => effect.t < effect.life);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.9)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 226 + index * 44);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function renderScene() {
+        ctx.fillStyle = "#050914";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        ctx.fillStyle = "rgba(248, 250, 252, 0.85)";
+        for (const star of stars) {
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = "#3f3f46";
+        ctx.beginPath();
+        ctx.moveTo(0, VIEW.height);
+        for (let x = 0; x <= VIEW.width; x += 8) {
+          ctx.lineTo(x, state.terrain ? state.terrain(x) : 470);
+        }
+        ctx.lineTo(VIEW.width, VIEW.height);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "#71717a";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let x = 0; x <= VIEW.width; x += 8) {
+          const y = state.terrain ? state.terrain(x) : 470;
+          if (x === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+
+        if (state.pad) {
+          ctx.fillStyle = "#15803d";
+          ctx.fillRect(state.pad.left, state.pad.y, PAD_W, 8);
+          ctx.fillStyle = "#4ade80";
+          ctx.fillRect(state.pad.left, state.pad.y, PAD_W, 3);
+          ctx.fillStyle = "#bbf7d0";
+          ctx.beginPath();
+          ctx.arc(state.pad.left + 6, state.pad.y - 4, 4, 0, Math.PI * 2);
+          ctx.arc(state.pad.right - 6, state.pad.y - 4, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        const ship = state.ship;
+        if (ship && state.mode !== "failed") {
+          ctx.save();
+          ctx.translate(ship.x, ship.y);
+          ctx.rotate(ship.angle);
+          const thrustOn = state.thrusting && ship.fuel > 0 && state.mode === "running";
+          if (thrustOn) {
+            const flameLen = 20 + Math.random() * 10;
+            ctx.fillStyle = "#fb923c";
+            ctx.beginPath();
+            ctx.moveTo(-6, 16);
+            ctx.lineTo(0, 16 + flameLen);
+            ctx.lineTo(6, 16);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = "#fde68a";
+            ctx.beginPath();
+            ctx.moveTo(-3, 16);
+            ctx.lineTo(0, 16 + flameLen * 0.6);
+            ctx.lineTo(3, 16);
+            ctx.closePath();
+            ctx.fill();
+          }
+          ctx.fillStyle = "#cbd5e1";
+          ctx.beginPath();
+          ctx.moveTo(0, -18);
+          ctx.lineTo(11, -4);
+          ctx.lineTo(11, 12);
+          ctx.lineTo(-11, 12);
+          ctx.lineTo(-11, -4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = "#0ea5e9";
+          ctx.beginPath();
+          ctx.arc(0, -4, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = "#94a3b8";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(-8, 12);
+          ctx.lineTo(-14, 16);
+          ctx.moveTo(8, 12);
+          ctx.lineTo(14, 16);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        for (const effect of state.effects) {
+          const alpha = 1 - effect.t / effect.life;
+          ctx.globalAlpha = Math.max(0, alpha);
+          ctx.fillStyle = effect.color;
+          ctx.beginPath();
+          ctx.arc(effect.x, effect.y, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function renderHud() {
+        const ship = state.ship;
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, 46);
+        ctx.font = "800 20px Trebuchet MS";
+        ctx.textAlign = "left";
+
+        if (ship) {
+          const altitude = Math.max(0, Math.round((state.terrain(ship.x) - 16 - ship.y)));
+          ctx.fillStyle = "#e2e8f0";
+          ctx.fillText(`고도 ${altitude}m`, 16, 30);
+
+          ctx.fillStyle = ship.vy <= SAFE_VY ? "#4ade80" : "#f87171";
+          ctx.fillText(`수직 ${Math.round(ship.vy)}`, 150, 30);
+          ctx.fillStyle = Math.abs(ship.vx) <= SAFE_VX ? "#4ade80" : "#f87171";
+          ctx.fillText(`수평 ${Math.round(Math.abs(ship.vx))}`, 260, 30);
+          ctx.fillStyle = Math.abs(ship.angle) <= SAFE_ANGLE ? "#4ade80" : "#f87171";
+          ctx.fillText(`기울기 ${Math.round((ship.angle * 180) / Math.PI)}°`, 370, 30);
+
+          ctx.fillStyle = "#475569";
+          ctx.fillRect(500, 14, 150, 18);
+          ctx.fillStyle = ship.fuel > 30 ? "#38bdf8" : "#f87171";
+          ctx.fillRect(500, 14, (150 * Math.max(0, Math.min(145, ship.fuel))) / 145, 18);
+          ctx.strokeStyle = "#94a3b8";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(500, 14, 150, 18);
+          ctx.fillStyle = "#e2e8f0";
+          ctx.fillText("연료", 452, 30);
+        }
+
+        ctx.fillStyle = "#fde68a";
+        ctx.textAlign = "right";
+        ctx.fillText(`착륙 ${state.landings}/${TARGET_LANDINGS}`, VIEW.width - 18, 30);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          if (!state.terrain) {
+            buildTerrain();
+          }
+          renderScene();
+          renderCard("달 착륙선", [
+            "추력을 조절해 착륙선을 부드럽게 내려놓으세요",
+            "조작: 터치 유지로 추력, 좌우 드래그로 기울기",
+            "키보드: ↑/스페이스 추력, ←→ 기울기",
+            "클리어 조건: 착륙 3회를 성공하면 클리어",
+            "실패 조건: 충돌 시 즉시 실패",
+            "터치 또는 Enter로 시작",
+          ], "#38bdf8");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderScene();
+          renderHud();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderScene();
+          renderCard("충돌", [
+            "충돌 시 즉시 실패",
+            state.failReason === "hard_landing"
+              ? "속도나 기울기가 안전 범위를 벗어났어요"
+              : "착륙 패드 밖에 내려앉았어요",
+            `성공한 착륙 ${state.landings}/${TARGET_LANDINGS}`,
+            "터치 또는 Enter로 다시 도전할 수 있어요",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderScene();
+        renderCard("클리어", [
+          "착륙 3회를 성공하면 클리어",
+          `${state.lastRunTime.toFixed(1)}초 만에 착륙 완료`,
+          "호스트가 다음 미플레이 스테이지를 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        const ship = state.ship;
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down, angle rad (0=upright)",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          landings: state.landings,
+          ship: ship
+            ? {
+                x: Math.round(ship.x),
+                y: Math.round(ship.y),
+                vx: Math.round(ship.vx),
+                vy: Math.round(ship.vy),
+                angle_deg: Math.round((ship.angle * 180) / Math.PI),
+                fuel: Math.round(ship.fuel),
+                ground_y: Math.round(state.terrain(ship.x)),
+              }
+            : null,
+          pad: state.pad ? { left: Math.round(state.pad.left), right: Math.round(state.pad.right), y: Math.round(state.pad.y) } : null,
+          thrusting: state.thrusting,
+          safe_limits: { vx: SAFE_VX, vy: SAFE_VY, angle_deg: Math.round((SAFE_ANGLE * 180) / Math.PI) },
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      let dragStartX = null;
+      let dragBaseTilt = 0;
+
+      function canvasX(event) {
+        const rect = canvas.getBoundingClientRect();
+        return ((event.clientX - rect.left) / rect.width) * VIEW.width;
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+          return;
+        }
+        if (state.mode !== "running") {
+          return;
+        }
+        if (event.key === "ArrowUp" || event.key === " ") {
+          event.preventDefault();
+          state.thrusting = true;
+        } else if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          state.keyTilt = -0.4;
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          state.keyTilt = 0.4;
+        }
+      }
+
+      function onKeyUp(event) {
+        if (event.key === "ArrowUp" || event.key === " ") {
+          state.thrusting = false;
+        } else if (event.key === "ArrowLeft" && state.keyTilt < 0) {
+          state.keyTilt = 0;
+        } else if (event.key === "ArrowRight" && state.keyTilt > 0) {
+          state.keyTilt = 0;
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "lunar-lander",
+        title: "달 착륙선",
+        creator: "Anonymous Creator",
+        genre: "Thrust control",
+        clearCondition: "착륙 3회를 성공하면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        state.thrusting = true;
+        dragStartX = canvasX(event);
+        dragBaseTilt = state.pointerTilt;
+        canvas.setPointerCapture?.(event.pointerId);
+      });
+      canvas.addEventListener("pointermove", (event) => {
+        if (dragStartX === null || state.mode !== "running") {
+          return;
+        }
+        const dx = canvasX(event) - dragStartX;
+        state.pointerTilt = Math.max(-MAX_ANGLE, Math.min(MAX_ANGLE, dragBaseTilt + dx / 220));
+      });
+      const endPointer = () => {
+        dragStartX = null;
+        state.thrusting = false;
+        state.pointerTilt = 0;
+      };
+      canvas.addEventListener("pointerup", endPointer);
+      canvas.addEventListener("pointercancel", endPointer);
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

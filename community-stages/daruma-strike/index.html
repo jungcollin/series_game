@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>달마 떨구기</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">달마 떨구기. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 타이밍에 맞춰 터치로 타격입니다. 좌우로 왕복하는 망치가 강조된 목표 단에 정렬됐을 때 터치하면 그 단이 튕겨 나갑니다. 잘못된 위치를 때리거나 흔들림 게이지가 가득 차면 탑이 쓰러집니다. 5단을 모두 쳐내면 클리어, 달마가 3회 쓰러지면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="달마 떨구기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("daruma-strike") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const LEVELS = 5;
+      const MAX_COLLAPSE = 3;
+      const BLOCK_W = 220;
+      const BLOCK_H = 52;
+      const TOWER_X = VIEW.width / 2;
+      const BASE_Y = 486;
+      const HAMMER_RANGE = 330;
+      const WOBBLE_LIMIT = 100;
+      const WOBBLE_RECOVER = 6;
+      const STRIKE_COOLDOWN = 0.35;
+      const HIT_MARGIN = 12;
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        hits: 0,
+        collapses: 0,
+        wobble: 0,
+        hammerPhase: 0,
+        hammerX: TOWER_X,
+        strikeCooldown: 0,
+        strikeAnim: 0,
+        flying: [],
+        dropAnim: 0,
+        collapseAnim: 0,
+        feedback: null,
+        effects: [],
+        failReason: "",
+        note: "망치로 단을 쳐내고 달마를 떨어뜨리지 마세요",
+      };
+
+      function hammerSpeed() {
+        return 2.1 + state.hits * 0.4;
+      }
+
+      function remainingBlocks() {
+        return LEVELS - state.hits;
+      }
+
+      function targetBlockY() {
+        // 목표 단 = 탑의 맨 아래 남은 블록 중심
+        return BASE_Y - BLOCK_H / 2;
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.hits = 0;
+        state.collapses = 0;
+        state.wobble = 0;
+        state.hammerPhase = 0;
+        state.hammerX = TOWER_X;
+        state.strikeCooldown = 0;
+        state.strikeAnim = 0;
+        state.flying = [];
+        state.dropAnim = 0;
+        state.collapseAnim = 0;
+        state.feedback = null;
+        state.effects = [];
+        state.failReason = "";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.failReason = reason;
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu") {
+          startStage();
+        }
+      }
+
+      function addEffect(text, x, y, color) {
+        state.effects.push({ text, x, y, color, age: 0 });
+      }
+
+      function collapseTower(reason) {
+        state.collapses += 1;
+        state.wobble = 0;
+        state.collapseAnim = 0.9;
+        state.feedback = { kind: "bad", age: 0 };
+        addEffect("탑이 쓰러졌다!", TOWER_X, 250, "#ef4444");
+        if (state.collapses >= MAX_COLLAPSE) {
+          failStage(reason);
+        }
+      }
+
+      function strike() {
+        if (state.mode !== "running" || state.strikeCooldown > 0) {
+          return;
+        }
+        state.strikeCooldown = STRIKE_COOLDOWN;
+        state.strikeAnim = 0.22;
+
+        // 흔들림 한계 초과 상태에서 타격하면 붕괴
+        if (state.wobble >= WOBBLE_LIMIT) {
+          collapseTower("흔들림 한계 초과로 붕괴 3회");
+          return;
+        }
+
+        const dx = Math.abs(state.hammerX - TOWER_X);
+        if (dx <= BLOCK_W / 2 - HIT_MARGIN) {
+          // 성공: 목표 단이 튕겨 나감
+          const dir = state.hammerX >= TOWER_X ? 1 : -1;
+          state.flying.push({
+            x: TOWER_X,
+            y: targetBlockY(),
+            vx: dir * (520 + Math.random() * 160),
+            vy: -140 - Math.random() * 80,
+            rot: 0,
+            vr: dir * 6,
+            age: 0,
+          });
+          state.hits += 1;
+          state.wobble = Math.min(WOBBLE_LIMIT, state.wobble + 22 + state.hits * 4);
+          state.dropAnim = 0.25;
+          state.feedback = { kind: "good", age: 0 };
+          addEffect("쾅!", TOWER_X + dir * 150, targetBlockY() - 40, "#fbbf24");
+          if (state.hits >= LEVELS) {
+            clearStage();
+          }
+        } else {
+          collapseTower("잘못된 타격으로 붕괴 3회");
+        }
+      }
+
+      function update(dt) {
+        state.effects.forEach((fx) => { fx.age += dt; });
+        state.effects = state.effects.filter((fx) => fx.age < 0.9);
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+
+        // 망치 왕복
+        state.hammerPhase += hammerSpeed() * dt;
+        state.hammerX = TOWER_X + Math.sin(state.hammerPhase) * HAMMER_RANGE;
+
+        // 흔들림 회복
+        state.wobble = Math.max(0, state.wobble - WOBBLE_RECOVER * dt);
+
+        if (state.strikeCooldown > 0) state.strikeCooldown -= dt;
+        if (state.strikeAnim > 0) state.strikeAnim -= dt;
+        if (state.dropAnim > 0) state.dropAnim -= dt;
+        if (state.collapseAnim > 0) state.collapseAnim -= dt;
+        if (state.feedback) {
+          state.feedback.age += dt;
+          if (state.feedback.age > 0.4) state.feedback = null;
+        }
+
+        // 날아가는 블록
+        for (const block of state.flying) {
+          block.age += dt;
+          block.x += block.vx * dt;
+          block.y += block.vy * dt;
+          block.vy += 900 * dt;
+          block.rot += block.vr * dt;
+        }
+        state.flying = state.flying.filter((block) => block.age < 1.2 && block.y < VIEW.height + 120);
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function renderBackground() {
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#1c1917");
+        grad.addColorStop(0.6, "#44403c");
+        grad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        // 장판 바닥
+        ctx.fillStyle = "#78350f";
+        ctx.fillRect(0, BASE_Y + 4, VIEW.width, VIEW.height - BASE_Y - 4);
+        ctx.fillStyle = "rgba(251, 191, 36, 0.14)";
+        for (let x = 0; x < VIEW.width; x += 120) {
+          ctx.fillRect(x, BASE_Y + 4, 6, VIEW.height - BASE_Y - 4);
+        }
+      }
+
+      function drawBlock(x, y, highlight, wobbleOffset) {
+        ctx.save();
+        ctx.translate(x + wobbleOffset, y);
+        ctx.fillStyle = highlight ? "#f59e0b" : "#b45309";
+        roundRect(-BLOCK_W / 2, -BLOCK_H / 2, BLOCK_W, BLOCK_H, 10);
+        ctx.fill();
+        ctx.strokeStyle = highlight ? "#fde68a" : "rgba(15,23,42,0.5)";
+        ctx.lineWidth = highlight ? 4 : 2;
+        ctx.stroke();
+        // 나뭇결
+        ctx.strokeStyle = "rgba(15,23,42,0.25)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-BLOCK_W / 2 + 16, -10);
+        ctx.lineTo(BLOCK_W / 2 - 16, -10);
+        ctx.moveTo(-BLOCK_W / 2 + 16, 10);
+        ctx.lineTo(BLOCK_W / 2 - 16, 10);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawDaruma(x, y, wobbleOffset) {
+        ctx.save();
+        ctx.translate(x + wobbleOffset, y);
+        // 몸통
+        ctx.fillStyle = "#dc2626";
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 52, 46, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#7f1d1d";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        // 얼굴
+        ctx.fillStyle = "#fef3c7";
+        ctx.beginPath();
+        ctx.ellipse(0, -8, 32, 26, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 눈
+        ctx.fillStyle = "#0f172a";
+        ctx.beginPath();
+        ctx.arc(-12, -12, 4, 0, Math.PI * 2);
+        ctx.arc(12, -12, 4, 0, Math.PI * 2);
+        ctx.fill();
+        // 눈썹·수염
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-20, -22);
+        ctx.lineTo(-5, -18);
+        ctx.moveTo(20, -22);
+        ctx.lineTo(5, -18);
+        ctx.moveTo(-14, 4);
+        ctx.quadraticCurveTo(0, 12, 14, 4);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function renderTower() {
+        const count = remainingBlocks();
+        if (count <= 0) {
+          return;
+        }
+        const sway = Math.sin(state.elapsed * 7) * (state.wobble / WOBBLE_LIMIT) * 14;
+        const fall = state.collapseAnim > 0 ? (0.9 - state.collapseAnim) * 60 : 0;
+        const dropOffset = state.dropAnim > 0 ? (state.dropAnim / 0.25) * BLOCK_H : 0;
+
+        for (let i = 0; i < count; i += 1) {
+          const isTarget = i === 0;
+          let y = BASE_Y - BLOCK_H / 2 - i * BLOCK_H - dropOffset;
+          if (state.collapseAnim > 0) {
+            y += fall * (i + 1) * 0.4;
+          }
+          const wobbleOffset = sway * (i / Math.max(1, count - 1)) * (i + 1);
+          drawBlock(TOWER_X, y, isTarget && state.mode === "running", wobbleOffset);
+        }
+        // 달마
+        let darumaY = BASE_Y - count * BLOCK_H - 44 - dropOffset;
+        if (state.collapseAnim > 0) {
+          darumaY += fall * count * 0.5;
+        }
+        drawDaruma(TOWER_X, darumaY, sway * (count / Math.max(1, count - 1)) * count * 0.6);
+      }
+
+      function renderHammer() {
+        if (state.mode !== "running") {
+          return;
+        }
+        const y = targetBlockY();
+        const strikeOffset = state.strikeAnim > 0 ? (0.22 - state.strikeAnim) * 120 : 0;
+        const dir = state.hammerX >= TOWER_X ? 1 : -1;
+        const hx = state.hammerX - dir * strikeOffset;
+        ctx.save();
+        ctx.translate(hx, y);
+        // 손잡이
+        ctx.strokeStyle = "#92400e";
+        ctx.lineWidth = 10;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(dir * 26, -86);
+        ctx.stroke();
+        // 망치 머리
+        ctx.fillStyle = "#94a3b8";
+        roundRect(dir * 26 - 22, -110, 44, 34, 8);
+        ctx.fill();
+        ctx.strokeStyle = "#475569";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.restore();
+        // 조준 가이드: 목표 단 히트존
+        ctx.fillStyle = "rgba(34, 197, 94, 0.18)";
+        ctx.fillRect(TOWER_X - BLOCK_W / 2 + HIT_MARGIN, y - BLOCK_H / 2, BLOCK_W - HIT_MARGIN * 2, BLOCK_H);
+      }
+
+      function renderFlying() {
+        for (const block of state.flying) {
+          ctx.save();
+          ctx.translate(block.x, block.y);
+          ctx.rotate(block.rot);
+          ctx.globalAlpha = Math.max(0, 1 - block.age / 1.2);
+          ctx.fillStyle = "#b45309";
+          roundRect(-BLOCK_W / 2, -BLOCK_H / 2, BLOCK_W, BLOCK_H, 10);
+          ctx.fill();
+          ctx.restore();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, 96);
+        // 단 진행
+        ctx.fillStyle = "#fbbf24";
+        ctx.font = "800 26px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText("단 " + state.hits + "/" + LEVELS, 24, 40);
+        ctx.fillStyle = "#f87171";
+        ctx.fillText("붕괴 " + state.collapses + "/" + MAX_COLLAPSE, 24, 76);
+        // 흔들림 게이지
+        const gaugeW = 260;
+        const gx = VIEW.width / 2 - gaugeW / 2;
+        ctx.fillStyle = "#475569";
+        roundRect(gx, 26, gaugeW, 24, 12);
+        ctx.fill();
+        const ratio = state.wobble / WOBBLE_LIMIT;
+        ctx.fillStyle = ratio > 0.75 ? "#ef4444" : ratio > 0.45 ? "#f97316" : "#22c55e";
+        if (ratio > 0.01) {
+          roundRect(gx, 26, gaugeW * ratio, 24, 12);
+          ctx.fill();
+        }
+        ctx.fillStyle = "rgba(248,250,252,0.9)";
+        ctx.font = "700 16px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("흔들림", VIEW.width / 2, 70);
+        // 안내
+        ctx.textAlign = "right";
+        ctx.font = "700 18px Trebuchet MS";
+        ctx.fillStyle = "rgba(248,250,252,0.85)";
+        ctx.fillText("망치가 노란 단에 오면 터치!", VIEW.width - 24, 44);
+        ctx.textAlign = "left";
+        // 피드백 테두리
+        if (state.feedback) {
+          ctx.strokeStyle = state.feedback.kind === "good" ? "rgba(34,197,94,0.8)" : "rgba(239,68,68,0.8)";
+          ctx.lineWidth = 10;
+          ctx.strokeRect(5, 5, VIEW.width - 10, VIEW.height - 10);
+        }
+      }
+
+      function renderEffects() {
+        for (const fx of state.effects) {
+          const alpha = 1 - fx.age / 0.9;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = fx.color;
+          ctx.font = "800 32px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText(fx.text, fx.x, fx.y - fx.age * 40);
+          ctx.restore();
+        }
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        renderBackground();
+        renderFlying();
+        renderTower();
+        renderHammer();
+        renderEffects();
+        renderHud();
+      }
+
+      function renderCard(title, lines, accent, footer) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        roundRect(190, 70, 580, 400, 18);
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 138);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 208 + index * 42);
+        });
+
+        if (footer) {
+          ctx.fillStyle = accent;
+          roundRect(VIEW.width / 2 - 130, 408, 260, 46, 23);
+          ctx.fill();
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "800 22px Trebuchet MS";
+          ctx.fillText(footer, VIEW.width / 2, 438);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderBackground();
+          renderCard("달마 떨구기", [
+            "망치로 단을 쳐내고 달마를 떨어뜨리지 마세요",
+            "조작: 타이밍에 맞춰 터치로 타격",
+            "클리어 조건: 5단을 모두 쳐내면 클리어",
+            "실패 조건: 달마가 3회 쓰러지면 실패",
+            "흔들림 게이지가 가득 차면 탑이 쓰러집니다",
+          ], "#d97706", "터치 또는 Enter로 시작");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderRunning();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderRunning();
+          renderCard("실패", [
+            "실패 원인: " + state.failReason,
+            "달마가 3회 쓰러지면 실패",
+            "공유 목숨 1개가 즉시 종료되었습니다.",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderBackground();
+        drawDaruma(TOWER_X, BASE_Y - 44, 0);
+        renderCard("클리어!", [
+          "5단을 모두 쳐내고 달마를 지켰습니다",
+          "걸린 시간: " + state.lastRunTime.toFixed(1) + "초",
+          "호스트가 다음 미플레이 스테이지를 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          hits: state.hits,
+          levels_to_clear: LEVELS,
+          collapses: state.collapses,
+          max_collapses: MAX_COLLAPSE,
+          wobble: Math.round(state.wobble),
+          wobble_limit: WOBBLE_LIMIT,
+          hammer_x: Math.round(state.hammerX),
+          target_x: TOWER_X,
+          hit_zone_half_width: BLOCK_W / 2 - HIT_MARGIN,
+          fail_reason: state.failReason || undefined,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if ((event.key === " " || event.key === "Enter") && state.mode === "running") {
+          event.preventDefault();
+          strike();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "daruma-strike",
+        title: "달마 떨구기",
+        creator: "Anonymous Creator",
+        genre: "Strike timing",
+        clearCondition: "5단을 모두 쳐내면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        strike();
+      }, { passive: false });
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

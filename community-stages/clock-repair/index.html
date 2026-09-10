@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>시계 수리공</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">시계 수리공. 캔버스를 터치하거나 Enter로 시작하세요. 터치 드래그로 톱니바퀴를 집어 빈 축에 끼웁니다. 모바일에서는 화면을 드래그해 배치하고, 키보드에서는 좌우 화살표로 톱니, 위아래 화살표로 축을 고른 뒤 Enter로 배치합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="시계 수리공" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const TIME_LIMIT = 90;
+      const CLOCK_COUNT = 3;
+      const relayContext = window.RelayRuntime?.readContext("clock-repair") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const CLOCK_DEFS = [
+        { radii: [26, 36, 46], decoy: 30 },
+        { radii: [24, 32, 40, 48], decoy: 28 },
+        { radii: [26, 34, 44], decoy: 38 },
+      ];
+      const SLOT_ANGLES = {
+        3: [-90, 30, 150],
+        4: [-90, 0, 90, 180],
+      };
+      const GEAR_COLORS = ["#f59e0b", "#38bdf8", "#a78bfa", "#34d399", "#fb7185"];
+      const FACE = { x: 480, y: 252, r: 168 };
+      const TRAY_Y = 478;
+      const SNAP_DIST = 64;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        failReason: "",
+        note: "톱니바퀴를 알맞은 자리에 끼워 시계를 다시 돌리세요",
+        clockIndex: 0,
+        slots: [],
+        tray: [],
+        drag: null,
+        heldIndex: -1,
+        selGear: 0,
+        selSlot: 0,
+        solveT: -1,
+        spin: 0,
+        toast: null,
+        bounce: [],
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function shuffle(list) {
+        for (let i = list.length - 1; i > 0; i -= 1) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [list[i], list[j]] = [list[j], list[i]];
+        }
+        return list;
+      }
+
+      function buildClock(index) {
+        const def = CLOCK_DEFS[index];
+        const angles = SLOT_ANGLES[def.radii.length];
+        const dist = 92;
+        state.slots = def.radii.map((r, i) => {
+          const rad = (angles[i] * Math.PI) / 180;
+          return {
+            x: FACE.x + Math.cos(rad) * dist,
+            y: FACE.y + Math.sin(rad) * dist,
+            required: r,
+            gear: null,
+          };
+        });
+        const gears = shuffle([...def.radii, def.decoy]).map((r, i) => ({
+          id: `${index}-${i}`,
+          r,
+          teeth: Math.max(8, Math.round(r / 2.6)),
+          color: GEAR_COLORS[i % GEAR_COLORS.length],
+          x: 0,
+          y: TRAY_Y,
+          homeX: 0,
+          homeY: TRAY_Y,
+          used: false,
+        }));
+        gears.forEach((gear, i) => {
+          const spread = 640;
+          const startX = VIEW.width / 2 - spread / 2;
+          gear.homeX = startX + (spread / (gears.length - 1)) * i;
+          gear.x = gear.homeX;
+          gear.y = gear.homeY;
+        });
+        state.tray = gears;
+        state.drag = null;
+        state.heldIndex = -1;
+        state.selGear = 0;
+        state.selSlot = 0;
+        state.solveT = -1;
+        state.bounce = [];
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.failReason = "";
+        state.clockIndex = 0;
+        state.toast = null;
+        buildClock(0);
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.failReason = reason;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode !== "running") {
+          startStage();
+        }
+      }
+
+      function showToast(text) {
+        state.toast = { text, until: state.elapsed + 1.4 };
+      }
+
+      function tryPlace(gear, slot) {
+        if (!gear || !slot || slot.gear) return false;
+        if (gear.r === slot.required) {
+          slot.gear = gear;
+          gear.used = true;
+          gear.x = slot.x;
+          gear.y = slot.y;
+          showToast("찰칵! 맞물렸습니다");
+          if (state.slots.every((s) => s.gear)) {
+            state.solveT = 0;
+          }
+          return true;
+        }
+        showToast("맞물리지 않습니다! 크기가 다릅니다");
+        state.bounce.push({ gear, t: 0 });
+        return false;
+      }
+
+      function nearestSlot(x, y) {
+        let best = null;
+        let bestDist = SNAP_DIST;
+        for (const slot of state.slots) {
+          if (slot.gear) continue;
+          const d = Math.hypot(slot.x - x, slot.y - y);
+          if (d < bestDist) {
+            bestDist = d;
+            best = slot;
+          }
+        }
+        return best;
+      }
+
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: ((event.clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((event.clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function gearAt(x, y) {
+        for (let i = state.tray.length - 1; i >= 0; i -= 1) {
+          const gear = state.tray[i];
+          if (!gear.used && Math.hypot(gear.x - x, gear.y - y) <= gear.r + 8) {
+            return i;
+          }
+        }
+        return -1;
+      }
+
+      function onPointerDown(event) {
+        if (state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+          return;
+        }
+        if (state.solveT >= 0) return;
+        const p = canvasPoint(event);
+        const index = gearAt(p.x, p.y);
+        if (index >= 0) {
+          event.preventDefault();
+          const gear = state.tray[index];
+          state.drag = { gear, dx: gear.x - p.x, dy: gear.y - p.y };
+          canvas.setPointerCapture?.(event.pointerId);
+        }
+      }
+
+      function onPointerMove(event) {
+        if (!state.drag) return;
+        event.preventDefault();
+        const p = canvasPoint(event);
+        state.drag.gear.x = p.x + state.drag.dx;
+        state.drag.gear.y = p.y + state.drag.dy;
+      }
+
+      function onPointerUp(event) {
+        if (!state.drag) return;
+        event.preventDefault();
+        const gear = state.drag.gear;
+        state.drag = null;
+        const slot = nearestSlot(gear.x, gear.y);
+        if (slot) {
+          tryPlace(gear, slot);
+        }
+        if (!gear.used) {
+          gear.x = gear.homeX;
+          gear.y = gear.homeY;
+        }
+      }
+
+      function keyboardPlace() {
+        const gear = state.tray[state.selGear];
+        const slot = state.slots[state.selSlot];
+        if (gear && !gear.used && slot && !slot.gear && state.solveT < 0) {
+          tryPlace(gear, slot);
+        }
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (state.mode !== "running") return;
+        const freeGears = state.tray.filter((g) => !g.used);
+        const freeSlots = state.slots.filter((s) => !s.gear);
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          event.preventDefault();
+          const dir = event.key === "ArrowRight" ? 1 : -1;
+          state.selGear = (state.selGear + dir + state.tray.length) % state.tray.length;
+        } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+          event.preventDefault();
+          const dir = event.key === "ArrowDown" ? 1 : -1;
+          state.selSlot = (state.selSlot + dir + state.slots.length) % state.slots.length;
+        } else if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          if (freeGears.length && freeSlots.length) keyboardPlace();
+        }
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") return;
+        state.elapsed += dt;
+        state.spin += dt * 0.4;
+        if (state.elapsed >= TIME_LIMIT) {
+          failStage("제한 시간 90초 초과");
+          return;
+        }
+        for (const b of state.bounce) {
+          b.t += dt * 4;
+          if (b.t >= 1) {
+            b.gear.x = b.gear.homeX;
+            b.gear.y = b.gear.homeY;
+          }
+        }
+        state.bounce = state.bounce.filter((b) => b.t < 1);
+        if (state.solveT >= 0) {
+          state.solveT += dt;
+          state.spin += dt * 6;
+          if (state.solveT >= 1.8) {
+            state.clockIndex += 1;
+            if (state.clockIndex >= CLOCK_COUNT) {
+              clearStage();
+            } else {
+              showToast(`시계 ${state.clockIndex}호 수리 완료!`);
+              buildClock(state.clockIndex);
+            }
+          }
+        }
+      }
+
+      function drawGear(gear, angle) {
+        ctx.save();
+        ctx.translate(gear.x, gear.y);
+        ctx.rotate(angle);
+        ctx.fillStyle = gear.color;
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.85)";
+        ctx.lineWidth = 2;
+        const teeth = gear.teeth;
+        for (let i = 0; i < teeth; i += 1) {
+          const a = (i / teeth) * Math.PI * 2;
+          ctx.save();
+          ctx.rotate(a);
+          ctx.fillRect(gear.r - 2, -3, 7, 6);
+          ctx.restore();
+        }
+        ctx.beginPath();
+        ctx.arc(0, 0, gear.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#0f172a";
+        ctx.beginPath();
+        ctx.arc(0, 0, gear.r * 0.28, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.5)";
+        for (let i = 0; i < 4; i += 1) {
+          const a = (i / 4) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(a) * gear.r * 0.3, Math.sin(a) * gear.r * 0.3);
+          ctx.lineTo(Math.cos(a) * gear.r * 0.85, Math.sin(a) * gear.r * 0.85);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      function drawWorkshop() {
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#1e293b");
+        grad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        ctx.fillStyle = "#3f2d1c";
+        ctx.fillRect(0, 428, VIEW.width, 112);
+        ctx.fillStyle = "#553c24";
+        ctx.fillRect(0, 428, VIEW.width, 10);
+      }
+
+      function drawClockFace() {
+        ctx.save();
+        ctx.fillStyle = "#f8fafc";
+        ctx.strokeStyle = "#b45309";
+        ctx.lineWidth = 10;
+        ctx.beginPath();
+        ctx.arc(FACE.x, FACE.y, FACE.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.strokeStyle = "#94a3b8";
+        ctx.lineWidth = 3;
+        for (let i = 0; i < 12; i += 1) {
+          const a = (i / 12) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(FACE.x + Math.cos(a) * (FACE.r - 14), FACE.y + Math.sin(a) * (FACE.r - 14));
+          ctx.lineTo(FACE.x + Math.cos(a) * (FACE.r - 26), FACE.y + Math.sin(a) * (FACE.r - 26));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      function drawHands(progress) {
+        const minute = progress * Math.PI * 4;
+        const hour = progress * Math.PI * 0.8;
+        ctx.save();
+        ctx.translate(FACE.x, FACE.y);
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineCap = "round";
+        ctx.lineWidth = 7;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(hour - Math.PI / 2) * 60, Math.sin(hour - Math.PI / 2) * 60);
+        ctx.stroke();
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(minute - Math.PI / 2) * 100, Math.sin(minute - Math.PI / 2) * 100);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawRunning() {
+        drawWorkshop();
+        drawClockFace();
+
+        const solving = state.solveT >= 0;
+        const spinAngle = solving ? state.spin * 4 : 0;
+
+        for (const slot of state.slots) {
+          ctx.save();
+          if (!slot.gear) {
+            ctx.strokeStyle = "rgba(37, 99, 235, 0.55)";
+            ctx.setLineDash([6, 6]);
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(slot.x, slot.y, slot.required + 4, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = "rgba(15, 23, 42, 0.7)";
+            ctx.beginPath();
+            ctx.arc(slot.x, slot.y, 7, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+
+        // 중심 구동 톱니
+        drawGear(
+          { x: FACE.x, y: FACE.y, r: 20, teeth: 8, color: "#94a3b8" },
+          solving ? -spinAngle : state.spin * 0.2
+        );
+
+        for (const slot of state.slots) {
+          if (slot.gear) {
+            drawGear(slot.gear, spinAngle + slot.required);
+          }
+        }
+
+        drawHands(solving ? Math.min(state.solveT / 1.8, 1) : 0);
+
+        // 트레이 톱니
+        for (let i = 0; i < state.tray.length; i += 1) {
+          const gear = state.tray[i];
+          if (gear.used || state.drag?.gear === gear) continue;
+          const bounce = state.bounce.find((b) => b.gear === gear);
+          if (bounce) {
+            const k = bounce.t;
+            gear.x = gear.x + (gear.homeX - gear.x) * Math.min(k * 1.4, 1);
+            gear.y = gear.y + (gear.homeY - gear.y) * Math.min(k * 1.4, 1) - Math.sin(k * Math.PI) * 30;
+          }
+          drawGear(gear, 0);
+          if (i === state.selGear) {
+            ctx.strokeStyle = "#facc15";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(gear.x, gear.y, gear.r + 10, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+        if (state.drag) {
+          ctx.save();
+          ctx.globalAlpha = 0.9;
+          drawGear(state.drag.gear, 0);
+          ctx.restore();
+        }
+
+        // 선택 중인 슬롯 강조(키보드 조작)
+        const selSlot = state.slots[state.selSlot];
+        if (selSlot && !selSlot.gear) {
+          ctx.strokeStyle = "#facc15";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(selSlot.x, selSlot.y, selSlot.required + 12, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        drawHud();
+        drawToast();
+      }
+
+      function drawHud() {
+        const remain = Math.max(0, TIME_LIMIT - state.elapsed);
+        const placed = state.slots.filter((s) => s.gear).length;
+        ctx.fillStyle = "rgba(15, 23, 42, 0.8)";
+        ctx.fillRect(0, 0, VIEW.width, 54);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 22px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`시계 ${state.clockIndex + 1}/${CLOCK_COUNT}`, 20, 36);
+        ctx.fillText(`톱니 ${placed}/${state.slots.length}`, 180, 36);
+        ctx.textAlign = "right";
+        ctx.fillStyle = remain <= 15 ? "#f87171" : "#f8fafc";
+        ctx.fillText(`남은 시간 ${remain.toFixed(0)}초`, VIEW.width - 20, 36);
+        ctx.textAlign = "left";
+        const barWidth = 220;
+        ctx.fillStyle = "rgba(248,250,252,0.25)";
+        ctx.fillRect(VIEW.width - 20 - barWidth, 42, barWidth, 6);
+        ctx.fillStyle = remain <= 15 ? "#f87171" : "#34d399";
+        ctx.fillRect(VIEW.width - 20 - barWidth, 42, barWidth * (remain / TIME_LIMIT), 6);
+      }
+
+      function drawToast() {
+        if (!state.toast || state.elapsed > state.toast.until) return;
+        ctx.save();
+        ctx.font = "800 26px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+        const w = ctx.measureText(state.toast.text).width + 48;
+        ctx.fillRect(VIEW.width / 2 - w / 2, 70, w, 44);
+        ctx.fillStyle = "#fde68a";
+        ctx.fillText(state.toast.text, VIEW.width / 2, 101);
+        ctx.restore();
+        ctx.textAlign = "left";
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.94)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(108, 72, 744, 396);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(108, 72, 744, 396);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 142);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 23px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 214 + index * 44);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("시계 수리공", [
+            "톱니바퀴를 알맞은 자리에 끼워 시계를 다시 돌리세요",
+            "조작: 터치 드래그로 톱니 배치 (키보드: ←→ 톱니, ↑↓ 축, Enter 배치)",
+            "클리어 조건: 시계 3대를 모두 작동시키면 클리어",
+            "실패 조건: 제한 시간 90초 초과 시 실패",
+            "축 주변의 희미한 원이 필요한 톱니 크기 힌트입니다",
+            "화면 터치 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "running") {
+          drawRunning();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("수리 실패", [
+            `원인: ${state.failReason || "제한 시간 90초 초과 시 실패"}`,
+            `수리한 시계: ${state.clockIndex}/${CLOCK_COUNT}대`,
+            "공유 목숨 1개가 즉시 종료되었습니다.",
+            "화면 터치 또는 Enter로 다시 도전할 수 있습니다",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderCard("수리 완료!", [
+          "시계 3대를 모두 작동시켰습니다!",
+          `소요 시간 ${state.lastRunTime.toFixed(1)}초`,
+          "호스트가 다음 미플레이 스테이지를 랜덤으로 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          mode: state.mode,
+          clock_index: state.clockIndex,
+          clocks_total: CLOCK_COUNT,
+          gears_placed: state.slots.filter((s) => s.gear).length,
+          gears_required: state.slots.length,
+          remaining_time: Math.max(0, Math.round((TIME_LIMIT - state.elapsed) * 10) / 10),
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          fail_reason: state.failReason,
+          note: state.note,
+        });
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "clock-repair",
+        title: "시계 수리공",
+        creator: "Anonymous Creator",
+        genre: "Gear puzzle",
+        clearCondition: "시계 3대를 모두 작동시키면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", onPointerDown);
+      canvas.addEventListener("pointermove", onPointerMove);
+      canvas.addEventListener("pointerup", onPointerUp);
+      canvas.addEventListener("pointercancel", onPointerUp);
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

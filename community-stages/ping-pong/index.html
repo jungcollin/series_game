@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>탁구 랠리</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">탁구 랠리. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 드래그로 패들 이동이며 키보드 방향키로도 움직일 수 있습니다. 공이 가까이 올 때 패들로 받아쳐 랠리를 이어가세요. 20회 연속 받아치면 클리어, 공을 3번 놓치면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="탁구 랠리" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const RALLY_TARGET = 20;
+      const MISS_LIMIT = 3;
+      const BASE_SPEED = 0.82;
+      const MAX_SPEED = 1.55;
+      const HIT_X_RANGE = 74;
+      const HIT_Y_RANGE = 48;
+      const PADDLE_AREA = { minX: 120, maxX: 840, minY: 380, maxY: 514 };
+      const PLAYER_Z_Y = 470;
+      const OPPONENT_Z_Y = 152;
+      const relayContext = window.RelayRuntime?.readContext("ping-pong") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        streak: 0,
+        misses: 0,
+        paddle: { x: 480, y: 470 },
+        paddlePulse: 0,
+        hitFlash: 0,
+        missFlash: 0,
+        serveTimer: 0,
+        note: "패들을 움직여 공을 받아치며 랠리를 이어가세요",
+        ball: {
+          active: false,
+          z: 0,
+          dir: 1,
+          speed: BASE_SPEED,
+          startX: 0,
+          endX: 0,
+          curveAmp: 0,
+          x: 0,
+        },
+      };
+
+      const keys = { left: false, right: false, up: false, down: false };
+
+      function randomRange(min, max) {
+        return min + Math.random() * (max - min);
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function ballSpeed() {
+        return Math.min(MAX_SPEED, BASE_SPEED + state.streak * 0.035);
+      }
+
+      function launchBall(dir, fromX) {
+        const ball = state.ball;
+        const towardPlayer = dir > 0;
+        const margin = towardPlayer ? 0.8 : 0.7;
+        let endX = randomRange(-margin, margin);
+        let curveAmp = 0;
+        if (state.streak >= 6) {
+          const maxAmp = Math.min(0.42, 0.12 + (state.streak - 6) * 0.05);
+          curveAmp = randomRange(-maxAmp, maxAmp);
+          // 커브 정점(z=0.5)에서도 패들이 닿는 범위(±0.95)를 벗어나지 않게 제한
+          const mid = (fromX + endX) / 2;
+          const over = Math.abs(mid) + Math.abs(curveAmp) - 0.95;
+          if (over > 0) {
+            curveAmp = Math.sign(curveAmp) * Math.max(0, Math.abs(curveAmp) - over);
+          }
+        }
+        ball.active = true;
+        ball.dir = dir;
+        ball.z = towardPlayer ? 0 : 1;
+        ball.startX = fromX;
+        ball.endX = endX;
+        ball.curveAmp = curveAmp;
+        ball.speed = ballSpeed();
+        ball.x = fromX;
+      }
+
+      function serveFromOpponent() {
+        launchBall(1, randomRange(-0.6, 0.6));
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.streak = 0;
+        state.misses = 0;
+        state.paddle.x = 480;
+        state.paddle.y = 470;
+        state.paddlePulse = 0;
+        state.hitFlash = 0;
+        state.missFlash = 0;
+        state.serveTimer = 0.7;
+        state.ball.active = false;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        if (state.mode !== "running") {
+          state.mode = "failed";
+          window.relayStageResult.status = "failed";
+          reportFailedToHost(reason);
+          return;
+        }
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function zLerp(a, b, z) {
+        return a + (b - a) * z;
+      }
+
+      function ballScreenPos() {
+        const ball = state.ball;
+        const halfW = zLerp(120, 360, ball.z);
+        return {
+          x: VIEW.width / 2 + ball.x * halfW,
+          y: zLerp(OPPONENT_Z_Y, PLAYER_Z_Y, ball.z),
+          radius: zLerp(6, 20, ball.z),
+        };
+      }
+
+      function clampPaddle() {
+        state.paddle.x = Math.max(PADDLE_AREA.minX, Math.min(PADDLE_AREA.maxX, state.paddle.x));
+        state.paddle.y = Math.max(PADDLE_AREA.minY, Math.min(PADDLE_AREA.maxY, state.paddle.y));
+      }
+
+      function handlePlayerHit() {
+        const pos = ballScreenPos();
+        const dx = Math.abs(pos.x - state.paddle.x);
+        const dy = Math.abs(pos.y - state.paddle.y);
+        if (dx <= HIT_X_RANGE && dy <= HIT_Y_RANGE) {
+          state.streak += 1;
+          state.paddlePulse = 0.18;
+          state.hitFlash = 0.22;
+          if (state.streak >= RALLY_TARGET) {
+            clearStage();
+            return;
+          }
+          // 중심에서 맞출수록 상대 코트 중앙으로 안정적 반격
+          const centerOffset = (pos.x - state.paddle.x) / HIT_X_RANGE;
+          const returnFrom = Math.max(-0.9, Math.min(0.9, state.ball.x * 0.4 + centerOffset * 0.5));
+          launchBall(-1, returnFrom);
+          return;
+        }
+        if (state.ball.z > 1.08) {
+          state.misses += 1;
+          state.streak = 0;
+          state.missFlash = 0.4;
+          state.ball.active = false;
+          if (state.misses >= MISS_LIMIT) {
+            failStage("missed_three_balls");
+            return;
+          }
+          state.serveTimer = 0.9;
+        }
+      }
+
+      function updateBall(dt) {
+        const ball = state.ball;
+        if (!ball.active) {
+          return;
+        }
+        ball.z += ball.dir * ball.speed * dt;
+        const t = Math.max(0, Math.min(1, ball.dir > 0 ? ball.z : 1 - ball.z));
+        ball.x = zLerp(ball.startX, ball.endX, t) + ball.curveAmp * Math.sin(Math.PI * t);
+        if (ball.dir > 0) {
+          if (ball.z >= 0.98) {
+            handlePlayerHit();
+          }
+        } else if (ball.z <= 0) {
+          // 상대 패들이 받아침
+          serveFromOpponentAt(ball.x);
+        }
+      }
+
+      function serveFromOpponentAt(atX) {
+        const ball = state.ball;
+        ball.dir = 1;
+        ball.z = 0;
+        ball.startX = Math.max(-0.7, Math.min(0.7, atX));
+        const margin = 0.8;
+        ball.endX = randomRange(-margin, margin);
+        let curveAmp = 0;
+        if (state.streak >= 6) {
+          const maxAmp = Math.min(0.42, 0.12 + (state.streak - 6) * 0.05);
+          curveAmp = randomRange(-maxAmp, maxAmp);
+          const mid = (ball.startX + ball.endX) / 2;
+          const over = Math.abs(mid) + Math.abs(curveAmp) - 0.95;
+          if (over > 0) {
+            curveAmp = Math.sign(curveAmp) * Math.max(0, Math.abs(curveAmp) - over);
+          }
+        }
+        ball.curveAmp = curveAmp;
+        ball.speed = ballSpeed();
+        ball.x = ball.startX;
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        if (state.paddlePulse > 0) state.paddlePulse -= dt;
+        if (state.hitFlash > 0) state.hitFlash -= dt;
+        if (state.missFlash > 0) state.missFlash -= dt;
+
+        const keySpeed = 520;
+        if (keys.left) state.paddle.x -= keySpeed * dt;
+        if (keys.right) state.paddle.x += keySpeed * dt;
+        if (keys.up) state.paddle.y -= keySpeed * 0.6 * dt;
+        if (keys.down) state.paddle.y += keySpeed * 0.6 * dt;
+        clampPaddle();
+
+        if (!state.ball.active && state.serveTimer > 0) {
+          state.serveTimer -= dt;
+          if (state.serveTimer <= 0) {
+            serveFromOpponent();
+          }
+        }
+        updateBall(dt);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 46);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function drawTable() {
+        const cx = VIEW.width / 2;
+        const gradient = ctx.createLinearGradient(0, 110, 0, 530);
+        gradient.addColorStop(0, "#14532d");
+        gradient.addColorStop(1, "#166534");
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.moveTo(cx - 130, 132);
+        ctx.lineTo(cx + 130, 132);
+        ctx.lineTo(cx + 400, 530);
+        ctx.lineTo(cx - 400, 530);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = "rgba(248, 250, 252, 0.85)";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        // 네트
+        const netY = (OPPONENT_Z_Y + PLAYER_Z_Y) / 2;
+        const netHalf = zLerp(120, 360, 0.5) + 12;
+        ctx.strokeStyle = "rgba(226, 232, 240, 0.9)";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(cx - netHalf, netY);
+        ctx.lineTo(cx + netHalf, netY);
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(226, 232, 240, 0.35)";
+        ctx.lineWidth = 1;
+        for (let x = -netHalf; x <= netHalf; x += 14) {
+          ctx.beginPath();
+          ctx.moveTo(cx + x, netY - 7);
+          ctx.lineTo(cx + x, netY + 7);
+          ctx.stroke();
+        }
+
+        // 중앙선
+        ctx.strokeStyle = "rgba(248, 250, 252, 0.35)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, 132);
+        ctx.lineTo(cx, 530);
+        ctx.stroke();
+      }
+
+      function drawPaddle(x, y, scale, faceColor, pulse) {
+        const grow = 1 + (pulse > 0 ? pulse * 1.4 : 0);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(scale * grow, scale * grow);
+        // 손잡이
+        ctx.fillStyle = "#78350f";
+        ctx.fillRect(-7, 12, 14, 30);
+        // 면
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 34, 24, 0, 0, Math.PI * 2);
+        ctx.fillStyle = faceColor;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.65)";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, 52);
+        ctx.fillStyle = "#fbbf24";
+        ctx.font = "800 24px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`랠리 ${state.streak}/${RALLY_TARGET}`, 20, 35);
+        ctx.fillStyle = state.misses > 0 ? "#f87171" : "#e2e8f0";
+        ctx.textAlign = "right";
+        ctx.fillText(`미스 ${state.misses}/${MISS_LIMIT}`, VIEW.width - 20, 35);
+        if (state.streak >= 6) {
+          ctx.fillStyle = "#38bdf8";
+          ctx.textAlign = "center";
+          ctx.font = "700 18px Trebuchet MS";
+          ctx.fillText("커브볼 주의!", VIEW.width / 2, 34);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("탁구 랠리", [
+            "패들을 움직여 공을 받아치며 랠리를 이어가세요",
+            "조작: 드래그로 패들 이동 (키보드 방향키도 가능)",
+            "클리어 조건: 20회 연속 받아치면 클리어",
+            "실패 조건: 공을 3번 놓치면 실패",
+            "랠리가 길어질수록 공이 빨라지고 커브볼이 날아옵니다",
+            "터치 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "공을 3번 놓치면 실패",
+            `최고 연속 랠리 기록에 도전해 보세요`,
+            `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+            "터치 또는 Enter로 다시 도전",
+          ], "#b91c1c");
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          renderCard("클리어!", [
+            "20회 연속 받아치면 클리어",
+            `${RALLY_TARGET}회 랠리 성공!`,
+            `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+          ], "#15803d");
+          return;
+        }
+
+        // running
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        drawTable();
+
+        // 상대 패들
+        if (state.ball.active) {
+          const oppHalf = 120;
+          const oppX = VIEW.width / 2 + state.ball.x * oppHalf;
+          drawPaddle(oppX, OPPONENT_Z_Y - 18, 0.55, "#1d4ed8", 0);
+        }
+
+        // 공 + 그림자
+        if (state.ball.active) {
+          const pos = ballScreenPos();
+          ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+          ctx.beginPath();
+          ctx.ellipse(pos.x + 6, pos.y + pos.radius + 8, pos.radius * 0.9, pos.radius * 0.35, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, pos.radius, 0, Math.PI * 2);
+          ctx.fillStyle = state.ball.curveAmp !== 0 && state.streak >= 6 ? "#fb923c" : "#f8fafc";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(15, 23, 42, 0.4)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        // 플레이어 패들
+        drawPaddle(state.paddle.x, state.paddle.y, 1, "#dc2626", state.paddlePulse);
+
+        if (state.hitFlash > 0) {
+          ctx.fillStyle = `rgba(74, 222, 128, ${state.hitFlash * 1.4})`;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+        if (state.missFlash > 0) {
+          ctx.fillStyle = `rgba(220, 38, 38, ${state.missFlash * 0.9})`;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+
+        if (!state.ball.active && state.serveTimer > 0) {
+          ctx.fillStyle = "#e2e8f0";
+          ctx.font = "700 26px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText("서브 준비…", VIEW.width / 2, 300);
+          ctx.textAlign = "left";
+        }
+
+        drawHud();
+      }
+
+      function renderGameToText() {
+        const pos = state.ball.active ? ballScreenPos() : null;
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down, ball z 0(상대)~1(플레이어)",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          streak: state.streak,
+          rally_target: RALLY_TARGET,
+          misses: state.misses,
+          miss_limit: MISS_LIMIT,
+          paddle: { x: Math.round(state.paddle.x), y: Math.round(state.paddle.y) },
+          ball: state.ball.active
+            ? { z: Math.round(state.ball.z * 100) / 100, screen_x: Math.round(pos.x), screen_y: Math.round(pos.y), dir: state.ball.dir, speed: Math.round(state.ball.speed * 100) / 100, curve: Math.round(state.ball.curveAmp * 100) / 100 }
+            : null,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function pointerToCanvas(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: ((event.clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((event.clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (state.mode !== "running") {
+          return;
+        }
+        if (event.key === "ArrowLeft") { keys.left = true; event.preventDefault(); }
+        if (event.key === "ArrowRight") { keys.right = true; event.preventDefault(); }
+        if (event.key === "ArrowUp") { keys.up = true; event.preventDefault(); }
+        if (event.key === "ArrowDown") { keys.down = true; event.preventDefault(); }
+      }
+
+      function onKeyUp(event) {
+        if (event.key === "ArrowLeft") keys.left = false;
+        if (event.key === "ArrowRight") keys.right = false;
+        if (event.key === "ArrowUp") keys.up = false;
+        if (event.key === "ArrowDown") keys.down = false;
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "ping-pong",
+        title: "탁구 랠리",
+        creator: "Anonymous Creator",
+        genre: "Paddle rally",
+        clearCondition: "20회 연속 받아치면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      let dragging = false;
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        dragging = true;
+        const pos = pointerToCanvas(event);
+        state.paddle.x = pos.x;
+        state.paddle.y = pos.y;
+        clampPaddle();
+        canvas.setPointerCapture?.(event.pointerId);
+      });
+      canvas.addEventListener("pointermove", (event) => {
+        if (!dragging || state.mode !== "running") {
+          return;
+        }
+        event.preventDefault();
+        const pos = pointerToCanvas(event);
+        state.paddle.x = pos.x;
+        state.paddle.y = pos.y;
+        clampPaddle();
+      });
+      const endDrag = (event) => {
+        if (event) event.preventDefault();
+        dragging = false;
+      };
+      canvas.addEventListener("pointerup", endDrag);
+      canvas.addEventListener("pointercancel", endDrag);
+      canvas.addEventListener("touchstart", (event) => {
+        if (state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+        }
+      }, { passive: false });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

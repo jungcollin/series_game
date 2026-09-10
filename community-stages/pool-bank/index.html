@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>당구 한 큐</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">당구 한 큐. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 드래그로 조준 후 놓아서 샷입니다. 수구를 눌러 뒤로 당기면 예상 경로가 점선으로 표시되고, 놓으면 샷이 나갑니다. 키보드는 방향키로 조준, 스페이스로 샷을 합니다. 공 5개를 포켓에 넣으면 클리어, 7회 실패 시 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="당구 한 큐" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const TABLE = { left: 70, top: 96, right: 890, bottom: 500 };
+      const BALL_R = 12;
+      const POCKET_R = 21;
+      const SUCCESS_TARGET = 5;
+      const FAIL_LIMIT = 7;
+      const FRICTION = 130;
+      const STOP_SPEED = 8;
+      const RESTITUTION = 0.86;
+      const MAX_PULL = 200;
+      const SHOT_SCALE = 5.2;
+      const PHYS_STEP = 1 / 240;
+      const relayContext = window.RelayRuntime?.readContext("pool-bank") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const pockets = [
+        { x: TABLE.left, y: TABLE.top },
+        { x: (TABLE.left + TABLE.right) / 2, y: TABLE.top },
+        { x: TABLE.right, y: TABLE.top },
+        { x: TABLE.left, y: TABLE.bottom },
+        { x: (TABLE.left + TABLE.right) / 2, y: TABLE.bottom },
+        { x: TABLE.right, y: TABLE.bottom },
+      ];
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        success: 0,
+        fails: 0,
+        phase: "aim", // aim | rolling | resolving
+        balls: [],
+        aiming: false,
+        aimEnd: null, // 슬링샷: 포인터 위치 (당긴 끝점)
+        kbAim: { angle: -Math.PI / 2, power: 0.55, active: false },
+        shotPocketedTarget: false,
+        shotPocketedCue: false,
+        shotPocketedBlocker: false,
+        flash: null,
+        bankLayout: false,
+        message: "수구를 눌러 뒤로 당긴 뒤 놓으세요",
+        note: "쿠션을 활용해 공을 포켓에 넣으세요",
+      };
+
+      function randomRange(min, max) {
+        return min + Math.random() * (max - min);
+      }
+
+      function dist(ax, ay, bx, by) {
+        return Math.hypot(ax - bx, ay - by);
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function pointToSegmentDist(px, py, ax, ay, bx, by) {
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq === 0) return dist(px, py, ax, ay);
+        let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+        t = Math.max(0, Math.min(1, t));
+        return dist(px, py, ax + dx * t, ay + dy * t);
+      }
+
+      function segmentClear(ax, ay, bx, by, blockers, clearance) {
+        for (const b of blockers) {
+          if (pointToSegmentDist(b.x, b.y, ax, ay, bx, by) < clearance) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      // 목표 공 -> 포켓 경로 + 수구 -> 목표 공 경로(직선 또는 1쿠션 뱅크)가 모두 확보되는지 검사
+      function layoutSolvable(cue, target, blockers) {
+        const clearance = BALL_R * 2 + 6;
+        for (const pocket of pockets) {
+          if (!segmentClear(target.x, target.y, pocket.x, pocket.y, blockers.concat([cue]), clearance)) {
+            continue;
+          }
+          const toPocket = Math.atan2(pocket.y - target.y, pocket.x - target.x);
+          const directAngle = Math.atan2(target.y - cue.y, target.x - cue.x);
+          let cut = Math.abs(directAngle - toPocket);
+          if (cut > Math.PI) cut = Math.PI * 2 - cut;
+          if (cut < (Math.PI / 2) * 0.8) {
+            const direct = segmentClear(cue.x, cue.y, target.x, target.y, blockers, clearance);
+            if (direct) {
+              return { solvable: true, bank: false };
+            }
+            // 1쿠션 뱅크: 수구를 각 레일에 대해 반사해 목표 공까지 경로 확인
+            const rails = [
+              { reflect: (p) => ({ x: p.x, y: TABLE.top * 2 - p.y }) }, // 상단
+              { reflect: (p) => ({ x: p.x, y: TABLE.bottom * 2 - p.y }) }, // 하단
+              { reflect: (p) => ({ x: TABLE.left * 2 - p.x, y: p.y }) }, // 좌측
+              { reflect: (p) => ({ x: TABLE.right * 2 - p.x, y: p.y }) }, // 우측
+            ];
+            for (const rail of rails) {
+              const mirrored = rail.reflect(cue);
+              if (!segmentClear(mirrored.x, mirrored.y, target.x, target.y, blockers, clearance)) {
+                continue;
+              }
+              const bankAngle = Math.atan2(target.y - mirrored.y, target.x - mirrored.x);
+              let bankCut = Math.abs(bankAngle - toPocket);
+              if (bankCut > Math.PI) bankCut = Math.PI * 2 - bankCut;
+              if (bankCut < (Math.PI / 2) * 0.8) {
+                return { solvable: true, bank: true };
+              }
+            }
+          }
+        }
+        return { solvable: false, bank: false };
+      }
+
+      function randomSpot(margin) {
+        return {
+          x: randomRange(TABLE.left + margin, TABLE.right - margin),
+          y: randomRange(TABLE.top + margin, TABLE.bottom - margin),
+        };
+      }
+
+      function newLayout() {
+        const clearance = BALL_R * 2 + 6;
+        for (let attempt = 0; attempt < 300; attempt += 1) {
+          const target = randomSpot(60);
+          const cue = randomSpot(50);
+          if (dist(cue.x, cue.y, target.x, target.y) < 200) continue;
+          const wantBank = state.success >= 1 && Math.random() < 0.65;
+          const blockers = [];
+          const blockerCount = wantBank ? 2 : 1;
+          let ok = true;
+          for (let i = 0; i < blockerCount; i += 1) {
+            let placed = null;
+            for (let t = 0; t < 40 && !placed; t += 1) {
+              const b = randomSpot(50);
+              if (dist(b.x, b.y, cue.x, cue.y) < 90) continue;
+              if (dist(b.x, b.y, target.x, target.y) < 90) continue;
+              if (blockers.some((o) => dist(o.x, o.y, b.x, b.y) < 80)) continue;
+              if (pockets.some((p) => dist(p.x, p.y, b.x, b.y) < 60)) continue;
+              placed = b;
+            }
+            if (!placed) { ok = false; break; }
+            blockers.push(placed);
+          }
+          if (!ok) continue;
+          const check = layoutSolvable(cue, target, blockers);
+          if (!check.solvable) continue;
+          if (wantBank && !check.bank) continue;
+          if (!wantBank && check.bank) continue;
+          state.balls = [
+            { x: cue.x, y: cue.y, vx: 0, vy: 0, kind: "cue", pocketed: false },
+            { x: target.x, y: target.y, vx: 0, vy: 0, kind: "target", pocketed: false },
+            ...blockers.map((b) => ({ x: b.x, y: b.y, vx: 0, vy: 0, kind: "blocker", pocketed: false })),
+          ];
+          state.bankLayout = check.bank;
+          state.phase = "aim";
+          state.aiming = false;
+          state.aimEnd = null;
+          state.shotPocketedTarget = false;
+          state.shotPocketedCue = false;
+          state.shotPocketedBlocker = false;
+          state.message = check.bank ? "직선이 막혔습니다 — 쿠션 뱅크샷!" : "수구를 눌러 뒤로 당긴 뒤 놓으세요";
+          return;
+        }
+        // 폴백: 방해 공 없는 항상 풀리는 배치
+        const target = randomSpot(70);
+        const cue = randomSpot(50);
+        state.balls = [
+          { x: cue.x, y: cue.y, vx: 0, vy: 0, kind: "cue", pocketed: false },
+          { x: target.x, y: target.y, vx: 0, vy: 0, kind: "target", pocketed: false },
+        ];
+        state.bankLayout = false;
+        state.phase = "aim";
+        state.aiming = false;
+        state.aimEnd = null;
+        state.message = "수구를 눌러 뒤로 당긴 뒤 놓으세요";
+      }
+
+      function cueBall() {
+        return state.balls.find((b) => b.kind === "cue" && !b.pocketed);
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.success = 0;
+        state.fails = 0;
+        state.flash = null;
+        newLayout();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function currentShotVector() {
+        const cue = cueBall();
+        if (!cue) return null;
+        if (state.aimEnd) {
+          const dx = cue.x - state.aimEnd.x;
+          const dy = cue.y - state.aimEnd.y;
+          const len = Math.hypot(dx, dy);
+          if (len < 12) return null;
+          const pull = Math.min(len, MAX_PULL);
+          return { dx: dx / len, dy: dy / len, power: pull / MAX_PULL };
+        }
+        if (state.kbAim.active) {
+          return {
+            dx: Math.cos(state.kbAim.angle),
+            dy: Math.sin(state.kbAim.angle),
+            power: state.kbAim.power,
+          };
+        }
+        return null;
+      }
+
+      // 예상 경로: 수구를 복사해 첫 반사/첫 충돌/포켓까지 시뮬레이션
+      function predictPath(vec) {
+        const cue = cueBall();
+        if (!cue || !vec) return [];
+        const ghost = { x: cue.x, y: cue.y, vx: vec.dx * vec.power * MAX_PULL * SHOT_SCALE, vy: vec.dy * vec.power * MAX_PULL * SHOT_SCALE };
+        const points = [{ x: ghost.x, y: ghost.y }];
+        const others = state.balls.filter((b) => b.kind !== "cue" && !b.pocketed);
+        const step = 1 / 120;
+        for (let i = 0; i < 400; i += 1) {
+          ghost.x += ghost.vx * step;
+          ghost.y += ghost.vy * step;
+          const speed = Math.hypot(ghost.vx, ghost.vy);
+          const next = Math.max(0, speed - FRICTION * step);
+          if (next === 0) break;
+          ghost.vx = (ghost.vx / speed) * next;
+          ghost.vy = (ghost.vy / speed) * next;
+          let bounced = false;
+          if (ghost.x - BALL_R < TABLE.left) { ghost.x = TABLE.left + BALL_R; ghost.vx = Math.abs(ghost.vx); bounced = true; }
+          if (ghost.x + BALL_R > TABLE.right) { ghost.x = TABLE.right - BALL_R; ghost.vx = -Math.abs(ghost.vx); bounced = true; }
+          if (ghost.y - BALL_R < TABLE.top) { ghost.y = TABLE.top + BALL_R; ghost.vy = Math.abs(ghost.vy); bounced = true; }
+          if (ghost.y + BALL_R > TABLE.bottom) { ghost.y = TABLE.bottom - BALL_R; ghost.vy = -Math.abs(ghost.vy); bounced = true; }
+          points.push({ x: ghost.x, y: ghost.y });
+          if (pockets.some((p) => dist(p.x, p.y, ghost.x, ghost.y) < POCKET_R)) break;
+          if (others.some((b) => dist(b.x, b.y, ghost.x, ghost.y) < BALL_R * 2)) break;
+          if (bounced) break; // 첫 반사까지만 표시
+        }
+        return points;
+      }
+
+      function stepPhysics(dt) {
+        const moving = state.balls.filter((b) => !b.pocketed);
+        for (const ball of moving) {
+          ball.x += ball.vx * dt;
+          ball.y += ball.vy * dt;
+          const speed = Math.hypot(ball.vx, ball.vy);
+          if (speed > 0) {
+            const next = Math.max(0, speed - FRICTION * dt);
+            if (next < STOP_SPEED) {
+              ball.vx = 0;
+              ball.vy = 0;
+            } else {
+              ball.vx = (ball.vx / speed) * next;
+              ball.vy = (ball.vy / speed) * next;
+            }
+          }
+          // 쿠션
+          if (ball.x - BALL_R < TABLE.left) { ball.x = TABLE.left + BALL_R; ball.vx = Math.abs(ball.vx) * RESTITUTION; }
+          if (ball.x + BALL_R > TABLE.right) { ball.x = TABLE.right - BALL_R; ball.vx = -Math.abs(ball.vx) * RESTITUTION; }
+          if (ball.y - BALL_R < TABLE.top) { ball.y = TABLE.top + BALL_R; ball.vy = Math.abs(ball.vy) * RESTITUTION; }
+          if (ball.y + BALL_R > TABLE.bottom) { ball.y = TABLE.bottom - BALL_R; ball.vy = -Math.abs(ball.vy) * RESTITUTION; }
+          // 포켓
+          for (const pocket of pockets) {
+            if (dist(pocket.x, pocket.y, ball.x, ball.y) < POCKET_R) {
+              ball.pocketed = true;
+              ball.vx = 0;
+              ball.vy = 0;
+              if (ball.kind === "target") state.shotPocketedTarget = true;
+              if (ball.kind === "cue") state.shotPocketedCue = true;
+              if (ball.kind === "blocker") state.shotPocketedBlocker = true;
+              break;
+            }
+          }
+        }
+        // 공-공 충돌 (등질량 탄성)
+        const active = state.balls.filter((b) => !b.pocketed);
+        for (let i = 0; i < active.length; i += 1) {
+          for (let j = i + 1; j < active.length; j += 1) {
+            const a = active[i];
+            const b = active[j];
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const d = Math.hypot(dx, dy);
+            if (d > 0 && d < BALL_R * 2) {
+              const nx = dx / d;
+              const ny = dy / d;
+              const overlap = (BALL_R * 2 - d) / 2;
+              a.x -= nx * overlap;
+              a.y -= ny * overlap;
+              b.x += nx * overlap;
+              b.y += ny * overlap;
+              const dvx = b.vx - a.vx;
+              const dvy = b.vy - a.vy;
+              const rel = dvx * nx + dvy * ny;
+              if (rel < 0) {
+                a.vx += rel * nx;
+                a.vy += rel * ny;
+                b.vx -= rel * nx;
+                b.vy -= rel * ny;
+              }
+            }
+          }
+        }
+      }
+
+      function anyMoving() {
+        return state.balls.some((b) => !b.pocketed && (b.vx !== 0 || b.vy !== 0));
+      }
+
+      function resolveShot() {
+        if (state.shotPocketedTarget) {
+          state.success += 1;
+          state.flash = { color: "74, 222, 128", t: 0.35 };
+          if (state.success >= SUCCESS_TARGET) {
+            clearStage();
+            return;
+          }
+        } else {
+          state.fails += 1;
+          state.flash = { color: "220, 38, 38", t: 0.35 };
+          if (state.fails >= FAIL_LIMIT) {
+            failStage(state.shotPocketedCue ? "cue_ball_pocketed" : "shot_failed_seven_times");
+            return;
+          }
+        }
+        newLayout();
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        if (state.flash) {
+          state.flash.t -= dt;
+          if (state.flash.t <= 0) state.flash = null;
+        }
+        if (state.phase === "rolling") {
+          let remaining = dt;
+          while (remaining > 0) {
+            const step = Math.min(PHYS_STEP, remaining);
+            stepPhysics(step);
+            remaining -= step;
+          }
+          if (!anyMoving()) {
+            state.phase = "resolving";
+            resolveShot();
+          }
+        }
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 46);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function drawTable() {
+        // 외곽 나무 프레임
+        ctx.fillStyle = "#78350f";
+        ctx.fillRect(TABLE.left - 26, TABLE.top - 26, TABLE.right - TABLE.left + 52, TABLE.bottom - TABLE.top + 52);
+        // 쿠션
+        ctx.fillStyle = "#14532d";
+        ctx.fillRect(TABLE.left - 10, TABLE.top - 10, TABLE.right - TABLE.left + 20, TABLE.bottom - TABLE.top + 20);
+        // 펠트
+        ctx.fillStyle = "#15803d";
+        ctx.fillRect(TABLE.left, TABLE.top, TABLE.right - TABLE.left, TABLE.bottom - TABLE.top);
+        // 포켓
+        for (const pocket of pockets) {
+          ctx.beginPath();
+          ctx.arc(pocket.x, pocket.y, POCKET_R, 0, Math.PI * 2);
+          ctx.fillStyle = "#0f172a";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(248, 250, 252, 0.25)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      function drawBall(ball) {
+        if (ball.pocketed) return;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+        ctx.beginPath();
+        ctx.ellipse(ball.x + 3, ball.y + 4, BALL_R, BALL_R * 0.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+        ctx.fillStyle = ball.kind === "cue" ? "#f8fafc" : ball.kind === "target" ? "#f59e0b" : "#dc2626";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(15, 23, 42, 0.5)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (ball.kind === "target") {
+          ctx.beginPath();
+          ctx.arc(ball.x, ball.y, BALL_R * 0.45, 0, Math.PI * 2);
+          ctx.fillStyle = "#fff7ed";
+          ctx.fill();
+        }
+      }
+
+      function drawAim() {
+        if (state.phase !== "aim") return;
+        const vec = currentShotVector();
+        if (!vec) return;
+        const cue = cueBall();
+        const path = predictPath(vec);
+        ctx.save();
+        ctx.setLineDash([8, 8]);
+        ctx.strokeStyle = "rgba(248, 250, 252, 0.85)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        path.forEach((p, i) => {
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (path.length > 1) {
+          const last = path[path.length - 1];
+          ctx.beginPath();
+          ctx.arc(last.x, last.y, 6, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(248, 250, 252, 0.85)";
+          ctx.fill();
+        }
+        // 파워 게이지
+        const gx = TABLE.left;
+        const gy = TABLE.bottom + 18;
+        const gw = TABLE.right - TABLE.left;
+        ctx.fillStyle = "rgba(15, 23, 42, 0.7)";
+        ctx.fillRect(gx, gy, gw, 12);
+        ctx.fillStyle = vec.power > 0.85 ? "#ef4444" : vec.power > 0.5 ? "#f59e0b" : "#22c55e";
+        ctx.fillRect(gx, gy, gw * vec.power, 12);
+        // 큐 스틱
+        ctx.strokeStyle = "#d6a15c";
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.moveTo(cue.x - vec.dx * (BALL_R + 8 + vec.power * 40), cue.y - vec.dy * (BALL_R + 8 + vec.power * 40));
+        ctx.lineTo(cue.x - vec.dx * (BALL_R + 90 + vec.power * 40), cue.y - vec.dy * (BALL_R + 90 + vec.power * 40));
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, 52);
+        ctx.fillStyle = "#fbbf24";
+        ctx.font = "800 24px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`성공 ${state.success}/${SUCCESS_TARGET}`, 20, 35);
+        ctx.fillStyle = state.fails > 0 ? "#f87171" : "#e2e8f0";
+        ctx.textAlign = "right";
+        ctx.fillText(`실패 ${state.fails}/${FAIL_LIMIT}`, VIEW.width - 20, 35);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "700 18px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(state.message, VIEW.width / 2, 34);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("당구 한 큐", [
+            "쿠션을 활용해 공을 포켓에 넣으세요",
+            "조작: 드래그로 조준 후 놓아서 샷 (방향키+스페이스도 가능)",
+            "클리어 조건: 공 5개를 포켓에 넣으면 클리어",
+            "실패 조건: 7회 실패 시 실패",
+            "수구(흰 공)가 포켓에 빠져도 실패 1회입니다",
+            "터치 또는 Enter로 시작",
+          ], "#d97706");
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "7회 실패 시 실패",
+            `성공: ${state.success}/${SUCCESS_TARGET}`,
+            `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+            "터치 또는 Enter로 다시 도전",
+          ], "#b91c1c");
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          renderCard("클리어!", [
+            "공 5개를 포켓에 넣으면 클리어",
+            `${SUCCESS_TARGET}개 성공!`,
+            `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+          ], "#15803d");
+          return;
+        }
+
+        // running
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        drawTable();
+        drawAim();
+        for (const ball of state.balls) {
+          drawBall(ball);
+        }
+        if (state.flash) {
+          ctx.fillStyle = `rgba(${state.flash.color}, ${Math.min(0.45, state.flash.t * 1.4)})`;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+        drawHud();
+      }
+
+      function renderGameToText() {
+        const cue = cueBall();
+        const target = state.balls.find((b) => b.kind === "target" && !b.pocketed);
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down, table 70..890 x 96..500",
+          mode: state.mode,
+          phase: state.phase,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          success: state.success,
+          success_target: SUCCESS_TARGET,
+          fails: state.fails,
+          fail_limit: FAIL_LIMIT,
+          bank_layout: state.bankLayout,
+          cue: cue ? { x: Math.round(cue.x), y: Math.round(cue.y) } : null,
+          target: target ? { x: Math.round(target.x), y: Math.round(target.y) } : null,
+          blockers: state.balls.filter((b) => b.kind === "blocker" && !b.pocketed).map((b) => ({ x: Math.round(b.x), y: Math.round(b.y) })),
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function pointerToCanvas(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: ((event.clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((event.clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function shoot(vec) {
+        const cue = cueBall();
+        if (!cue || !vec || state.phase !== "aim") return;
+        const speed = vec.power * MAX_PULL * SHOT_SCALE;
+        cue.vx = vec.dx * speed;
+        cue.vy = vec.dy * speed;
+        state.phase = "rolling";
+        state.aiming = false;
+        state.aimEnd = null;
+        state.kbAim.active = false;
+        state.message = "…";
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (state.mode !== "running" || state.phase !== "aim") {
+          return;
+        }
+        const kb = state.kbAim;
+        if (event.key === "ArrowLeft") { kb.angle -= 0.06; kb.active = true; event.preventDefault(); }
+        if (event.key === "ArrowRight") { kb.angle += 0.06; kb.active = true; event.preventDefault(); }
+        if (event.key === "ArrowUp") { kb.power = Math.min(1, kb.power + 0.04); kb.active = true; event.preventDefault(); }
+        if (event.key === "ArrowDown") { kb.power = Math.max(0.1, kb.power - 0.04); kb.active = true; event.preventDefault(); }
+        if (event.key === " " && kb.active) {
+          event.preventDefault();
+          shoot(currentShotVector());
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "pool-bank",
+        title: "당구 한 큐",
+        creator: "Anonymous Creator",
+        genre: "Bank shot puzzle",
+        clearCondition: "공 5개를 포켓에 넣으면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        if (state.phase !== "aim") return;
+        const pos = pointerToCanvas(event);
+        const cue = cueBall();
+        if (cue && dist(pos.x, pos.y, cue.x, cue.y) <= 34) {
+          state.aiming = true;
+          state.aimEnd = pos;
+          state.kbAim.active = false;
+          canvas.setPointerCapture?.(event.pointerId);
+        }
+      });
+      canvas.addEventListener("pointermove", (event) => {
+        if (!state.aiming || state.mode !== "running" || state.phase !== "aim") {
+          return;
+        }
+        event.preventDefault();
+        state.aimEnd = pointerToCanvas(event);
+      });
+      const endAim = (event) => {
+        if (event) event.preventDefault();
+        if (!state.aiming) return;
+        state.aiming = false;
+        if (state.mode !== "running" || state.phase !== "aim") {
+          state.aimEnd = null;
+          return;
+        }
+        shoot(currentShotVector());
+      };
+      canvas.addEventListener("pointerup", endAim);
+      canvas.addEventListener("pointercancel", endAim);
+      canvas.addEventListener("touchstart", (event) => {
+        if (state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+        }
+      }, { passive: false });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

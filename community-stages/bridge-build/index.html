@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>다리 짓기</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">다리 짓기. 캔버스를 터치하거나 Enter로 시작하세요. 터치 유지로 다리 늘이기, 떼면 완성: 화면을 누르고 있으면 판자가 자라고, 떼면 판자가 오른쪽으로 넘어집니다. 키보드는 스페이스를 눌렀다 떼면 됩니다. 판자 끝이 건너편 절벽 위에 닿으면 차가 건너가 성공이고, 짧거나 길면 차가 추락합니다. 차량 5대를 건너게 하면 클리어, 3대를 추락시키면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="다리 짓기" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("bridge-build") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const GOAL_SUCCESS = 5;
+      const MAX_CRASH = 3;
+
+      const GROUND_Y = 400;
+      const LEFT_CLIFF = { x: 60, w: 170 };
+
+      // phase: idle(대기) -> growing(늘이는 중) -> falling(넘어지는 중) -> crossing(차 이동) -> crashed(추락 연출) -> next
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        success: 0,
+        crash: 0,
+        phase: "idle",
+        bridgeLen: 0,
+        bridgeAngle: -Math.PI / 2, // -90도(세움) -> 0도(눕힘)
+        rightCliff: { x: 560, w: 130 },
+        carX: 0,
+        carFallY: 0,
+        phaseTimer: 0,
+        lastEvent: "",
+        note: "강폭에 맞춰 다리를 늘여 차를 건너게 하세요",
+        holding: false,
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function leftEdgeX() {
+        return LEFT_CLIFF.x + LEFT_CLIFF.w;
+      }
+
+      function bridgeBaseX() {
+        return leftEdgeX() - 14;
+      }
+
+      function rollCliff() {
+        // 진행할수록 간격 변동 폭 증가, 절벽 폭 감소
+        const progress = Math.min(state.success + state.crash, 7);
+        const gapMin = 180 + progress * 18;
+        const gapMax = 330 + progress * 34;
+        const gap = gapMin + Math.random() * (gapMax - gapMin);
+        const width = Math.max(58, 130 - progress * 10);
+        state.rightCliff.x = Math.min(leftEdgeX() + gap, VIEW.width - width - 40);
+        state.rightCliff.w = width;
+      }
+
+      function resetRound() {
+        state.phase = "idle";
+        state.bridgeLen = 0;
+        state.bridgeAngle = -Math.PI / 2;
+        state.carX = LEFT_CLIFF.x + 30;
+        state.carFallY = 0;
+        state.phaseTimer = 0;
+        rollCliff();
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.success = 0;
+        state.crash = 0;
+        state.lastEvent = "";
+        state.holding = false;
+        resetRound();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function holdStart() {
+        if (state.mode !== "running") {
+          return;
+        }
+        if (state.phase === "idle") {
+          state.phase = "growing";
+          state.holding = true;
+        }
+      }
+
+      function holdEnd() {
+        state.holding = false;
+        if (state.mode !== "running") {
+          return;
+        }
+        if (state.phase === "growing") {
+          state.phase = "falling";
+        }
+      }
+
+      function bridgeFits() {
+        const tip = bridgeBaseX() + state.bridgeLen;
+        return tip >= state.rightCliff.x && tip <= state.rightCliff.x + state.rightCliff.w;
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+
+        if (state.phase === "growing" && state.holding) {
+          state.bridgeLen += 260 * dt;
+        } else if (state.phase === "falling") {
+          state.bridgeAngle += dt * 4.2;
+          if (state.bridgeAngle >= 0) {
+            state.bridgeAngle = 0;
+            if (bridgeFits()) {
+              state.phase = "crossing";
+            } else {
+              state.phase = "crashed";
+              state.carFallY = 0;
+              state.lastEvent = state.bridgeLen + bridgeBaseX() < state.rightCliff.x ? "다리가 짧았어요!" : "다리가 너무 길었어요!";
+            }
+          }
+        } else if (state.phase === "crossing") {
+          const target = state.rightCliff.x + state.rightCliff.w / 2;
+          state.carX += 190 * dt;
+          if (state.carX >= target) {
+            state.phase = "next";
+            state.phaseTimer = 0.7;
+            state.success += 1;
+            state.lastEvent = "건너기 성공!";
+            if (state.success >= GOAL_SUCCESS) {
+              clearStage();
+              return;
+            }
+          }
+        } else if (state.phase === "crashed") {
+          // 차가 협곡으로 추락
+          state.carX += 150 * dt;
+          if (state.carX > bridgeBaseX() + state.bridgeLen + 16) {
+            state.carFallY += (220 + state.carFallY * 6) * dt;
+          }
+          if (state.carFallY > 180) {
+            state.crash += 1;
+            if (state.crash >= MAX_CRASH) {
+              failStage("car_crash");
+              return;
+            }
+            state.phase = "next";
+            state.phaseTimer = 0.7;
+          }
+        } else if (state.phase === "next") {
+          state.phaseTimer -= dt;
+          if (state.phaseTimer <= 0) {
+            resetRound();
+          }
+        }
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 46);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function drawCliff(x, w, isLeft) {
+        const grad = ctx.createLinearGradient(x, GROUND_Y, x, VIEW.height);
+        grad.addColorStop(0, "#78716c");
+        grad.addColorStop(1, "#44403c");
+        ctx.fillStyle = grad;
+        ctx.fillRect(x, GROUND_Y, w, VIEW.height - GROUND_Y);
+        ctx.fillStyle = "#4d7c0f";
+        ctx.fillRect(x, GROUND_Y, w, 14);
+        // 절벽 위쪽 표시선 (착지 목표 구간)
+        if (!isLeft) {
+          ctx.strokeStyle = "rgba(253, 224, 71, 0.9)";
+          ctx.lineWidth = 3;
+          ctx.setLineDash([6, 5]);
+          ctx.strokeRect(x + 2, GROUND_Y - 6, w - 4, 6);
+          ctx.setLineDash([]);
+        }
+      }
+
+      function drawCar(x, y, falling) {
+        ctx.save();
+        ctx.translate(x, y);
+        if (falling) {
+          ctx.rotate(Math.min(1.1, state.carFallY * 0.01));
+        }
+        ctx.fillStyle = "#dc2626";
+        ctx.fillRect(-26, -26, 52, 18);
+        ctx.fillRect(-16, -38, 30, 14);
+        ctx.fillStyle = "#bae6fd";
+        ctx.fillRect(-12, -35, 22, 9);
+        ctx.fillStyle = "#1f2937";
+        ctx.beginPath();
+        ctx.arc(-14, -6, 8, 0, Math.PI * 2);
+        ctx.arc(14, -6, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function renderScene() {
+        // 하늘
+        const sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+        sky.addColorStop(0, "#7dd3fc");
+        sky.addColorStop(1, "#e0f2fe");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, VIEW.width, GROUND_Y);
+        // 협곡
+        ctx.fillStyle = "#164e63";
+        ctx.fillRect(0, GROUND_Y, VIEW.width, VIEW.height - GROUND_Y);
+        ctx.fillStyle = "rgba(255,255,255,0.25)";
+        for (let i = 0; i < 5; i += 1) {
+          const wy = GROUND_Y + 40 + i * 24;
+          ctx.fillRect((state.elapsed * 40 + i * 180) % (VIEW.width + 120) - 120, wy, 80, 4);
+        }
+
+        drawCliff(LEFT_CLIFF.x, LEFT_CLIFF.w, true);
+        drawCliff(state.rightCliff.x, state.rightCliff.w, false);
+
+        // 다리
+        if (state.phase !== "idle") {
+          ctx.save();
+          ctx.translate(bridgeBaseX(), GROUND_Y);
+          ctx.rotate(state.bridgeAngle);
+          ctx.fillStyle = "#92400e";
+          ctx.fillRect(0, -7, state.bridgeLen, 14);
+          ctx.strokeStyle = "#451a03";
+          ctx.lineWidth = 2;
+          for (let px = 18; px < state.bridgeLen - 8; px += 26) {
+            ctx.beginPath();
+            ctx.moveTo(px, -7);
+            ctx.lineTo(px, 7);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        // 차
+        if (state.mode === "running") {
+          const falling = state.phase === "crashed";
+          drawCar(state.carX, GROUND_Y + state.carFallY, falling);
+        }
+
+        // 길이 가이드
+        if (state.phase === "growing") {
+          const needMin = state.rightCliff.x - bridgeBaseX();
+          const needMax = needMin + state.rightCliff.w;
+          ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+          ctx.fillRect(bridgeBaseX(), GROUND_Y - 78, 250, 56);
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "800 22px Trebuchet MS";
+          ctx.textAlign = "left";
+          ctx.fillText(`다리 길이: ${Math.round(state.bridgeLen)}px`, bridgeBaseX() + 10, GROUND_Y - 52);
+          ctx.fillStyle = "#fde047";
+          ctx.font = "600 16px Trebuchet MS";
+          ctx.fillText(`필요: ${Math.round(needMin)}~${Math.round(needMax)}px`, bridgeBaseX() + 10, GROUND_Y - 30);
+        }
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.9)";
+        ctx.fillRect(0, 0, VIEW.width, 44);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "800 22px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`성공 ${state.success} / ${GOAL_SUCCESS}`, 20, 30);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#fde047";
+        ctx.fillText(state.lastEvent, VIEW.width / 2, 30);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillText(`추락 ${state.crash} / ${MAX_CRASH}`, VIEW.width - 20, 30);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderScene();
+          renderCard("다리 짓기", [
+            "조작: 터치 유지로 다리 늘이기, 떼면 완성",
+            "키보드: 스페이스를 눌렀다 떼면 다리 완성",
+            "판자 끝이 건너편 절벽 위에 닿아야 성공",
+            "클리어 조건: 차량 5대를 안전하게 건너게 하면 클리어",
+            "실패 조건: 3대를 추락시키면 실패",
+            "터치 또는 Enter로 시작",
+          ], "#b45309");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderScene();
+          renderHud();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderScene();
+          renderCard("실패", [
+            "3대를 추락시키면 실패",
+            `성공: ${state.success}대 / 추락: ${state.crash}대`,
+            `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+            "터치 또는 Enter로 다시 도전",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderScene();
+        renderCard("클리어!", [
+          "차량 5대를 안전하게 건너게 하면 클리어",
+          `추락: ${state.crash}대`,
+          `플레이 시간: ${state.lastRunTime.toFixed(1)}초`,
+          "터치 또는 Enter로 다시 플레이",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          success: state.success,
+          crash: state.crash,
+          phase: state.phase,
+          bridge_length: Math.round(state.bridgeLen),
+          right_cliff: { x: Math.round(state.rightCliff.x), w: Math.round(state.rightCliff.w) },
+          needed_range: [
+            Math.round(state.rightCliff.x - bridgeBaseX()),
+            Math.round(state.rightCliff.x + state.rightCliff.w - bridgeBaseX()),
+          ],
+          last_event: state.lastEvent,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if ((event.key === " " || event.key === "Spacebar") && !event.repeat) {
+          event.preventDefault();
+          if (state.mode !== "running") {
+            startStage();
+          } else {
+            holdStart();
+          }
+        }
+      }
+
+      function onKeyUp(event) {
+        if (event.key === " " || event.key === "Spacebar") {
+          event.preventDefault();
+          holdEnd();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "bridge-build",
+        title: "다리 짓기",
+        creator: "Anonymous Creator",
+        genre: "Length timing",
+        clearCondition: "차량 5대를 안전하게 건너게 하면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        if (state.mode !== "running") {
+          startFromTouch();
+        } else {
+          holdStart();
+        }
+      });
+      canvas.addEventListener("pointerup", (event) => {
+        event.preventDefault();
+        holdEnd();
+      });
+      canvas.addEventListener("pointercancel", holdEnd);
+      canvas.addEventListener("touchstart", (event) => {
+        event.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

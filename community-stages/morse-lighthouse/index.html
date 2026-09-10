@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>모스 등대</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">모스 등대. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 터치로 짧게·길게 불빛 입력입니다. 등대가 보여주는 점(짧은 점멸)과 선(긴 점멸) 패턴을 기억한 뒤, 짧게 탭하면 점, 0.3초 이상 길게 누르면 선으로 입력됩니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="모스 등대" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("morse-lighthouse") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const DOT = "dot";
+      const DASH = "dash";
+      const HOLD_THRESHOLD = 0.3; // 초
+      const DEMO_DOT_ON = 0.32;
+      const DEMO_DASH_ON = 0.9;
+      const DEMO_OFF = 0.38;
+      const DEMO_GAP = 1.0;
+      const MAX_WRONG = 3;
+      const MAX_LEVEL = 5;
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "등대 불빛 패턴을 기억해 그대로 다시 켜세요",
+        phase: "demo", // demo | input | judge
+        level: 1,
+        pattern: [],
+        demoTime: 0,
+        demoIndex: 0,
+        lampOn: false,
+        input: [],
+        holdTime: null, // null이면 미입력
+        wrong: 0,
+        judgeTime: 0,
+        judgeOk: false,
+        failReason: "",
+        stars: [],
+      };
+      for (let i = 0; i < 70; i += 1) {
+        state.stars.push({
+          x: Math.random() * VIEW.width,
+          y: Math.random() * 240,
+          r: Math.random() * 1.6 + 0.4,
+          tw: Math.random() * Math.PI * 2,
+        });
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function makePattern(length) {
+        const pattern = [];
+        for (let i = 0; i < length; i += 1) {
+          pattern.push(Math.random() < 0.5 ? DOT : DASH);
+        }
+        // 최소 1개의 선을 포함시켜 구분 학습 유도
+        if (!pattern.includes(DASH)) {
+          pattern[Math.floor(Math.random() * pattern.length)] = DASH;
+        }
+        return pattern;
+      }
+
+      function beginLevel(level) {
+        state.level = level;
+        state.pattern = makePattern(2 + level);
+        state.phase = "demo";
+        state.demoTime = 0;
+        state.demoIndex = 0;
+        state.lampOn = false;
+        state.input = [];
+        state.holdTime = null;
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.wrong = 0;
+        state.failReason = "";
+        beginLevel(1);
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.failReason = reason;
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu") {
+          startStage();
+        }
+      }
+
+      function demoSegmentDuration() {
+        // demoIndex가 pattern.length 이상이면 마지막 갭
+        if (state.demoIndex >= state.pattern.length) {
+          return DEMO_GAP;
+        }
+        const symbol = state.pattern[state.demoIndex];
+        const onTime = symbol === DOT ? DEMO_DOT_ON : DEMO_DASH_ON;
+        // demoTime을 심볼 시작 기준으로 관리하기 위해 전체 길이를 반환
+        return onTime + DEMO_OFF;
+      }
+
+      function demoLampShouldBeOn() {
+        if (state.demoIndex >= state.pattern.length) {
+          return false;
+        }
+        const symbol = state.pattern[state.demoIndex];
+        const onTime = symbol === DOT ? DEMO_DOT_ON : DEMO_DASH_ON;
+        // 심볼 시작 시각 누적 계산
+        let t = 0;
+        for (let i = 0; i < state.demoIndex; i += 1) {
+          const s = state.pattern[i];
+          t += (s === DOT ? DEMO_DOT_ON : DEMO_DASH_ON) + DEMO_OFF;
+        }
+        return state.demoTime >= t && state.demoTime < t + onTime;
+      }
+
+      function updateDemo(dt) {
+        state.demoTime += dt;
+        let t = 0;
+        for (let i = 0; i < state.pattern.length; i += 1) {
+          const s = state.pattern[i];
+          const dur = (s === DOT ? DEMO_DOT_ON : DEMO_DASH_ON) + DEMO_OFF;
+          if (state.demoTime < t + dur) {
+            state.demoIndex = i;
+            state.lampOn = demoLampShouldBeOn();
+            return;
+          }
+          t += dur;
+        }
+        // 시연 종료
+        if (state.demoTime >= t + DEMO_GAP) {
+          state.phase = "input";
+          state.lampOn = false;
+          state.input = [];
+          state.holdTime = null;
+        } else {
+          state.demoIndex = state.pattern.length;
+          state.lampOn = false;
+        }
+      }
+
+      function judgeInput() {
+        const ok = state.input.every((v, i) => v === state.pattern[i])
+          && state.input.length === state.pattern.length;
+        state.phase = "judge";
+        state.judgeTime = 0;
+        state.judgeOk = ok;
+        if (!ok) {
+          state.wrong += 1;
+        }
+      }
+
+      function pressStart() {
+        if (state.mode !== "running" || state.phase !== "input") {
+          return;
+        }
+        if (state.holdTime === null) {
+          state.holdTime = 0;
+          state.lampOn = true; // 즉시 시각 피드백
+        }
+      }
+
+      function pressEnd() {
+        if (state.mode !== "running" || state.phase !== "input") {
+          state.holdTime = null;
+          if (state.mode === "running" && state.phase !== "input") {
+            state.lampOn = state.phase === "demo" ? state.lampOn : false;
+          }
+          return;
+        }
+        if (state.holdTime === null) {
+          return;
+        }
+        const symbol = state.holdTime >= HOLD_THRESHOLD ? DASH : DOT;
+        state.input.push(symbol);
+        state.holdTime = null;
+        state.lampOn = false;
+        if (state.input.length >= state.pattern.length) {
+          judgeInput();
+        }
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        if (state.phase === "demo") {
+          updateDemo(dt);
+        } else if (state.phase === "input") {
+          if (state.holdTime !== null) {
+            state.holdTime += dt;
+          }
+        } else if (state.phase === "judge") {
+          state.judgeTime += dt;
+          state.lampOn = state.judgeOk
+            ? Math.floor(state.judgeTime / 0.18) % 2 === 0
+            : Math.floor(state.judgeTime / 0.12) % 2 === 0;
+          if (state.judgeTime >= 1.0) {
+            state.lampOn = false;
+            if (state.judgeOk) {
+              if (state.level >= MAX_LEVEL) {
+                clearStage();
+              } else {
+                beginLevel(state.level + 1);
+              }
+            } else if (state.wrong >= MAX_WRONG) {
+              failStage("틀린 입력 3회");
+            } else {
+              beginLevel(state.level); // 같은 단계 재시연 (새 패턴)
+            }
+          }
+        }
+      }
+
+      const LIGHT_X = VIEW.width / 2;
+      const LIGHT_Y = 132;
+
+      function renderSea() {
+        const sky = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        sky.addColorStop(0, "#020617");
+        sky.addColorStop(0.6, "#0f172a");
+        sky.addColorStop(1, "#1e293b");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        // 별
+        for (const star of state.stars) {
+          const a = 0.5 + 0.5 * Math.sin(state.elapsed * 1.4 + star.tw);
+          ctx.fillStyle = "rgba(226, 232, 240, " + (0.35 + a * 0.55).toFixed(2) + ")";
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // 바다
+        ctx.fillStyle = "#082f49";
+        ctx.fillRect(0, 400, VIEW.width, VIEW.height - 400);
+        ctx.strokeStyle = "rgba(125, 211, 252, 0.28)";
+        ctx.lineWidth = 2;
+        for (let row = 0; row < 4; row += 1) {
+          const y = 418 + row * 30;
+          ctx.beginPath();
+          for (let x = 0; x <= VIEW.width; x += 16) {
+            const yy = y + Math.sin(x / 48 + state.elapsed * 1.6 + row) * 5;
+            if (x === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+          }
+          ctx.stroke();
+        }
+      }
+
+      function renderLighthouse() {
+        // 광선 (켜져 있을 때)
+        if (state.lampOn) {
+          const beam = ctx.createRadialGradient(LIGHT_X, LIGHT_Y, 8, LIGHT_X, LIGHT_Y, 340);
+          beam.addColorStop(0, "rgba(253, 224, 71, 0.55)");
+          beam.addColorStop(1, "rgba(253, 224, 71, 0)");
+          ctx.fillStyle = beam;
+          ctx.beginPath();
+          ctx.arc(LIGHT_X, LIGHT_Y, 340, 0, Math.PI * 2);
+          ctx.fill();
+          // 좌우 광선
+          ctx.fillStyle = "rgba(253, 224, 71, 0.22)";
+          ctx.beginPath();
+          ctx.moveTo(LIGHT_X, LIGHT_Y);
+          ctx.lineTo(0, LIGHT_Y - 90);
+          ctx.lineTo(0, LIGHT_Y + 90);
+          ctx.closePath();
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(LIGHT_X, LIGHT_Y);
+          ctx.lineTo(VIEW.width, LIGHT_Y - 90);
+          ctx.lineTo(VIEW.width, LIGHT_Y + 90);
+          ctx.closePath();
+          ctx.fill();
+        }
+        // 탑 몸통
+        ctx.fillStyle = "#e2e8f0";
+        ctx.beginPath();
+        ctx.moveTo(LIGHT_X - 44, 400);
+        ctx.lineTo(LIGHT_X - 26, 170);
+        ctx.lineTo(LIGHT_X + 26, 170);
+        ctx.lineTo(LIGHT_X + 44, 400);
+        ctx.closePath();
+        ctx.fill();
+        // 빨간 줄무늬
+        ctx.fillStyle = "#b91c1c";
+        ctx.fillRect(LIGHT_X - 38, 250, 76, 34);
+        ctx.fillRect(LIGHT_X - 42, 330, 84, 34);
+        // 등불실
+        ctx.fillStyle = "#334155";
+        ctx.fillRect(LIGHT_X - 34, 128, 68, 44);
+        ctx.fillStyle = state.lampOn ? "#fde047" : "#1e293b";
+        ctx.fillRect(LIGHT_X - 24, 134, 48, 32);
+        if (state.lampOn) {
+          ctx.fillStyle = "#fef9c3";
+          ctx.beginPath();
+          ctx.arc(LIGHT_X, LIGHT_Y + 18, 12, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // 지붕
+        ctx.fillStyle = "#7f1d1d";
+        ctx.beginPath();
+        ctx.moveTo(LIGHT_X - 40, 128);
+        ctx.lineTo(LIGHT_X, 96);
+        ctx.lineTo(LIGHT_X + 40, 128);
+        ctx.closePath();
+        ctx.fill();
+        // 바위
+        ctx.fillStyle = "#1e293b";
+        ctx.beginPath();
+        ctx.ellipse(LIGHT_X, 408, 130, 26, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function symbolLabel(s) {
+        return s === DOT ? "·" : "—";
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(2, 6, 23, 0.78)";
+        ctx.fillRect(0, 0, VIEW.width, 78);
+        ctx.textAlign = "left";
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "800 24px Trebuchet MS";
+        const phaseText = state.phase === "demo"
+          ? "패턴 시연 중… 잘 기억하세요"
+          : state.phase === "input"
+            ? "입력: 짧게=점 · 길게=선"
+            : state.judgeOk ? "정답!" : "오답!";
+        ctx.fillText("단계 " + state.level + "/" + MAX_LEVEL, 24, 34);
+        ctx.font = "700 18px Trebuchet MS";
+        ctx.fillStyle = state.phase === "judge"
+          ? (state.judgeOk ? "#4ade80" : "#f87171")
+          : "rgba(248,250,252,0.85)";
+        ctx.fillText(phaseText, 24, 62);
+        ctx.textAlign = "right";
+        ctx.font = "800 22px Trebuchet MS";
+        ctx.fillStyle = state.wrong > 0 ? "#f87171" : "rgba(248,250,252,0.85)";
+        ctx.fillText("오입력 " + state.wrong + "/" + MAX_WRONG, VIEW.width - 24, 36);
+        ctx.font = "700 16px Trebuchet MS";
+        ctx.fillStyle = "rgba(248,250,252,0.7)";
+        ctx.fillText("패턴 길이 " + state.pattern.length, VIEW.width - 24, 62);
+        ctx.textAlign = "left";
+
+        // 입력/패턴 진행 칩
+        const n = state.pattern.length;
+        const chipW = 44;
+        const totalW = n * chipW + (n - 1) * 10;
+        let x = (VIEW.width - totalW) / 2;
+        const y = VIEW.height - 76;
+        for (let i = 0; i < n; i += 1) {
+          let label = "?";
+          let bg = "rgba(148, 163, 184, 0.25)";
+          let fg = "#cbd5e1";
+          if (state.phase === "demo" && i < state.demoIndex) {
+            label = symbolLabel(state.pattern[i]);
+            bg = "rgba(250, 204, 21, 0.3)";
+            fg = "#fde047";
+          } else if (state.phase !== "demo" && i < state.input.length) {
+            const good = state.input[i] === state.pattern[i];
+            label = symbolLabel(state.input[i]);
+            bg = state.phase === "judge"
+              ? (good ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)")
+              : "rgba(59, 130, 246, 0.4)";
+            fg = "#f8fafc";
+          }
+          ctx.fillStyle = bg;
+          ctx.beginPath();
+          ctx.roundRect(x, y, chipW, 40, 8);
+          ctx.fill();
+          ctx.fillStyle = fg;
+          ctx.font = "800 24px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText(label, x + chipW / 2, y + 28);
+          x += chipW + 10;
+        }
+        ctx.textAlign = "left";
+
+        // 홀드 게이지 (입력 중 누르고 있을 때)
+        if (state.holdTime !== null) {
+          const gw = 220;
+          const gx = (VIEW.width - gw) / 2;
+          const gy = VIEW.height - 108;
+          ctx.fillStyle = "rgba(148,163,184,0.3)";
+          ctx.fillRect(gx, gy, gw, 12);
+          ctx.fillStyle = state.holdTime >= HOLD_THRESHOLD ? "#a78bfa" : "#38bdf8";
+          ctx.fillRect(gx, gy, Math.min(1, state.holdTime / HOLD_THRESHOLD) * gw, 12);
+          ctx.strokeStyle = "#f8fafc";
+          ctx.lineWidth = 2;
+          const tx = gx + gw * (HOLD_THRESHOLD / HOLD_THRESHOLD) - 2;
+          ctx.beginPath();
+          ctx.moveTo(gx + gw - 2, gy - 3);
+          ctx.lineTo(gx + gw - 2, gy + 15);
+          ctx.stroke();
+        }
+      }
+
+      function roundRectPath(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function renderCard(title, lines, accent, footer) {
+        ctx.fillStyle = "rgba(2, 6, 23, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.97)";
+        roundRectPath(190, 64, 580, 412, 18);
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 132);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 198 + index * 40);
+        });
+
+        if (footer) {
+          ctx.fillStyle = accent;
+          roundRectPath(VIEW.width / 2 - 140, 414, 280, 46, 23);
+          ctx.fill();
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "800 22px Trebuchet MS";
+          ctx.fillText(footer, VIEW.width / 2, 444);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        renderSea();
+        renderLighthouse();
+        if (state.mode === "menu") {
+          renderCard("모스 등대", [
+            "등대 불빛 패턴을 기억해 그대로 다시 켜세요",
+            "조작: 터치로 짧게·길게 불빛 입력",
+            "짧게 탭 = 점(·), 길게 누르기(0.3초+) = 선(—)",
+            "클리어 조건: 패턴 5단계를 정확히 재현하면 클리어",
+            "실패 조건: 틀린 입력 3회 시 실패",
+            "키보드는 아무 키나 짧게/길게 눌러도 됩니다",
+          ], "#eab308", "터치 또는 Enter로 시작");
+          return;
+        }
+        if (state.mode === "running") {
+          renderHud();
+          return;
+        }
+        if (state.mode === "failed") {
+          renderHud();
+          renderCard("실패", [
+            "실패 원인: " + state.failReason,
+            "도달 단계: " + state.level + "/" + MAX_LEVEL,
+            "클리어 조건: 패턴 5단계를 정확히 재현하면 클리어",
+            "공유 목숨 1개가 즉시 종료되었습니다.",
+          ], "#b91c1c");
+          return;
+        }
+        renderHud();
+        renderCard("클리어!", [
+          "패턴 5단계를 모두 정확히 재현했습니다",
+          "걸린 시간: " + state.lastRunTime.toFixed(1) + "초",
+          "호스트가 다음 미플레이 스테이지를 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, lighthouse lamp at (480,132)",
+          mode: state.mode,
+          phase: state.phase,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          level: state.level,
+          pattern_length: state.pattern.length,
+          pattern: state.pattern,
+          input: state.input,
+          wrong: state.wrong,
+          lamp_on: state.lampOn,
+          fail_reason: state.failReason || undefined,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      let keyHeld = false;
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (state.mode === "running" && !event.repeat && !keyHeld) {
+          keyHeld = true;
+          pressStart();
+        }
+      }
+      function onKeyUp() {
+        if (keyHeld) {
+          keyHeld = false;
+          pressEnd();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "morse-lighthouse",
+        title: "모스 등대",
+        creator: "Anonymous Creator",
+        genre: "Memory signal",
+        clearCondition: "패턴 5단계를 정확히 재현하면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        pressStart();
+      }, { passive: false });
+      canvas.addEventListener("pointerup", (event) => {
+        event.preventDefault();
+        pressEnd();
+      }, { passive: false });
+      canvas.addEventListener("pointercancel", () => pressEnd());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>스시 컨베이어</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 걸스</a>
+    <p id="stage-instructions" class="sr-only">스시 컨베이어. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 터치로 벨트 위 초밥 선택입니다. 회전 벨트 위 초밥 중 주문과 같은 종류만 터치해 수집하세요. 다른 초밥을 터치하면 오선택으로 세고, 주문당 제한 시간은 15초입니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="스시 컨베이어" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("sushi-conveyor") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const SUSHI_TYPES = [
+        { id: "salmon", name: "연어", emoji: "🍣", color: "#fb923c" },
+        { id: "tuna", name: "참치", emoji: "🍣", color: "#ef4444" },
+        { id: "shrimp", name: "새우", emoji: "🍤", color: "#fda4af" },
+        { id: "egg", name: "계란", emoji: "🍣", color: "#facc15" },
+        { id: "cucumber", name: "오이", emoji: "🍣", color: "#22c55e" },
+        { id: "octopus", name: "문어", emoji: "🐙", color: "#a855f7" },
+      ];
+
+      const ORDER_TIME_LIMIT = 15;
+      const ORDERS_TO_CLEAR = 8;
+      const MAX_WRONG = 3;
+      const BELT_Y = 300;
+      const BELT_H = 150;
+      const SUSHI_SIZE = 88;
+      const SPAWN_MARGIN = 60;
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "회전 벨트에서 주문과 같은 초밥만 빠르게 골라내세요",
+        order: null,
+        orderIndex: 0,
+        orderTimer: 0,
+        collected: 0,
+        wrong: 0,
+        items: [],
+        beltSpeed: 90,
+        spawnTimer: 0,
+        feedback: null,
+        failReason: "",
+        effects: [],
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function randomType() {
+        return SUSHI_TYPES[Math.floor(Math.random() * SUSHI_TYPES.length)];
+      }
+
+      function newOrder() {
+        state.orderIndex += 1;
+        const type = randomType();
+        const count = 1 + Math.min(2, Math.floor(Math.random() * 2 + (state.orderIndex > 4 ? 1 : 0)));
+        state.order = { type, count };
+        state.collected = 0;
+        state.orderTimer = ORDER_TIME_LIMIT;
+        state.beltSpeed = 90 + (state.orderIndex - 1) * 14;
+      }
+
+      function spawnSushi(forceType) {
+        const type = forceType || randomType();
+        const last = state.items[state.items.length - 1];
+        const minGap = SUSHI_SIZE + 34;
+        let x = VIEW.width + SPAWN_MARGIN;
+        if (last && x - last.x < minGap) {
+          x = last.x + minGap;
+        }
+        state.items.push({
+          type,
+          x,
+          y: BELT_Y + BELT_H / 2 + Math.sin((x / 90)) * 14,
+          spin: Math.random() * Math.PI * 2,
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.orderIndex = 0;
+        state.wrong = 0;
+        state.items = [];
+        state.spawnTimer = 0;
+        state.feedback = null;
+        state.effects = [];
+        state.failReason = "";
+        // 초기 벨트 채우기
+        for (let i = 0; i < 6; i += 1) {
+          const type = randomType();
+          state.items.push({
+            type,
+            x: 140 + i * 150,
+            y: BELT_Y + BELT_H / 2,
+            spin: Math.random() * Math.PI * 2,
+          });
+        }
+        newOrder();
+        // 첫 주문과 같은 초밥 1개를 보장 배치
+        if (!state.items.some((item) => item.type.id === state.order.type.id)) {
+          state.items[Math.floor(state.items.length / 2)].type = state.order.type;
+        }
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.failReason = reason;
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu") {
+          startStage();
+        }
+      }
+
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = event.clientX ?? (event.touches && event.touches[0]?.clientX) ?? 0;
+        const clientY = event.clientY ?? (event.touches && event.touches[0]?.clientY) ?? 0;
+        return {
+          x: ((clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function addEffect(text, x, y, color) {
+        state.effects.push({ text, x, y, color, age: 0 });
+      }
+
+      function handlePick(point) {
+        if (state.mode !== "running" || !state.order) {
+          return;
+        }
+        // 벨트 위에서 가장 가까운 초밥 탐색
+        let best = null;
+        let bestDist = Infinity;
+        for (const item of state.items) {
+          const dx = point.x - item.x;
+          const dy = point.y - item.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < SUSHI_SIZE / 2 + 12 && dist < bestDist) {
+            best = item;
+            bestDist = dist;
+          }
+        }
+        if (!best) {
+          return;
+        }
+        if (best.type.id === state.order.type.id) {
+          state.items = state.items.filter((item) => item !== best);
+          state.collected += 1;
+          addEffect("정답!", best.x, best.y - 46, "#22c55e");
+          state.feedback = { kind: "good", age: 0 };
+          if (state.collected >= state.order.count) {
+            addEffect("주문 완료!", VIEW.width / 2, 210, "#f97316");
+            if (state.orderIndex >= ORDERS_TO_CLEAR) {
+              clearStage();
+              return;
+            }
+            newOrder();
+          }
+        } else {
+          state.wrong += 1;
+          addEffect("오선택! " + best.type.name, best.x, best.y - 46, "#ef4444");
+          state.feedback = { kind: "bad", age: 0 };
+          if (state.wrong >= MAX_WRONG) {
+            failStage("오선택 3회");
+          }
+        }
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          // 효과는 계속 진행
+          state.effects.forEach((fx) => { fx.age += dt; });
+          state.effects = state.effects.filter((fx) => fx.age < 0.9);
+          return;
+        }
+        state.elapsed += dt;
+        state.orderTimer -= dt;
+        if (state.orderTimer <= 0) {
+          failStage("주문 시간 초과");
+          return;
+        }
+        // 벨트 이동
+        for (const item of state.items) {
+          item.x -= state.beltSpeed * dt;
+          item.spin += dt * 2;
+          item.y = BELT_Y + BELT_H / 2 + Math.sin(item.x / 90) * 14;
+        }
+        state.items = state.items.filter((item) => item.x > -SPAWN_MARGIN);
+        // 스폰: 벨트에 적정 개수 유지
+        state.spawnTimer -= dt;
+        if (state.spawnTimer <= 0) {
+          spawnSushi();
+          // 가끔 주문 초밥 보장 스폰
+          if (state.order && !state.items.some((item) => item.type.id === state.order.type.id)) {
+            spawnSushi(state.order.type);
+          }
+          state.spawnTimer = Math.max(0.55, 1.4 - state.orderIndex * 0.08);
+        }
+        if (state.feedback) {
+          state.feedback.age += dt;
+          if (state.feedback.age > 0.4) {
+            state.feedback = null;
+          }
+        }
+        state.effects.forEach((fx) => { fx.age += dt; });
+        state.effects = state.effects.filter((fx) => fx.age < 0.9);
+      }
+
+      function drawSushi(item) {
+        const { x, y, type } = item;
+        ctx.save();
+        ctx.translate(x, y);
+        // 접시
+        ctx.fillStyle = "#e2e8f0";
+        ctx.beginPath();
+        ctx.ellipse(0, 18, 42, 12, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(15,23,42,0.25)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // 초밥 몸통
+        ctx.fillStyle = type.color;
+        ctx.beginPath();
+        ctx.ellipse(0, -2, 32, 20, Math.sin(item.spin) * 0.06, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.beginPath();
+        ctx.ellipse(0, 6, 26, 12, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 표시 문자
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "800 20px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(type.name, 0, 44);
+        ctx.restore();
+      }
+
+      function renderBackground() {
+        // 식당 벽
+        const wallGrad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        wallGrad.addColorStop(0, "#1e293b");
+        wallGrad.addColorStop(0.45, "#312e81");
+        wallGrad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = wallGrad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        // 네온 간판
+        ctx.fillStyle = "rgba(249, 115, 22, 0.16)";
+        ctx.fillRect(0, BELT_Y - 74, VIEW.width, 10);
+      }
+
+      function renderBelt() {
+        // 벨트
+        ctx.fillStyle = "#334155";
+        ctx.fillRect(0, BELT_Y, VIEW.width, BELT_H);
+        ctx.fillStyle = "#475569";
+        ctx.fillRect(0, BELT_Y, VIEW.width, 12);
+        ctx.fillRect(0, BELT_Y + BELT_H - 12, VIEW.width, 12);
+        // 벨트 이음선 (흐르는 느낌)
+        ctx.strokeStyle = "rgba(15,23,42,0.45)";
+        ctx.lineWidth = 3;
+        const offset = (state.elapsed * state.beltSpeed) % 60;
+        for (let x = -offset; x < VIEW.width; x += 60) {
+          ctx.beginPath();
+          ctx.moveTo(x, BELT_Y + 14);
+          ctx.lineTo(x, BELT_Y + BELT_H - 14);
+          ctx.stroke();
+        }
+        // 아이템
+        const sorted = [...state.items].sort((a, b) => a.x - b.x);
+        sorted.forEach(drawSushi);
+      }
+
+      function renderHud() {
+        // 상단 바
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, 118);
+        // 주문 카드
+        const order = state.order;
+        if (order) {
+          ctx.fillStyle = "rgba(248, 250, 252, 0.95)";
+          roundRect(20, 12, 320, 94, 12);
+          ctx.fill();
+          ctx.fillStyle = "#b45309";
+          ctx.font = "800 20px Trebuchet MS";
+          ctx.textAlign = "left";
+          ctx.fillText("주문 " + state.orderIndex + "/" + ORDERS_TO_CLEAR, 36, 42);
+          ctx.fillStyle = "#0f172a";
+          ctx.font = "800 26px Trebuchet MS";
+          ctx.fillText(order.type.name + " 초밥 × " + order.count, 36, 76);
+          ctx.fillStyle = "#475569";
+          ctx.font = "700 18px Trebuchet MS";
+          ctx.fillText("수집: " + state.collected + "/" + order.count, 36, 100);
+        }
+        // 타이머
+        const remain = Math.max(0, state.orderTimer);
+        const urgent = remain < 5;
+        ctx.textAlign = "center";
+        ctx.font = "800 34px Trebuchet MS";
+        ctx.fillStyle = urgent ? "#ef4444" : "#f8fafc";
+        ctx.fillText(remain.toFixed(1) + "s", VIEW.width / 2, 56);
+        ctx.font = "700 16px Trebuchet MS";
+        ctx.fillStyle = "rgba(248,250,252,0.7)";
+        ctx.fillText("남은 주문 시간", VIEW.width / 2, 82);
+        // 오선택 카운터
+        ctx.textAlign = "right";
+        ctx.font = "800 22px Trebuchet MS";
+        ctx.fillStyle = state.wrong > 0 ? "#f87171" : "rgba(248,250,252,0.85)";
+        ctx.fillText("오선택 " + state.wrong + "/" + MAX_WRONG, VIEW.width - 24, 44);
+        ctx.font = "700 16px Trebuchet MS";
+        ctx.fillStyle = "rgba(248,250,252,0.7)";
+        ctx.fillText("벨트 속도 " + Math.round(state.beltSpeed), VIEW.width - 24, 72);
+        ctx.textAlign = "left";
+        // 피드백 테두리
+        if (state.feedback) {
+          ctx.strokeStyle = state.feedback.kind === "good" ? "rgba(34,197,94,0.8)" : "rgba(239,68,68,0.8)";
+          ctx.lineWidth = 10;
+          ctx.strokeRect(5, 5, VIEW.width - 10, VIEW.height - 10);
+        }
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function renderEffects() {
+        for (const fx of state.effects) {
+          const alpha = 1 - fx.age / 0.9;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = fx.color;
+          ctx.font = "800 30px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText(fx.text, fx.x, fx.y - fx.age * 40);
+          ctx.restore();
+        }
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        renderBackground();
+        renderBelt();
+        renderEffects();
+        renderHud();
+      }
+
+      function renderCard(title, lines, accent, footer) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        roundRect(190, 70, 580, 400, 18);
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 138);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 208 + index * 42);
+        });
+
+        if (footer) {
+          ctx.fillStyle = "#f8fafc";
+          roundRect(VIEW.width / 2 - 130, 408, 260, 46, 23);
+          ctx.fillStyle = accent;
+          roundRect(VIEW.width / 2 - 130, 408, 260, 46, 23);
+          ctx.fill();
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "800 22px Trebuchet MS";
+          ctx.fillText(footer, VIEW.width / 2, 438);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderBackground();
+          renderCard("스시 컨베이어", [
+            "회전 벨트에서 주문과 같은 초밥만 골라내세요",
+            "조작: 터치로 벨트 위 초밥 선택 (모바일도 터치)",
+            "클리어 조건: 주문 8개를 정확히 완성하면 클리어",
+            "실패 조건: 3회 오선택 또는 주문 시간 초과 시 실패",
+            "주문당 제한 시간은 " + ORDER_TIME_LIMIT + "초입니다",
+          ], "#f97316", "터치 또는 Enter로 시작");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderRunning();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderRunning();
+          renderCard("실패", [
+            "실패 원인: " + state.failReason,
+            "클리어 조건: 주문 8개를 정확히 완성하면 클리어",
+            "공유 목숨 1개가 즉시 종료되었습니다.",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderRunning();
+        renderCard("클리어!", [
+          "주문 8개를 모두 정확히 완성했습니다",
+          "걸린 시간: " + state.lastRunTime.toFixed(1) + "초",
+          "호스트가 다음 미플레이 스테이지를 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          order: state.order
+            ? { index: state.orderIndex, type: state.order.type.name, count: state.order.count, collected: state.collected, remaining_time: Math.round(Math.max(0, state.orderTimer) * 10) / 10 }
+            : null,
+          wrong: state.wrong,
+          belt_speed: Math.round(state.beltSpeed),
+          sushi_on_belt: state.items.map((item) => ({ type: item.type.name, x: Math.round(item.x) })),
+          fail_reason: state.failReason || undefined,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "sushi-conveyor",
+        title: "스시 컨베이어",
+        creator: "Anonymous Creator",
+        genre: "Arcade selection",
+        clearCondition: "주문 8개를 정확히 완성하면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        handlePick(canvasPoint(event));
+      }, { passive: false });
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

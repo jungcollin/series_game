@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>꿀벌 정원</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #14532d;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #14532d;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">꿀벌 정원. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 터치 드래그로 경로 그리기입니다. 모바일에서는 손가락으로 벌집에서 꽃까지 경로를 그은 뒤 손을 떼면 벌이 날아갑니다. 클리어 조건은 모든 꽃 수분 완료, 실패 조건은 장애물 충돌 3회입니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="꿀벌 정원" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const MAX_PATH_LENGTH = 700;
+      const MAX_CRASHES = 3;
+      const BEE_SPEED = 220;
+      const FLOWER_RADIUS = 26;
+      const relayContext = window.RelayRuntime?.readContext("bee-garden") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const HIVE = { x: 80, y: 460 };
+      const FLOWERS = [
+        { x: 220, y: 130, color: "#f472b6", done: false },
+        { x: 430, y: 90, color: "#c084fc", done: false },
+        { x: 660, y: 120, color: "#fb923c", done: false },
+        { x: 830, y: 240, color: "#f472b6", done: false },
+        { x: 700, y: 400, color: "#facc15", done: false },
+        { x: 420, y: 430, color: "#fb7185", done: false },
+      ];
+      const OBSTACLES = [
+        { type: "rock", x: 320, y: 250, r: 42 },
+        { type: "web", x: 560, y: 240, r: 46 },
+        { type: "rock", x: 540, y: 500, r: 38 },
+        { type: "web", x: 800, y: 80, r: 40 },
+      ];
+
+      const state = {
+        mode: "menu", // menu | running | cleared | failed
+        phase: "draw", // draw | fly
+        elapsed: 0,
+        lastRunTime: 0,
+        crashes: 0,
+        drawing: false,
+        path: [],
+        pathLength: 0,
+        flyIndex: 0,
+        bee: { x: HIVE.x, y: HIVE.y, angle: 0 },
+        crashFlash: 0,
+        pollinateFlash: 0,
+        wobble: 0,
+        note: "벌의 비행 경로를 그려 모든 꽃에 꿀을 옮기세요",
+      };
+
+      function resetBee() {
+        state.bee = { x: HIVE.x, y: HIVE.y, angle: 0 };
+        state.phase = "draw";
+        state.path = [];
+        state.pathLength = 0;
+        state.flyIndex = 0;
+        state.drawing = false;
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.crashes = 0;
+        state.crashFlash = 0;
+        state.pollinateFlash = 0;
+        FLOWERS.forEach((f) => { f.done = false; });
+        resetBee();
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: ((event.clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((event.clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function dist(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      }
+
+      function pointSegmentDistance(p, a, b) {
+        const abx = b.x - a.x;
+        const aby = b.y - a.y;
+        const len2 = abx * abx + aby * aby;
+        if (len2 === 0) return dist(p, a);
+        let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t));
+      }
+
+      function pathHitsObstacle(path) {
+        for (const ob of OBSTACLES) {
+          for (let i = 0; i < path.length; i += 1) {
+            if (dist(path[i], ob) <= ob.r + 8) return true;
+            if (i > 0 && pointSegmentDistance(ob, path[i - 1], path[i]) <= ob.r + 6) return true;
+          }
+        }
+        return false;
+      }
+
+      function onPointerDown(event) {
+        event.preventDefault();
+        if (state.mode !== "running") {
+          startStage();
+          return;
+        }
+        if (state.phase !== "draw") return;
+        const point = canvasPoint(event);
+        // 벌집 근처 또는 벌 위치에서 드래그 시작
+        if (dist(point, state.bee) <= 90) {
+          state.drawing = true;
+          state.path = [{ x: state.bee.x, y: state.bee.y }];
+          state.pathLength = 0;
+        }
+      }
+
+      function onPointerMove(event) {
+        if (state.mode !== "running" || !state.drawing || state.phase !== "draw") return;
+        event.preventDefault();
+        const point = canvasPoint(event);
+        const clamped = {
+          x: Math.max(10, Math.min(VIEW.width - 10, point.x)),
+          y: Math.max(70, Math.min(VIEW.height - 10, point.y)),
+        };
+        const last = state.path[state.path.length - 1];
+        const segment = dist(clamped, last);
+        if (segment < 6) return;
+        if (state.pathLength + segment > MAX_PATH_LENGTH) {
+          // 게이지 한도 도달: 더 이상 긋지 않음
+          return;
+        }
+        state.path.push(clamped);
+        state.pathLength += segment;
+      }
+
+      function onPointerUp(event) {
+        if (state.mode !== "running" || !state.drawing) return;
+        if (event) event.preventDefault();
+        state.drawing = false;
+        if (state.path.length < 2) {
+          state.path = [];
+          state.pathLength = 0;
+          return;
+        }
+        state.phase = "fly";
+        state.flyIndex = 1;
+      }
+
+      function updateFlight(dt) {
+        if (state.phase !== "fly") return;
+        let move = BEE_SPEED * dt;
+        while (move > 0 && state.flyIndex < state.path.length) {
+          const target = state.path[state.flyIndex];
+          const d = dist(state.bee, target);
+          if (d <= move) {
+            state.bee.x = target.x;
+            state.bee.y = target.y;
+            state.flyIndex += 1;
+            move -= d;
+          } else {
+            state.bee.angle = Math.atan2(target.y - state.bee.y, target.x - state.bee.x);
+            state.bee.x += Math.cos(state.bee.angle) * move;
+            state.bee.y += Math.sin(state.bee.angle) * move;
+            move = 0;
+          }
+        }
+
+        // 장애물 충돌 검사
+        for (const ob of OBSTACLES) {
+          if (dist(state.bee, ob) <= ob.r + 8) {
+            state.crashes += 1;
+            state.crashFlash = 0.6;
+            resetBee();
+            if (state.crashes >= MAX_CRASHES) {
+              failStage("obstacle_crash_limit");
+            }
+            return;
+          }
+        }
+
+        // 꽃 수분 검사
+        for (const flower of FLOWERS) {
+          if (!flower.done && dist(state.bee, flower) <= FLOWER_RADIUS + 10) {
+            flower.done = true;
+            state.pollinateFlash = 0.5;
+          }
+        }
+
+        if (state.flyIndex >= state.path.length) {
+          // 비행 종료
+          if (FLOWERS.every((f) => f.done)) {
+            clearStage();
+            return;
+          }
+          state.phase = "draw";
+          state.path = [];
+          state.pathLength = 0;
+        }
+      }
+
+      function update(dt) {
+        state.wobble += dt;
+        if (state.mode !== "running") return;
+        state.elapsed += dt;
+        if (state.crashFlash > 0) state.crashFlash = Math.max(0, state.crashFlash - dt);
+        if (state.pollinateFlash > 0) state.pollinateFlash = Math.max(0, state.pollinateFlash - dt);
+        updateFlight(dt);
+      }
+
+      function drawGarden() {
+        const gradient = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        gradient.addColorStop(0, "#166534");
+        gradient.addColorStop(1, "#14532d");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // 잔디 질감 점
+        ctx.fillStyle = "rgba(187, 247, 208, 0.12)";
+        for (let i = 0; i < 60; i += 1) {
+          const x = (i * 173) % VIEW.width;
+          const y = 60 + ((i * 97) % (VIEW.height - 80));
+          ctx.beginPath();
+          ctx.arc(x, y, 3 + (i % 4), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawObstacle(ob) {
+        if (ob.type === "rock") {
+          ctx.fillStyle = "#78716c";
+          ctx.beginPath();
+          ctx.ellipse(ob.x, ob.y, ob.r, ob.r * 0.8, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#a8a29e";
+          ctx.beginPath();
+          ctx.ellipse(ob.x - ob.r * 0.25, ob.y - ob.r * 0.3, ob.r * 0.4, ob.r * 0.28, -0.4, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          // 거미줄
+          ctx.strokeStyle = "rgba(226, 232, 240, 0.85)";
+          ctx.lineWidth = 2;
+          for (let i = 0; i < 8; i += 1) {
+            const a = (i / 8) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.moveTo(ob.x, ob.y);
+            ctx.lineTo(ob.x + Math.cos(a) * ob.r, ob.y + Math.sin(a) * ob.r);
+            ctx.stroke();
+          }
+          for (const ring of [0.4, 0.7, 1]) {
+            ctx.beginPath();
+            for (let i = 0; i <= 8; i += 1) {
+              const a = (i / 8) * Math.PI * 2;
+              const r = ob.r * ring * (0.92 + 0.08 * Math.sin(i * 2.3));
+              const px = ob.x + Math.cos(a) * r;
+              const py = ob.y + Math.sin(a) * r;
+              if (i === 0) ctx.moveTo(px, py);
+              else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawFlower(flower) {
+        const sway = Math.sin(state.wobble * 1.5 + flower.x) * 3;
+        const fx = flower.x + sway;
+        ctx.strokeStyle = "#4ade80";
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(fx, flower.y + 34);
+        ctx.lineTo(fx, flower.y + 6);
+        ctx.stroke();
+        const alpha = flower.done ? 1 : 0.55;
+        ctx.globalAlpha = alpha;
+        for (let i = 0; i < 6; i += 1) {
+          const a = (i / 6) * Math.PI * 2 + state.wobble * 0.2;
+          ctx.fillStyle = flower.color;
+          ctx.beginPath();
+          ctx.ellipse(fx + Math.cos(a) * 14, flower.y + Math.sin(a) * 14, 11, 7, a, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.fillStyle = flower.done ? "#fde047" : "#a16207";
+        ctx.beginPath();
+        ctx.arc(fx, flower.y, 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        if (flower.done) {
+          ctx.fillStyle = "#fef9c3";
+          ctx.font = "700 16px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText("✓", fx, flower.y + 5);
+          ctx.textAlign = "left";
+        }
+      }
+
+      function drawHive() {
+        ctx.fillStyle = "#d97706";
+        for (let i = 0; i < 4; i += 1) {
+          const w = 66 - i * 12;
+          ctx.beginPath();
+          ctx.ellipse(HIVE.x, HIVE.y - 28 + i * 14, w / 2, 10, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.fillStyle = "#451a03";
+        ctx.beginPath();
+        ctx.ellipse(HIVE.x, HIVE.y + 14, 10, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#fef3c7";
+        ctx.font = "600 13px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("벌집", HIVE.x, HIVE.y + 40);
+        ctx.textAlign = "left";
+      }
+
+      function drawBee() {
+        const { x, y, angle } = state.bee;
+        const flap = Math.sin(state.wobble * 30) * 4;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        // 날개
+        ctx.fillStyle = "rgba(224, 242, 254, 0.85)";
+        ctx.beginPath();
+        ctx.ellipse(-2, -10 - flap, 9, 5, -0.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(-2, 10 + flap, 9, 5, 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        // 몸
+        ctx.fillStyle = "#facc15";
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 13, 9, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#1c1917";
+        ctx.fillRect(-6, -8, 3, 16);
+        ctx.fillRect(1, -8, 3, 16);
+        ctx.beginPath();
+        ctx.arc(11, 0, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function drawPath() {
+        if (state.path.length < 2) return;
+        const flying = state.phase === "fly";
+        ctx.strokeStyle = flying ? "rgba(254, 240, 138, 0.5)" : "rgba(254, 240, 138, 0.95)";
+        ctx.lineWidth = flying ? 2 : 4;
+        ctx.setLineDash(flying ? [4, 8] : [10, 6]);
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(state.path[0].x, state.path[0].y);
+        for (let i = 1; i < state.path.length; i += 1) {
+          ctx.lineTo(state.path[i].x, state.path[i].y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(20, 83, 45, 0.85)";
+        ctx.fillRect(0, 0, VIEW.width, 56);
+        const done = FLOWERS.filter((f) => f.done).length;
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 20px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`수분 ${done}/${FLOWERS.length}`, 18, 36);
+        const remain = MAX_CRASHES - state.crashes;
+        ctx.fillStyle = remain <= 1 ? "#fca5a5" : "#f8fafc";
+        ctx.fillText(`충돌 ${state.crashes}/${MAX_CRASHES}`, 150, 36);
+
+        // 경로 게이지
+        const gaugeW = 220;
+        const ratio = state.pathLength / MAX_PATH_LENGTH;
+        ctx.fillStyle = "rgba(15, 23, 42, 0.6)";
+        ctx.fillRect(VIEW.width - gaugeW - 18, 18, gaugeW, 20);
+        ctx.fillStyle = ratio > 0.85 ? "#f87171" : "#fde047";
+        ctx.fillRect(VIEW.width - gaugeW - 18, 18, gaugeW * ratio, 20);
+        ctx.strokeStyle = "#f8fafc";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(VIEW.width - gaugeW - 18, 18, gaugeW, 20);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "600 14px Trebuchet MS";
+        ctx.textAlign = "right";
+        ctx.fillText("경로 게이지", VIEW.width - gaugeW - 26, 33);
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        drawGarden();
+        OBSTACLES.forEach(drawObstacle);
+        FLOWERS.forEach(drawFlower);
+        drawHive();
+        drawPath();
+        drawBee();
+        renderHud();
+
+        if (state.phase === "draw" && !state.drawing) {
+          ctx.fillStyle = "rgba(15, 23, 42, 0.72)";
+          ctx.fillRect(200, VIEW.height - 58, 560, 40);
+          ctx.fillStyle = "#fef9c3";
+          ctx.font = "600 18px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText("벌에서 드래그해 경로를 그은 뒤 손을 떼면 날아갑니다", VIEW.width / 2, VIEW.height - 32);
+          ctx.textAlign = "left";
+        }
+
+        if (state.crashFlash > 0) {
+          ctx.fillStyle = `rgba(220, 38, 38, ${(state.crashFlash * 0.5).toFixed(3)})`;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+        if (state.pollinateFlash > 0) {
+          ctx.fillStyle = `rgba(250, 204, 21, ${(state.pollinateFlash * 0.25).toFixed(3)})`;
+          ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        }
+      }
+
+      function renderCard(title, lines, accent, footer) {
+        drawGarden();
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(20, 83, 45, 0.97)";
+        ctx.fillRect(128, 82, 704, 386);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 82, 704, 386);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 152);
+
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "600 23px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 222 + index * 42);
+        });
+        if (footer) {
+          ctx.fillStyle = "#fde047";
+          ctx.font = "700 22px Trebuchet MS";
+          ctx.fillText(footer, VIEW.width / 2, 440);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("꿀벌 정원", [
+            "벌의 비행 경로를 그려 모든 꽃에 꿀을 옮기세요",
+            "조작: 터치 드래그로 경로 그리기",
+            "모바일: 벌에서 손가락으로 경로를 그은 뒤 손을 떼세요",
+            "클리어 조건: 모든 꽃 수분 완료 시 클리어",
+            "실패 조건: 장애물 충돌 3회 시 실패",
+          ], "#facc15", "화면을 터치하거나 Enter를 눌러 시작");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderRunning();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          const done = FLOWERS.filter((f) => f.done).length;
+          renderCard("실패", [
+            "장애물 충돌 3회로 실패했습니다",
+            `수분 완료 꽃: ${done}/${FLOWERS.length} · 플레이 시간 ${state.lastRunTime.toFixed(1)}초`,
+            "거미줄과 돌을 피해 경로를 그려보세요",
+          ], "#f87171", "화면을 터치하면 다시 시작합니다");
+          return;
+        }
+
+        renderCard("클리어", [
+          "모든 꽃 수분을 완료했습니다!",
+          `플레이 시간 ${state.lastRunTime.toFixed(1)}초 · 충돌 ${state.crashes}회`,
+          "정원이 꿀로 가득 찼습니다",
+        ], "#4ade80", "화면을 터치하면 다시 시작합니다");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540, origin top-left",
+          mode: state.mode,
+          phase: state.phase,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          pollinated: FLOWERS.filter((f) => f.done).length,
+          total_flowers: FLOWERS.length,
+          crashes: state.crashes,
+          bee: { x: Math.round(state.bee.x), y: Math.round(state.bee.y) },
+          path_length: Math.round(state.pathLength),
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "bee-garden",
+        title: "꿀벌 정원",
+        creator: "Anonymous Creator",
+        genre: "Path drawing",
+        clearCondition: "모든 꽃 수분 완료 시 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", onPointerDown);
+      canvas.addEventListener("pointermove", onPointerMove);
+      canvas.addEventListener("pointerup", onPointerUp);
+      canvas.addEventListener("pointercancel", onPointerUp);
+      canvas.addEventListener("touchstart", (event) => {
+        event.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

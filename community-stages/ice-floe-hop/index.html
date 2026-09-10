@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>빙판 점프</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 걸너뛰기</a>
+    <p id="stage-instructions" class="sr-only">빙판 점프. 캔버스를 터치하거나 Enter로 시작하세요. 화면을 짧게 터치하면 가까이, 길게 누르고 떼면 멀리 점프합니다. 키보드는 스페이스를 눌렀다 떼면 점프합니다. 밟은 빙판은 잠시 뒤 가라앉으니 재빨리 다음 빙판으로 이동해 반대편 해안까지 도달하세요. 물에 빠지면 즉시 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="빙판 점프" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("ice-floe-hop") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const GROUND_TOP = 428;
+      const WATER_Y = 472;
+      const GRAVITY = 1500;
+      const START_SHORE_W = 220;
+      const SINK_DELAY = 1.2;
+      const SINK_SPEED = 78;
+      const SINK_MAX = 130;
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const floes = [];
+      let endShoreX = 0;
+      let worldEnd = 0;
+
+      (function buildCourse() {
+        let x = START_SHORE_W;
+        const gaps = [60, 140, 95, 190, 80, 220, 120, 170, 70, 205, 100, 150, 130, 215, 90];
+        gaps.forEach((gap, index) => {
+          x += gap;
+          const w = 84 + ((index * 37) % 48);
+          floes.push({
+            x,
+            w,
+            baseTop: GROUND_TOP - 6 + ((index * 23) % 14) - 7,
+            phase: index * 1.7,
+            stepped: false,
+            stepAt: 0,
+            sinkAt: 0,
+            sink: 0,
+            top: GROUND_TOP,
+          });
+          x += w;
+        });
+        endShoreX = x + 160;
+        worldEnd = endShoreX + 300;
+      })();
+
+      const player = {
+        x: START_SHORE_W / 2,
+        y: GROUND_TOP,
+        vx: 0,
+        vy: 0,
+        w: 30,
+        h: 44,
+        grounded: true,
+        support: null, // null=shore, floe ref, "air" handled by grounded
+        facing: 1,
+      };
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        camX: 0,
+        charging: false,
+        charge: 0,
+        failReason: "",
+        effects: [],
+        note: "가라앉는 빙판 사이를 타이밍 좋게 뛰어 건느세요",
+      };
+
+      function courseLength() {
+        return endShoreX - START_SHORE_W / 2;
+      }
+
+      function progressRatio() {
+        return Math.max(0, Math.min(1, (player.x - START_SHORE_W / 2) / courseLength()));
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.camX = 0;
+        state.charging = false;
+        state.charge = 0;
+        state.failReason = "";
+        state.effects = [];
+        player.x = START_SHORE_W / 2;
+        player.y = GROUND_TOP;
+        player.vx = 0;
+        player.vy = 0;
+        player.grounded = true;
+        player.support = null;
+        floes.forEach((floe) => {
+          floe.stepped = false;
+          floe.sink = 0;
+          floe.sinkAt = 0;
+          floe.top = floe.baseTop;
+        });
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.mode = "failed";
+        state.failReason = reason;
+        state.lastRunTime = state.elapsed;
+        state.charging = false;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        state.charging = false;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function addSplash(x, y, color) {
+        for (let index = 0; index < 10; index += 1) {
+          state.effects.push({
+            x,
+            y,
+            vx: (Math.random() - 0.5) * 180,
+            vy: -Math.random() * 160 - 40,
+            life: 0.5 + Math.random() * 0.3,
+            age: 0,
+            color,
+          });
+        }
+      }
+
+      function beginCharge() {
+        if (state.mode !== "running" || !player.grounded || state.charging) {
+          return;
+        }
+        state.charging = true;
+        state.charge = 0;
+      }
+
+      function releaseJump() {
+        if (!state.charging) {
+          return;
+        }
+        state.charging = false;
+        if (state.mode !== "running" || !player.grounded) {
+          return;
+        }
+        const c = state.charge;
+        player.grounded = false;
+        player.support = null;
+        player.vx = 240 + 380 * c;
+        player.vy = -(430 + 70 * c);
+        player.facing = 1;
+        state.charge = 0;
+      }
+
+      function landOn(floe) {
+        player.grounded = true;
+        player.vx = 0;
+        player.vy = 0;
+        if (floe) {
+          player.support = floe;
+          player.y = floe.top;
+          if (!floe.stepped) {
+            floe.stepped = true;
+            floe.stepAt = state.elapsed;
+            floe.sinkAt = state.elapsed + SINK_DELAY;
+          }
+        } else {
+          player.support = null;
+          player.y = GROUND_TOP;
+        }
+        addSplash(player.x, player.y, "rgba(226, 240, 255, 0.9)");
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        const t = state.elapsed;
+
+        floes.forEach((floe) => {
+          const bob = Math.sin(t * 1.6 + floe.phase) * 4 * (floe.sink > 0 ? 0.3 : 1);
+          if (floe.stepped && t >= floe.sinkAt) {
+            floe.sink = Math.min(floe.sink + SINK_SPEED * dt, SINK_MAX);
+          }
+          floe.top = floe.baseTop + bob + floe.sink;
+        });
+
+        if (state.charging && player.grounded) {
+          state.charge = Math.min(1, state.charge + dt / 0.9);
+        }
+
+        if (!player.grounded) {
+          const prevFeet = player.y;
+          player.vy += GRAVITY * dt;
+          player.x += player.vx * dt;
+          player.y += player.vy * dt;
+
+          if (player.vy > 0) {
+            const feet = player.y;
+            // Start / end shores
+            if ((player.x <= START_SHORE_W || player.x >= endShoreX) && prevFeet <= GROUND_TOP && feet >= GROUND_TOP) {
+              landOn(null);
+            } else {
+              for (const floe of floes) {
+                if (player.x >= floe.x - 4 && player.x <= floe.x + floe.w + 4 && prevFeet <= floe.top && feet >= floe.top && floe.sink < SINK_MAX - 30) {
+                  landOn(floe);
+                  break;
+                }
+              }
+            }
+          }
+
+          if (player.y - player.h > WATER_Y + 6 || player.y > WATER_Y + 10) {
+            addSplash(player.x, WATER_Y, "rgba(147, 197, 253, 0.95)");
+            failStage("fell_in_water");
+          }
+        } else if (player.support) {
+          // Ride the sinking floe
+          player.y = player.support.top;
+          if (player.support.sink >= SINK_MAX || player.support.top > WATER_Y) {
+            player.grounded = false;
+            player.support = null;
+            player.vy = 20;
+            player.vx = 0;
+          }
+        }
+
+        // Clear check: standing on the far shore
+        if (player.grounded && !player.support && player.x >= endShoreX) {
+          addSplash(player.x, player.y - 20, "rgba(254, 240, 138, 0.95)");
+          clearStage();
+        }
+
+        state.effects = state.effects.filter((fx) => {
+          fx.age += dt;
+          fx.x += fx.vx * dt;
+          fx.y += fx.vy * dt;
+          fx.vy += 500 * dt;
+          return fx.age < fx.life;
+        });
+
+        const targetCam = Math.max(0, Math.min(player.x - 320, worldEnd - VIEW.width));
+        state.camX += (targetCam - state.camX) * Math.min(1, dt * 6);
+      }
+
+      function roundedRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function drawSky() {
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#7dd3fc");
+        grad.addColorStop(0.65, "#bae6fd");
+        grad.addColorStop(1, "#e0f2fe");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        // distant icebergs (parallax)
+        ctx.fillStyle = "rgba(224, 242, 254, 0.9)";
+        for (let i = 0; i < 8; i += 1) {
+          const bx = ((i * 420 - state.camX * 0.3) % (VIEW.width + 500)) - 250;
+          const bh = 40 + (i % 3) * 22;
+          ctx.beginPath();
+          ctx.moveTo(bx, WATER_Y - 30);
+          ctx.lineTo(bx + 60, WATER_Y - 30 - bh);
+          ctx.lineTo(bx + 130, WATER_Y - 30);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+
+      function drawWater() {
+        const grad = ctx.createLinearGradient(0, WATER_Y - 30, 0, VIEW.height);
+        grad.addColorStop(0, "#0284c7");
+        grad.addColorStop(1, "#0c4a6e");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, WATER_Y - 30, VIEW.width, VIEW.height - WATER_Y + 30);
+
+        ctx.strokeStyle = "rgba(224, 242, 254, 0.55)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        for (let x = 0; x <= VIEW.width; x += 8) {
+          const y = WATER_Y - 30 + Math.sin((x + state.camX) * 0.05 + state.elapsed * 2.4) * 4;
+          if (x === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      function drawShore(fromX, toX, isGoal) {
+        const sx = fromX - state.camX;
+        const w = toX - fromX;
+        ctx.fillStyle = "#f1f5f9";
+        ctx.fillRect(sx, GROUND_TOP, w, VIEW.height - GROUND_TOP);
+        ctx.fillStyle = "#cbd5e1";
+        ctx.fillRect(sx, GROUND_TOP, w, 8);
+        if (isGoal) {
+          // goal flag
+          const fx = sx + w / 2;
+          ctx.strokeStyle = "#92400e";
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(fx, GROUND_TOP);
+          ctx.lineTo(fx, GROUND_TOP - 110);
+          ctx.stroke();
+          ctx.fillStyle = "#dc2626";
+          ctx.beginPath();
+          ctx.moveTo(fx, GROUND_TOP - 110);
+          ctx.lineTo(fx + 64, GROUND_TOP - 90);
+          ctx.lineTo(fx, GROUND_TOP - 70);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+
+      function drawFloe(floe) {
+        const x = floe.x - state.camX;
+        if (x + floe.w < -60 || x > VIEW.width + 60) {
+          return;
+        }
+        const sinkWarn = floe.stepped ? Math.min(1, Math.max(0, (state.elapsed - floe.stepAt) / SINK_DELAY)) : 0;
+        const r = Math.round(240 + sinkWarn * (248 - 240));
+        const g = Math.round(248 - sinkWarn * 90);
+        const b = Math.round(255 - sinkWarn * 160);
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        roundedRect(x, floe.top, floe.w, 26, 10);
+        ctx.fill();
+        ctx.fillStyle = sinkWarn > 0.5 ? "rgba(194, 65, 12, 0.55)" : "rgba(125, 211, 252, 0.6)";
+        roundedRect(x, floe.top + 18, floe.w, 8, 4);
+        ctx.fill();
+        if (floe.stepped && sinkWarn < 1) {
+          // warning cracks
+          ctx.strokeStyle = `rgba(194, 65, 12, ${0.25 + sinkWarn * 0.6})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x + floe.w * 0.3, floe.top + 2);
+          ctx.lineTo(x + floe.w * 0.45, floe.top + 14);
+          ctx.lineTo(x + floe.w * 0.38, floe.top + 24);
+          ctx.moveTo(x + floe.w * 0.7, floe.top + 2);
+          ctx.lineTo(x + floe.w * 0.6, floe.top + 16);
+          ctx.stroke();
+        }
+      }
+
+      function drawPlayer() {
+        const px = player.x - state.camX;
+        const py = player.y;
+        const squash = state.charging ? 1 - state.charge * 0.22 : 1;
+        const stretch = !player.grounded ? 1.08 : 1;
+        const h = player.h * squash * stretch;
+        const w = player.w / (squash * 0.9);
+
+        ctx.save();
+        ctx.translate(px, py);
+        // body
+        ctx.fillStyle = "#1e293b";
+        ctx.beginPath();
+        ctx.ellipse(0, -h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // belly
+        ctx.fillStyle = "#f8fafc";
+        ctx.beginPath();
+        ctx.ellipse(2, -h / 2 + 4, w / 3.4, h / 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // eye
+        ctx.fillStyle = "#f8fafc";
+        ctx.beginPath();
+        ctx.arc(6, -h + 12, 4.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#0f172a";
+        ctx.beginPath();
+        ctx.arc(7.4, -h + 12, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        // beak
+        ctx.fillStyle = "#f59e0b";
+        ctx.beginPath();
+        ctx.moveTo(10, -h + 17);
+        ctx.lineTo(22, -h + 20);
+        ctx.lineTo(10, -h + 23);
+        ctx.closePath();
+        ctx.fill();
+        // feet
+        ctx.fillStyle = "#f59e0b";
+        ctx.fillRect(-10, -4, 10, 4);
+        ctx.fillRect(2, -4, 10, 4);
+        ctx.restore();
+
+        if (state.charging) {
+          // charge gauge above player
+          const gw = 64;
+          const gx = px - gw / 2;
+          const gy = py - h - 26;
+          ctx.fillStyle = "rgba(15, 23, 42, 0.6)";
+          roundedRect(gx, gy, gw, 10, 5);
+          ctx.fill();
+          const ratio = state.charge;
+          ctx.fillStyle = ratio > 0.85 ? "#dc2626" : ratio > 0.5 ? "#f59e0b" : "#22c55e";
+          roundedRect(gx + 2, gy + 2, (gw - 4) * ratio, 6, 3);
+          ctx.fill();
+          // predicted distance tick
+          const pred = (240 + 380 * ratio) * (2 * (430 + 70 * ratio)) / GRAVITY;
+          ctx.strokeStyle = "rgba(15, 23, 42, 0.35)";
+          ctx.setLineDash([4, 6]);
+          ctx.beginPath();
+          ctx.moveTo(px, py - 8);
+          ctx.lineTo(px + pred, py - 8);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      function drawEffects() {
+        state.effects.forEach((fx) => {
+          const alpha = 1 - fx.age / fx.life;
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = fx.color;
+          ctx.beginPath();
+          ctx.arc(fx.x - state.camX, fx.y, 4, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+      }
+
+      function drawHud() {
+        // progress bar
+        const bw = 320;
+        const bx = (VIEW.width - bw) / 2;
+        ctx.fillStyle = "rgba(15, 23, 42, 0.55)";
+        roundedRect(bx, 18, bw, 16, 8);
+        ctx.fill();
+        ctx.fillStyle = "#38bdf8";
+        roundedRect(bx + 3, 21, (bw - 6) * progressRatio(), 10, 5);
+        ctx.fill();
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 17px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(`진행률 ${Math.round(progressRatio() * 100)}%`, VIEW.width / 2, 54);
+
+        ctx.textAlign = "right";
+        ctx.font = "700 18px Trebuchet MS";
+        ctx.fillText(`${state.elapsed.toFixed(1)}s`, VIEW.width - 20, 34);
+        ctx.textAlign = "left";
+        ctx.fillText(`남은 거리 ${Math.max(0, Math.round(endShoreX - player.x))}m`, 20, 34);
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.97)";
+        roundedRect(150, 84, 660, 372, 18);
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "800 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 152);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 216 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function renderScene() {
+        drawSky();
+        drawWater();
+        drawShore(0, START_SHORE_W, false);
+        drawShore(endShoreX, worldEnd, true);
+        floes.forEach(drawFloe);
+        drawEffects();
+        drawPlayer();
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderScene();
+          renderCard("빙판 점프", [
+            "가라앉는 빙판 사이를 뛰어 반대편 해안까지!",
+            "조작: 화면 터치로 점프, 길게 누르면 멀리 점프",
+            "키보드: 스페이스를 눌렀다 떼면 점프",
+            "클리어 조건: 반대편 해안까지 도달하면 클리어",
+            "실패 조건: 물에 빠지면 즉시 실패",
+            "밟은 빙판은 잠시 뒤 가라앉아요 — 서두르세요!",
+            "터치 또는 Enter로 시작",
+          ], "#0284c7");
+          return;
+        }
+
+        renderScene();
+        if (state.mode === "running") {
+          drawHud();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패 — 물에 빠졌어요!", [
+            `생존 시간 ${state.lastRunTime.toFixed(1)}초 · 진행률 ${Math.round(progressRatio() * 100)}%`,
+            "실패 조건: 물에 빠지면 즉시 실패",
+            "차지 게이지를 보고 점프 거리를 맞춰보세요.",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderCard("클리어!", [
+          `반대편 해안 도달! ${state.lastRunTime.toFixed(1)}초`,
+          "클리어 조건: 반대편 해안까지 도달하면 클리어",
+          "호스트가 다음 미플레이 스테이지를 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540, x right, y down, world scrolls with camX",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          player: {
+            x: Math.round(player.x),
+            y: Math.round(player.y),
+            grounded: player.grounded,
+            charging: state.charging,
+            charge: Math.round(state.charge * 100) / 100,
+          },
+          progress_pct: Math.round(progressRatio() * 100),
+          distance_left: Math.max(0, Math.round(endShoreX - player.x)),
+          fail_reason: state.failReason || null,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (event.code === "Space" && state.mode === "running") {
+          event.preventDefault();
+          if (!event.repeat) {
+            beginCharge();
+          }
+        }
+      }
+
+      function onKeyUp(event) {
+        if (event.code === "Space") {
+          event.preventDefault();
+          releaseJump();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "ice-floe-hop",
+        title: "빙판 점프",
+        creator: "Anonymous Creator",
+        genre: "Timing jump",
+        clearCondition: "반대편 해안까지 도달하면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode === "menu") {
+          startStage();
+          return;
+        }
+        beginCharge();
+      });
+      window.addEventListener("pointerup", () => releaseJump());
+      window.addEventListener("pointercancel", () => releaseJump());
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

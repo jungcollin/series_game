@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>신호 지휘관</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">신호 지휘관. 캔버스를 터치하거나 Enter로 시작하세요. 터치로 신호등 전환 — 가로 방향 초록불과 세로 방향 초록불을 번갈아 바꿔 차량을 보내세요. 교차로 안에서 차량이 겹치면 충돌합니다. 차량 20대를 무사고로 통과시키면 클리어, 충돌 3회 또는 대기 10대 초과 시 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="신호 지휘관" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const CX = VIEW.width / 2;
+      const CY = VIEW.height / 2 + 20;
+      const ROAD_HALF = 52;
+      const BOX = 46; // 교차로 충돌 판정 반경
+      const PASS_TARGET = 20;
+      const CRASH_LIMIT = 3;
+      const QUEUE_LIMIT = 10;
+      const CAR_SPEED = 150;
+      const CAR_GAP = 54;
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      const relayContext = window.RelayRuntime?.readContext("traffic-light") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let nextCarId = 1;
+
+      const CAR_COLORS = ["#f87171", "#60a5fa", "#fbbf24", "#a3e635", "#e879f9", "#38bdf8", "#fb923c"];
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "신호를 바꿔 교차로 차량을 사고 없이 보내세요",
+        greenAxis: "h", // h: 가로, v: 세로
+        cars: [],
+        passed: 0,
+        crashes: 0,
+        spawnH: 1.2,
+        spawnV: 2.0,
+        yellow: 0, // 신호 전환 후 황등 시간
+        crashFlash: [],
+        resultReason: "",
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.greenAxis = "h";
+        state.cars = [];
+        state.passed = 0;
+        state.crashes = 0;
+        state.spawnH = 1.2;
+        state.spawnV = 2.0;
+        state.yellow = 0;
+        state.crashFlash = [];
+        state.resultReason = "";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.resultReason = reason;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function toggleSignal() {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.greenAxis = state.greenAxis === "h" ? "v" : "h";
+        state.yellow = 0.6;
+      }
+
+      // axis: 'h' (서→동, y=CY-26 레인) / 'v' (북→남, x=CX+26 레인)
+      function spawnCar(axis) {
+        const color = CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)];
+        const car = {
+          id: nextCarId,
+          axis,
+          color,
+          // pos: 진행축 좌표
+          pos: axis === "h" ? -40 : -40,
+          stopped: false,
+        };
+        nextCarId += 1;
+        // 출발 지점에 이미 차가 있으면 스폰 보류
+        const blocked = state.cars.some(
+          (other) => other.axis === axis && Math.abs(other.pos - car.pos) < CAR_GAP
+        );
+        if (blocked) {
+          return false;
+        }
+        state.cars.push(car);
+        return true;
+      }
+
+      function queueCount(axis) {
+        return state.cars.filter((car) => car.axis === axis && car.stopped).length;
+      }
+
+      function stopLine(axis) {
+        return axis === "h" ? CX - ROAD_HALF - 30 : CY - ROAD_HALF - 30;
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+        if (state.yellow > 0) {
+          state.yellow -= dt;
+        }
+
+        // 스폰: 난이도 완만 상승
+        const spawnInterval = Math.max(1.4, 2.6 - state.elapsed * 0.015);
+        state.spawnH -= dt;
+        state.spawnV -= dt;
+        if (state.spawnH <= 0) {
+          spawnCar("h");
+          state.spawnH = spawnInterval * (0.7 + Math.random() * 0.6);
+        }
+        if (state.spawnV <= 0) {
+          spawnCar("v");
+          state.spawnV = spawnInterval * (0.7 + Math.random() * 0.6);
+        }
+
+        const greenH = state.greenAxis === "h" && state.yellow <= 0;
+
+        for (const car of state.cars) {
+          const axis = car.axis;
+          const isGreen = (axis === "h" && greenH) || (axis === "v" && !greenH);
+          const line = stopLine(axis);
+          car.stopped = false;
+
+          // 앞차 추종
+          let front = null;
+          for (const other of state.cars) {
+            if (other.axis === axis && other.id !== car.id && other.pos > car.pos) {
+              if (!front || other.pos < front.pos) {
+                front = other;
+              }
+            }
+          }
+
+          if (!isGreen && car.pos + CAR_SPEED * dt >= line && car.pos < line + 10) {
+            // 빨간불: 정지선 앞 정지
+            car.pos = Math.min(car.pos, line);
+            car.stopped = true;
+          } else if (front && front.pos - car.pos < CAR_GAP && front.stopped) {
+            car.pos = front.pos - CAR_GAP;
+            car.stopped = true;
+          } else {
+            car.pos += CAR_SPEED * dt;
+          }
+        }
+
+        // 통과 판정
+        const before = state.cars.length;
+        state.cars = state.cars.filter((car) => car.pos < (car.axis === "h" ? VIEW.width + 40 : VIEW.height + 40));
+        const exited = before - state.cars.length;
+        if (exited > 0) {
+          state.passed += exited;
+          if (state.passed >= PASS_TARGET) {
+            clearStage();
+            return;
+          }
+        }
+
+        // 대기열 초과 판정
+        if (queueCount("h") > QUEUE_LIMIT || queueCount("v") > QUEUE_LIMIT) {
+          failStage("queue_overflow");
+          return;
+        }
+
+        // 교차로 내 충돌 판정: h축 차량의 화면 좌표 vs v축 차량의 화면 좌표
+        for (const hCar of state.cars) {
+          if (hCar.axis !== "h") continue;
+          const hx = hCar.pos;
+          const hy = CY - 26;
+          if (hx < CX - BOX || hx > CX + BOX) continue;
+          for (const vCar of state.cars) {
+            if (vCar.axis !== "v") continue;
+            const vx = CX + 26;
+            const vy = vCar.pos;
+            if (vy < CY - BOX || vy > CY + BOX) continue;
+            if (Math.abs(hx - vx) < 44 && Math.abs(hy - vy) < 44) {
+              state.crashes += 1;
+              state.crashFlash.push({ x: (hx + vx) / 2, y: (hy + vy) / 2, life: 0.6 });
+              state.cars = state.cars.filter((car) => car.id !== hCar.id && car.id !== vCar.id);
+              if (state.crashes >= CRASH_LIMIT) {
+                failStage("collision");
+                return;
+              }
+              break;
+            }
+          }
+        }
+
+        for (const flash of state.crashFlash) {
+          flash.life -= dt;
+        }
+        state.crashFlash = state.crashFlash.filter((flash) => flash.life > 0);
+      }
+
+      function renderRoads() {
+        ctx.fillStyle = "#166534";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        // 풀 결
+        ctx.fillStyle = "rgba(0,0,0,0.08)";
+        for (let gx = 0; gx < VIEW.width; gx += 60) {
+          for (let gy = 0; gy < VIEW.height; gy += 60) {
+            if ((gx + gy) % 120 === 0) {
+              ctx.fillRect(gx, gy, 60, 60);
+            }
+          }
+        }
+        // 도로
+        ctx.fillStyle = "#334155";
+        ctx.fillRect(0, CY - ROAD_HALF, VIEW.width, ROAD_HALF * 2);
+        ctx.fillRect(CX - ROAD_HALF, 0, ROAD_HALF * 2, VIEW.height);
+        // 중앙선
+        ctx.strokeStyle = "#facc15";
+        ctx.lineWidth = 3;
+        ctx.setLineDash([18, 14]);
+        ctx.beginPath();
+        ctx.moveTo(0, CY);
+        ctx.lineTo(CX - ROAD_HALF, CY);
+        ctx.moveTo(CX + ROAD_HALF, CY);
+        ctx.lineTo(VIEW.width, CY);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(CX, 0);
+        ctx.lineTo(CX, CY - ROAD_HALF);
+        ctx.moveTo(CX, CY + ROAD_HALF);
+        ctx.lineTo(CX, VIEW.height);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // 정지선
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillRect(CX - ROAD_HALF - 34, CY - ROAD_HALF, 6, ROAD_HALF);
+        ctx.fillRect(CX + 26, CY - ROAD_HALF - 34, ROAD_HALF, 6);
+      }
+
+      function renderSignals() {
+        const greenH = state.greenAxis === "h" && state.yellow <= 0;
+        // 가로 신호등 (서쪽 진입)
+        drawSignal(CX - ROAD_HALF - 60, CY - ROAD_HALF - 56, greenH ? "green" : state.yellow > 0 ? "yellow" : "red");
+        // 세로 신호등 (북쪽 진입)
+        drawSignal(CX + ROAD_HALF + 24, CY - ROAD_HALF - 56, !greenH && state.yellow <= 0 ? "green" : state.yellow > 0 ? "yellow" : "red");
+      }
+
+      function drawSignal(x, y, lit) {
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(x, y, 30, 62);
+        ctx.strokeStyle = "#475569";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, 30, 62);
+        const colors = { red: "#ef4444", yellow: "#facc15", green: "#22c55e" };
+        ["red", "yellow", "green"].forEach((color, index) => {
+          ctx.fillStyle = lit === color ? colors[color] : "#1e293b";
+          ctx.beginPath();
+          ctx.arc(x + 15, y + 11 + index * 20, 7, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+
+      function renderCars() {
+        for (const car of state.cars) {
+          if (car.axis === "h") {
+            drawCar(car.pos, CY - 26, 0, car.color);
+          } else {
+            drawCar(CX + 26, car.pos, Math.PI / 2, car.color);
+          }
+        }
+        for (const flash of state.crashFlash) {
+          ctx.globalAlpha = Math.max(flash.life / 0.6, 0);
+          ctx.fillStyle = "#fde047";
+          ctx.beginPath();
+          ctx.arc(flash.x, flash.y, reducedMotion ? 26 : 46 * (1 - flash.life / 0.6) + 12, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "#b91c1c";
+          ctx.font = "800 20px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText("충돌!", flash.x, flash.y - 34);
+          ctx.textAlign = "left";
+        }
+      }
+
+      function drawCar(x, y, angle, color) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.fillStyle = color;
+        ctx.fillRect(-22, -11, 44, 22);
+        ctx.fillStyle = "rgba(15,23,42,0.55)";
+        ctx.fillRect(-6, -9, 12, 18);
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(-16, -13, 8, 4);
+        ctx.fillRect(8, -13, 8, 4);
+        ctx.fillRect(-16, 9, 8, 4);
+        ctx.fillRect(8, 9, 8, 4);
+        ctx.restore();
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, 54);
+        ctx.font = "800 20px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillStyle = "#4ade80";
+        ctx.fillText(`통과 ${state.passed}/${PASS_TARGET}`, 18, 35);
+        ctx.fillStyle = "#f87171";
+        ctx.fillText(`충돌 ${state.crashes}/${CRASH_LIMIT}`, 190, 35);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.textAlign = "right";
+        ctx.fillText(`대기 가로 ${queueCount("h")}대 · 세로 ${queueCount("v")}대 / ${QUEUE_LIMIT}`, VIEW.width - 18, 35);
+        ctx.textAlign = "center";
+        ctx.font = "600 15px Trebuchet MS";
+        ctx.fillStyle = "#94a3b8";
+        ctx.fillText("터치로 신호 전환", VIEW.width / 2, 34);
+        ctx.textAlign = "left";
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 46);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("신호 지휘관", [
+            "신호를 바꿔 교차로 차량을 사고 없이 보내세요",
+            "조작: 터치로 신호등 전환",
+            "키보드: 스페이스로 신호 전환",
+            "클리어 조건: 차량 20대를 무사고로 통과시키면 클리어",
+            "실패 조건: 충돌 3회 또는 대기 10대 초과 시 실패",
+            "터치 또는 Enter로 시작",
+          ], "#2563eb");
+          return;
+        }
+
+        renderRoads();
+        renderSignals();
+        renderCars();
+        renderHud();
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "충돌 3회 또는 대기 10대 초과 시 실패",
+            `통과 ${state.passed}대 · 충돌 ${state.crashes}회`,
+            state.resultReason === "queue_overflow" ? "대기열이 너무 길어졌습니다" : "교차로에서 충돌이 났습니다",
+            "터치 또는 Enter로 다시 시작",
+          ], "#b91c1c");
+          return;
+        }
+
+        if (state.mode === "cleared") {
+          renderCard("클리어", [
+            "차량 20대를 무사고로 통과시키면 클리어",
+            `충돌 ${state.crashes}회로 마무리`,
+            `소요 시간 ${state.lastRunTime.toFixed(1)}초`,
+          ], "#15803d");
+        }
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down; crossing center (480,290)",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          green_axis: state.greenAxis,
+          passed: state.passed,
+          crashes: state.crashes,
+          queue_h: queueCount("h"),
+          queue_v: queueCount("v"),
+          cars: state.cars.map((car) => ({ axis: car.axis, pos: Math.round(car.pos), stopped: car.stopped })),
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+          return;
+        }
+        if ((event.key === " " || event.key === "Enter") && state.mode === "running") {
+          event.preventDefault();
+          toggleSignal();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "traffic-light",
+        title: "신호 지휘관",
+        creator: "Anonymous Creator",
+        genre: "Traffic control",
+        clearCondition: "차량 20대를 무사고로 통과시키면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        toggleSignal();
+      });
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

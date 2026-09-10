@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>불꽃 장인</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">불꽃 장인. 캔버스를 터치하거나 Enter로 시작하세요. 발사대에서 올라오는 포탄이 최고점 근처의 녹색 점화 존에 들어갔을 때 화면을 터치하거나 스페이스를 눌러 점화하세요. 너무 이르거나 늦으면 실패 1발이며, 불꽃 8발을 성공시키면 클리어, 3발 실패 시 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="불꽃 장인" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const GROUND_Y = 486;
+      const SUCCESS_TARGET = 8;
+      const FAIL_LIMIT = 3;
+      const GRAVITY = 720;
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      const relayContext = window.RelayRuntime?.readContext("fireworks-master") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        note: "포탄이 최고점에 오를 때 점화해 밤하늘을 수놓으세요",
+        successes: 0,
+        failures: 0,
+        shell: null,
+        spawnTimer: 0,
+        particles: [],
+        flashes: [],
+        resultReason: "",
+      };
+
+      const stars = [];
+      for (let index = 0; index < 90; index += 1) {
+        stars.push({
+          x: Math.random() * VIEW.width,
+          y: Math.random() * (GROUND_Y - 120),
+          r: 0.6 + Math.random() * 1.6,
+          twinkle: Math.random() * Math.PI * 2,
+        });
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.successes = 0;
+        state.failures = 0;
+        state.shell = null;
+        state.spawnTimer = 0.6;
+        state.particles = [];
+        state.flashes = [];
+        state.resultReason = "";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.lastRunTime = state.elapsed;
+        state.resultReason = reason;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+        }
+      }
+
+      function spawnShell() {
+        const index = state.successes + state.failures;
+        const apexY = 150 + Math.random() * 90;
+        const riseSpeed = Math.min(430 + index * 12, 560);
+        const zoneHalf = Math.max(46 - index * 3, 26);
+        const laneX = 160 + Math.random() * (VIEW.width - 320);
+        state.shell = {
+          x: laneX,
+          y: GROUND_Y - 8,
+          vy: -Math.sqrt(2 * GRAVITY * (GROUND_Y - 8 - apexY)) - riseSpeed * 0.12,
+          zoneTop: Math.max(60, apexY - zoneHalf),
+          zoneBottom: apexY + zoneHalf,
+          trail: [],
+          lit: false,
+        };
+      }
+
+      function igniteSuccess(shell) {
+        const palette = ["#f97316", "#fbbf24", "#22d3ee", "#f472b6", "#a3e635", "#e879f9"];
+        const color = palette[Math.floor(Math.random() * palette.length)];
+        const count = reducedMotion ? 18 : 64;
+        for (let index = 0; index < count; index += 1) {
+          const angle = (Math.PI * 2 * index) / count + Math.random() * 0.2;
+          const speed = 60 + Math.random() * 200;
+          state.particles.push({
+            x: shell.x,
+            y: shell.y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            life: 0.9 + Math.random() * 0.7,
+            maxLife: 1.6,
+            color,
+            r: 2 + Math.random() * 2.4,
+          });
+        }
+        state.flashes.push({ x: shell.x, y: shell.y, life: 0.35, color });
+        state.successes += 1;
+        state.shell = null;
+        state.spawnTimer = 0.9;
+        if (state.successes >= SUCCESS_TARGET) {
+          clearStage();
+        }
+      }
+
+      function shellFail(reason) {
+        if (!state.shell) {
+          return;
+        }
+        state.flashes.push({ x: state.shell.x, y: state.shell.y, life: 0.3, color: "#94a3b8" });
+        state.shell = null;
+        state.failures += 1;
+        state.spawnTimer = 1.0;
+        if (state.failures >= FAIL_LIMIT) {
+          failStage(reason);
+        }
+      }
+
+      function tryIgnite() {
+        if (state.mode !== "running" || !state.shell) {
+          return;
+        }
+        const shell = state.shell;
+        if (shell.y >= shell.zoneTop && shell.y <= shell.zoneBottom) {
+          igniteSuccess(shell);
+        } else {
+          shellFail(shell.y > shell.zoneBottom ? "too_early" : "too_late");
+        }
+      }
+
+      function update(dt) {
+        if (state.mode !== "running") {
+          updateParticles(dt);
+          return;
+        }
+        state.elapsed += dt;
+        updateParticles(dt);
+
+        if (!state.shell) {
+          state.spawnTimer -= dt;
+          if (state.spawnTimer <= 0) {
+            spawnShell();
+          }
+          return;
+        }
+
+        const shell = state.shell;
+        shell.trail.push({ x: shell.x, y: shell.y });
+        if (shell.trail.length > 12) {
+          shell.trail.shift();
+        }
+        shell.vy += GRAVITY * dt;
+        shell.y += shell.vy * dt;
+
+        if (shell.y >= GROUND_Y - 8 && shell.vy > 0) {
+          shellFail("ground_hit");
+        }
+      }
+
+      function updateParticles(dt) {
+        for (const particle of state.particles) {
+          particle.vy += 240 * dt;
+          particle.vx *= 0.985;
+          particle.x += particle.vx * dt;
+          particle.y += particle.vy * dt;
+          particle.life -= dt;
+        }
+        state.particles = state.particles.filter((particle) => particle.life > 0);
+        for (const flash of state.flashes) {
+          flash.life -= dt;
+        }
+        state.flashes = state.flashes.filter((flash) => flash.life > 0);
+      }
+
+      function renderBackground() {
+        const gradient = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        gradient.addColorStop(0, "#020617");
+        gradient.addColorStop(0.75, "#0f172a");
+        gradient.addColorStop(1, "#1e293b");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        const tw = state.elapsed * 2;
+        ctx.fillStyle = "#e2e8f0";
+        for (const star of stars) {
+          ctx.globalAlpha = 0.4 + 0.35 * Math.sin(star.twinkle + tw);
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        ctx.fillStyle = "#14532d";
+        ctx.beginPath();
+        ctx.moveTo(0, GROUND_Y);
+        ctx.lineTo(VIEW.width, GROUND_Y);
+        ctx.lineTo(VIEW.width, VIEW.height);
+        ctx.lineTo(0, VIEW.height);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.fillRect(0, GROUND_Y, VIEW.width, 6);
+
+        // 발사대
+        ctx.fillStyle = "#475569";
+        ctx.fillRect(VIEW.width / 2 - 46, GROUND_Y - 14, 92, 14);
+        ctx.fillStyle = "#334155";
+        ctx.fillRect(VIEW.width / 2 - 10, GROUND_Y - 34, 20, 22);
+      }
+
+      function renderShell() {
+        const shell = state.shell;
+        if (!shell) {
+          return;
+        }
+        // 점화 존
+        ctx.fillStyle = "rgba(74, 222, 128, 0.14)";
+        ctx.fillRect(shell.x - 90, shell.zoneTop, 180, shell.zoneBottom - shell.zoneTop);
+        ctx.strokeStyle = "rgba(74, 222, 128, 0.7)";
+        ctx.setLineDash([6, 5]);
+        ctx.lineWidth = 2;
+        ctx.strokeRect(shell.x - 90, shell.zoneTop, 180, shell.zoneBottom - shell.zoneTop);
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#4ade80";
+        ctx.font = "700 13px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText("점화 존", shell.x, shell.zoneTop - 6);
+        ctx.textAlign = "left";
+
+        // 궤적
+        ctx.strokeStyle = "rgba(251, 191, 36, 0.5)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        shell.trail.forEach((point, index) => {
+          if (index === 0) ctx.moveTo(point.x, point.y);
+          else ctx.lineTo(point.x, point.y);
+        });
+        ctx.stroke();
+
+        // 포탄
+        const inZone = shell.y >= shell.zoneTop && shell.y <= shell.zoneBottom;
+        ctx.fillStyle = inZone ? "#fbbf24" : "#fb923c";
+        ctx.beginPath();
+        ctx.arc(shell.x, shell.y, 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#fde68a";
+        ctx.beginPath();
+        ctx.arc(shell.x - 3, shell.y - 3, 3.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function renderParticles() {
+        for (const particle of state.particles) {
+          ctx.globalAlpha = Math.max(particle.life / particle.maxLife, 0);
+          ctx.fillStyle = particle.color;
+          ctx.beginPath();
+          ctx.arc(particle.x, particle.y, particle.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        for (const flash of state.flashes) {
+          ctx.globalAlpha = Math.max(flash.life / 0.35, 0) * 0.5;
+          ctx.fillStyle = flash.color;
+          ctx.beginPath();
+          ctx.arc(flash.x, flash.y, 90 * (1 - flash.life / 0.35) + 10, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.85)";
+        ctx.fillRect(0, 0, VIEW.width, 56);
+        ctx.font = "800 22px Trebuchet MS";
+        ctx.fillStyle = "#fbbf24";
+        ctx.textAlign = "left";
+        ctx.fillText(`성공 ${state.successes}/${SUCCESS_TARGET}`, 20, 37);
+        ctx.fillStyle = "#f87171";
+        ctx.textAlign = "right";
+        ctx.fillText(`실패 ${state.failures}/${FAIL_LIMIT}`, VIEW.width - 20, 37);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.textAlign = "center";
+        ctx.font = "600 16px Trebuchet MS";
+        ctx.fillText("포탄이 녹색 점화 존에 들어오면 터치!", VIEW.width / 2, 36);
+        ctx.textAlign = "left";
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(128, 92, 704, 356);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(128, 92, 704, 356);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 42px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 162);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 24px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 232 + index * 46);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("불꽃 장인", [
+            "포탄이 최고점에 오를 때 점화해 밤하늘을 수놓으세요",
+            "조작: 터치로 포탄 점화",
+            "키보드: 스페이스로 점화",
+            "클리어 조건: 불꽃 8발을 성공시키면 클리어",
+            "실패 조건: 3발 실패 시 실패",
+            "터치 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderBackground();
+          renderShell();
+          renderParticles();
+          renderHud();
+          return;
+        }
+
+        renderBackground();
+        renderParticles();
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "3발 실패 시 실패",
+            `성공 ${state.successes}발 · 실패 ${state.failures}발`,
+            "점화 존에 들어왔을 때만 터치하세요",
+            "터치 또는 Enter로 다시 시작",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderCard("클리어", [
+          "불꽃 8발을 성공시키면 클리어",
+          `${SUCCESS_TARGET}발의 불꽃이 밤하늘을 밝혔습니다`,
+          `소요 시간 ${state.lastRunTime.toFixed(1)}초`,
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          successes: state.successes,
+          failures: state.failures,
+          shell: state.shell
+            ? { x: Math.round(state.shell.x), y: Math.round(state.shell.y), vy: Math.round(state.shell.vy), zone: [state.shell.zoneTop, state.shell.zoneBottom] }
+            : null,
+          particles: state.particles.length,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startFromTouch();
+          return;
+        }
+        if ((event.key === " " || event.key === "Enter") && state.mode === "running") {
+          event.preventDefault();
+          tryIgnite();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "fireworks-master",
+        title: "불꽃 장인",
+        creator: "Anonymous Creator",
+        genre: "Timing ignition",
+        clearCondition: "불꽃 8발을 성공시키면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        tryIgnite();
+      });
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

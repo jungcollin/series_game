@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>꼬치 구이</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: none;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">꼬치 구이. 화면을 터치하거나 Enter로 시작하세요. 꼬치를 터치하면 뒤집고, 익음 게이지가 초록색 완벽 구간에 들어왔을 때 꼬치를 터치하면 접시에 담깁니다. 하단 슬라이더를 드래그해 불 세기를 조절하세요. 꼬치 6개를 완벽하게 구우면 클리어, 3개를 태우면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="꼬치 구이" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("grill-master") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const SERVE_GOAL = 6;
+      const BURN_LIMIT = 3;
+      const GREEN_MIN = 1.5;
+      const GREEN_MAX = 1.85;
+      const BURN_AT = 1.98;
+      const SLOT_X = [250, 480, 710];
+      const SKEWER_Y = 252;
+      const SKEWER_W = 210;
+      const SKEWER_H = 44;
+      const GAUGE_Y = 336;
+      const SLIDER = { x: 240, y: 492, w: 480, h: 26 };
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+      let sliderDragging = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        served: 0,
+        burnt: 0,
+        fire: 3,
+        failReason: "",
+        note: "불 세기를 조절하고 타이밍 맞춰 뒤집어 완벽하게 구우세요",
+        shake: 0,
+      };
+
+      let slots = [];
+      let particles = [];
+      let smoke = [];
+
+      function makeSkewer() {
+        return {
+          faces: [0, 0],
+          currentFace: 0,
+          rateFactor: 0.9 + Math.random() * 0.25,
+          flipAnim: 0,
+          readyPulse: 0,
+          respawnIn: 0,
+          exists: true,
+        };
+      }
+
+      function skewerTotal(s) {
+        return s.faces[0] + s.faces[1];
+      }
+
+      function skewerStatus(s) {
+        if (!s.exists) return "empty";
+        const total = skewerTotal(s);
+        if (total >= BURN_AT) return "burnt";
+        if (total >= GREEN_MIN && total <= GREEN_MAX) return "perfect";
+        if (total > GREEN_MAX) return "over";
+        return "cooking";
+      }
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) return;
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) return;
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) return;
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.served = 0;
+        state.burnt = 0;
+        state.fire = 3;
+        state.failReason = "";
+        state.shake = 0;
+        slots = [makeSkewer(), makeSkewer(), makeSkewer()];
+        particles = [];
+        smoke = [];
+        sliderDragging = false;
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.failReason = reason;
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function spawnBurst(x, y, color, count) {
+        for (let i = 0; i < count; i += 1) {
+          particles.push({
+            x, y,
+            vx: (Math.random() - 0.5) * 260,
+            vy: -80 - Math.random() * 160,
+            life: 0.7 + Math.random() * 0.4,
+            age: 0,
+            color,
+          });
+        }
+      }
+
+      function spawnSmoke(x, y) {
+        smoke.push({ x: x + (Math.random() - 0.5) * 40, y, r: 8 + Math.random() * 10, age: 0, life: 1.4 });
+      }
+
+      function tapSkewer(index) {
+        const s = slots[index];
+        if (!s || !s.exists) return;
+        const status = skewerStatus(s);
+        if (status === "perfect") {
+          state.served += 1;
+          s.exists = false;
+          s.respawnIn = 0.8;
+          spawnBurst(SLOT_X[index], SKEWER_Y, "#facc15", 18);
+          if (state.served >= SERVE_GOAL) {
+            clearStage();
+          }
+        } else if (status !== "burnt") {
+          s.currentFace = 1 - s.currentFace;
+          s.flipAnim = 1;
+          spawnBurst(SLOT_X[index], SKEWER_Y + 10, "#e2e8f0", 5);
+        }
+      }
+
+      function setFireFromPointer(x) {
+        const t = Math.max(0, Math.min(1, (x - SLIDER.x) / SLIDER.w));
+        state.fire = 1 + t * 4;
+      }
+
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: ((event.clientX - rect.left) / rect.width) * VIEW.width,
+          y: ((event.clientY - rect.top) / rect.height) * VIEW.height,
+        };
+      }
+
+      function skewerHitIndex(x, y) {
+        for (let i = 0; i < 3; i += 1) {
+          if (Math.abs(x - SLOT_X[i]) <= SKEWER_W / 2 + 20 && Math.abs(y - SKEWER_Y) <= 70) {
+            return i;
+          }
+        }
+        return -1;
+      }
+
+      function onPointerDown(event) {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode === "menu" || state.mode === "failed" || state.mode === "cleared") {
+          startStage();
+          return;
+        }
+        const p = canvasPoint(event);
+        if (p.y >= SLIDER.y - 30) {
+          sliderDragging = true;
+          setFireFromPointer(p.x);
+          return;
+        }
+        const idx = skewerHitIndex(p.x, p.y);
+        if (idx >= 0) {
+          tapSkewer(idx);
+        }
+      }
+
+      function onPointerMove(event) {
+        if (!sliderDragging || state.mode !== "running") return;
+        event.preventDefault();
+        setFireFromPointer(canvasPoint(event).x);
+      }
+
+      function onPointerUp() {
+        sliderDragging = false;
+      }
+
+      function update(dt) {
+        particles.forEach((p) => {
+          p.age += dt;
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 500 * dt;
+        });
+        particles = particles.filter((p) => p.age < p.life);
+        smoke.forEach((s) => {
+          s.age += dt;
+          s.y -= 40 * dt;
+          s.r += 14 * dt;
+        });
+        smoke = smoke.filter((s) => s.age < s.life);
+
+        if (state.mode !== "running") return;
+
+        state.elapsed += dt;
+        if (state.shake > 0) state.shake = Math.max(0, state.shake - dt * 3);
+
+        for (let i = 0; i < slots.length; i += 1) {
+          const s = slots[i];
+          if (!s.exists) {
+            s.respawnIn -= dt;
+            if (s.respawnIn <= 0 && state.served < SERVE_GOAL) {
+              slots[i] = makeSkewer();
+            }
+            continue;
+          }
+          if (s.flipAnim > 0) s.flipAnim = Math.max(0, s.flipAnim - dt * 4);
+          const status = skewerStatus(s);
+          if (status === "perfect") {
+            s.readyPulse += dt * 6;
+          }
+          // Current face keeps cooking. Fire level controls speed and burn risk.
+          s.faces[s.currentFace] += 0.05 * state.fire * s.rateFactor * dt;
+          if (Math.random() < dt * state.fire * 0.6) {
+            spawnSmoke(SLOT_X[i], SKEWER_Y - 20);
+          }
+          if (skewerStatus(s) === "burnt") {
+            state.burnt += 1;
+            state.shake = 1;
+            s.exists = false;
+            s.respawnIn = 0.8;
+            spawnBurst(SLOT_X[i], SKEWER_Y, "#334155", 14);
+            if (state.burnt >= BURN_LIMIT) {
+              failStage("꼬치 3개를 태웠습니다");
+              return;
+            }
+          }
+        }
+      }
+
+      function renderCard(title, lines, accent) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        ctx.fillRect(148, 82, 664, 376);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(148, 82, 664, 376);
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 152);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 23px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 224 + index * 42);
+        });
+        ctx.textAlign = "left";
+      }
+
+      function skewerColor(face) {
+        // raw pink -> golden -> dark char
+        const v = Math.max(0, Math.min(1.15, face));
+        if (v >= 1.02) return "#1c1917";
+        const t = v / 1.02;
+        const r = Math.round(244 - t * 160);
+        const g = Math.round(180 - t * 120);
+        const b = Math.round(150 - t * 90);
+        return `rgb(${r},${g},${b})`;
+      }
+
+      function renderScene() {
+        // background: night grill stall
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#1e1b4b");
+        grad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        if (state.shake > 0) {
+          ctx.save();
+          ctx.translate((Math.random() - 0.5) * 8 * state.shake, (Math.random() - 0.5) * 8 * state.shake);
+        }
+
+        // grill body
+        ctx.fillStyle = "#292524";
+        ctx.fillRect(140, 200, 680, 150);
+        ctx.fillStyle = "#44403c";
+        ctx.fillRect(140, 200, 680, 14);
+        // coals glow with fire
+        const glow = Math.min(1, state.fire / 5);
+        for (let i = 0; i < 24; i += 1) {
+          const cx = 170 + (i % 12) * 52;
+          const cy = 300 + Math.floor(i / 12) * 28;
+          const flicker = 0.7 + 0.3 * Math.sin(state.elapsed * 6 + i);
+          ctx.fillStyle = `rgba(${Math.round(200 + 55 * glow)},${Math.round(60 + 60 * glow * flicker)},30,${0.35 + 0.5 * glow * flicker})`;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // flames
+        for (let i = 0; i < 10; i += 1) {
+          const fx = 180 + i * 66;
+          const fh = (10 + 26 * glow) * (0.7 + 0.3 * Math.sin(state.elapsed * 9 + i * 2));
+          ctx.fillStyle = `rgba(249,115,22,${0.25 + 0.45 * glow})`;
+          ctx.beginPath();
+          ctx.moveTo(fx - 12, 296);
+          ctx.quadraticCurveTo(fx, 296 - fh * 2, fx + 12, 296);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        // skewers
+        for (let i = 0; i < slots.length; i += 1) {
+          const s = slots[i];
+          const x = SLOT_X[i];
+          if (!s.exists) {
+            ctx.fillStyle = "rgba(148,163,184,0.4)";
+            ctx.font = "600 18px Trebuchet MS";
+            ctx.textAlign = "center";
+            ctx.fillText("새 꼬치 준비 중…", x, SKEWER_Y + 6);
+            continue;
+          }
+          const flipScale = 1 - 0.5 * Math.sin(Math.PI * s.flipAnim);
+          const status = skewerStatus(s);
+          ctx.save();
+          ctx.translate(x, SKEWER_Y);
+          ctx.scale(1, flipScale);
+          // stick
+          ctx.strokeStyle = "#a16207";
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(-SKEWER_W / 2 - 26, 0);
+          ctx.lineTo(SKEWER_W / 2 + 26, 0);
+          ctx.stroke();
+          // meat chunks colored by the visible (current) face
+          for (let c = 0; c < 4; c += 1) {
+            ctx.fillStyle = skewerColor(s.faces[s.currentFace]);
+            const cx = -SKEWER_W / 2 + 28 + c * 52;
+            ctx.beginPath();
+            ctx.roundRect(cx - 22, -SKEWER_H / 2, 44, SKEWER_H, 10);
+            ctx.fill();
+            ctx.strokeStyle = "rgba(0,0,0,0.25)";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // "완성!" hint in green zone
+          if (status === "perfect") {
+            const pulse = 0.6 + 0.4 * Math.sin(s.readyPulse);
+            ctx.fillStyle = `rgba(74,222,128,${pulse})`;
+            ctx.font = "800 26px Trebuchet MS";
+            ctx.textAlign = "center";
+            ctx.fillText("완성! 터치해서 담기", x, SKEWER_Y - 56);
+          } else if (status === "over") {
+            ctx.fillStyle = "#f87171";
+            ctx.font = "800 22px Trebuchet MS";
+            ctx.textAlign = "center";
+            ctx.fillText("타기 직전!", x, SKEWER_Y - 52);
+          }
+
+          // doneness gauge (total of both faces, 0..2) with green band
+          const gw = SKEWER_W;
+          const gx = x - gw / 2;
+          ctx.fillStyle = "rgba(15,23,42,0.85)";
+          ctx.fillRect(gx, GAUGE_Y, gw, 16);
+          ctx.fillStyle = "rgba(74,222,128,0.35)";
+          ctx.fillRect(gx + (GREEN_MIN / 2) * gw, GAUGE_Y, ((GREEN_MAX - GREEN_MIN) / 2) * gw, 16);
+          const total = Math.min(2, skewerTotal(s));
+          ctx.fillStyle = status === "perfect" ? "#4ade80" : status === "over" ? "#f87171" : "#fbbf24";
+          ctx.fillRect(gx, GAUGE_Y, (total / 2) * gw, 16);
+          ctx.strokeStyle = "#e2e8f0";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(gx, GAUGE_Y, gw, 16);
+          ctx.fillStyle = "#94a3b8";
+          ctx.font = "600 14px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText(`면 ${s.currentFace === 0 ? "앞" : "뒤"} 굽는 중`, x, GAUGE_Y + 34);
+        }
+
+        // smoke & particles
+        smoke.forEach((s) => {
+          ctx.fillStyle = `rgba(148,163,184,${0.25 * (1 - s.age / s.life)})`;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        particles.forEach((p) => {
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = 1 - p.age / p.life;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        });
+
+        // fire slider
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "700 20px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(`불 세기 ${state.fire.toFixed(1)}`, 150, SLIDER.y + 20);
+        ctx.fillStyle = "rgba(148,163,184,0.4)";
+        ctx.fillRect(SLIDER.x, SLIDER.y, SLIDER.w, SLIDER.h);
+        const t = (state.fire - 1) / 4;
+        const heatGrad = ctx.createLinearGradient(SLIDER.x, 0, SLIDER.x + SLIDER.w, 0);
+        heatGrad.addColorStop(0, "#fbbf24");
+        heatGrad.addColorStop(1, "#dc2626");
+        ctx.fillStyle = heatGrad;
+        ctx.fillRect(SLIDER.x, SLIDER.y, SLIDER.w * t, SLIDER.h);
+        ctx.fillStyle = "#f8fafc";
+        ctx.beginPath();
+        ctx.arc(SLIDER.x + SLIDER.w * t, SLIDER.y + SLIDER.h / 2, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#0f172a";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "600 15px Trebuchet MS";
+        ctx.fillText("드래그로 불 조절 · 약 ←  → 강", SLIDER.x + SLIDER.w / 2, SLIDER.y + 48);
+
+        if (state.shake > 0) ctx.restore();
+
+        // HUD
+        ctx.fillStyle = "rgba(15,23,42,0.8)";
+        ctx.fillRect(0, 0, VIEW.width, 56);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "700 24px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText(`완성 ${state.served}/${SERVE_GOAL}`, 24, 38);
+        ctx.fillStyle = state.burnt > 0 ? "#f87171" : "#f8fafc";
+        ctx.fillText(`탄 꼬치 ${state.burnt}/${BURN_LIMIT}`, 220, 38);
+        ctx.fillStyle = "#f8fafc";
+        ctx.textAlign = "right";
+        ctx.fillText(`${state.elapsed.toFixed(1)}초`, VIEW.width - 24, 38);
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderCard("꼬치 구이", [
+            "꼬치를 터치해 뒤집고, 초록 완벽 구간에서 터치해 담으세요",
+            "조작: 터치로 뒤집기, 슬라이드로 불 조절",
+            "모바일: 꼬치 터치 + 하단 슬라이더 드래그",
+            "클리어 조건: 꼬치 6개를 완벽하게 구우면 클리어",
+            "실패 조건: 3개를 태우면 실패",
+            "터치 또는 Enter로 시작",
+          ], "#f97316");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderScene();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderCard("실패", [
+            "3개를 태우면 실패",
+            `사유: ${state.failReason || "꼬치를 태웠습니다"}`,
+            `완성한 꼬치: ${state.served}개`,
+            "화면을 터치해 다시 도전하세요",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderCard("클리어", [
+          "꼬치 6개를 완벽하게 구웠습니다!",
+          `걸린 시간: ${state.lastRunTime.toFixed(1)}초`,
+          `탄 꼬치: ${state.burnt}개`,
+          "화면을 터치해 다시 플레이할 수 있습니다",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "canvas 960x540, skewer slots at x=250/480/710, y=252; slider y=492",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          served: state.served,
+          serve_goal: SERVE_GOAL,
+          burnt: state.burnt,
+          burn_limit: BURN_LIMIT,
+          fire: Math.round(state.fire * 10) / 10,
+          skewers: slots.map((s) => ({
+            exists: s.exists,
+            faces: s.faces.map((f) => Math.round(f * 100) / 100),
+            total: Math.round(skewerTotal(s) * 100) / 100,
+            current_face: s.currentFace,
+            status: skewerStatus(s),
+          })),
+          result: window.relayStageResult.status,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode !== "running") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if (state.mode !== "running") return;
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          state.fire = Math.max(1, state.fire - 0.2);
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          state.fire = Math.min(5, state.fire + 0.2);
+        } else if (event.key === "1" || event.key === "2" || event.key === "3") {
+          event.preventDefault();
+          tapSkewer(Number(event.key) - 1);
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "grill-master",
+        title: "꼬치 구이",
+        creator: "Anonymous Creator",
+        genre: "Cooking timing",
+        clearCondition: "꼬치 6개를 완벽하게 구우면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", onPointerDown);
+      canvas.addEventListener("pointermove", onPointerMove);
+      canvas.addEventListener("pointerup", onPointerUp);
+      canvas.addEventListener("pointercancel", onPointerUp);
+      canvas.addEventListener("click", () => canvas.focus());
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

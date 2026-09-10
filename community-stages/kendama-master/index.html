@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>켄다마</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        background: #0f172a;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      a,
+      canvas {
+        -webkit-tap-highlight-color: rgba(148, 163, 184, 0.2);
+      }
+
+      .skip-link {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: transform 0.15s ease;
+      }
+
+      .skip-link:focus,
+      .skip-link:focus-visible {
+        width: auto;
+        height: auto;
+        padding: 12px 16px;
+        overflow: visible;
+        clip: auto;
+        clip-path: none;
+        transform: translateY(0);
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #0f172a;
+        touch-action: manipulation;
+      }
+
+      canvas:focus-visible {
+        outline: 4px solid rgba(248, 250, 252, 0.9);
+        outline-offset: -8px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#game">게임 캔버스로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">켄다마. 캔버스를 터치하거나 Enter로 시작하세요. 조작은 터치로 공 올리고 다시 터치로 받기입니다. 첫 터치로 공을 던져 올리고, 공이 내려와 녹색 타이밍 존에 들어올 때 다시 터치해 컵에 받으세요. 존 밖에서 받거나 바닥까지 떨어지면 미스입니다. 7회 연속 받으면 클리어, 공을 3회 놓치면 실패합니다.</p>
+    <canvas id="game" width="960" height="540" aria-label="켄다마" aria-describedby="stage-instructions" tabindex="0"></canvas>
+    <script src="../relay-runtime.js"></script>
+    <!-- Optional: ../sdk/v2/relay-sdk.js for the v2 host contract. Legacy RelayStageHost callbacks remain required. -->
+    <script src="../registry.js"></script>
+    <script>
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const VIEW = { width: canvas.width, height: canvas.height };
+      const FIXED_DT = 1 / 60;
+      const MAX_DT = 1 / 20;
+      const relayContext = window.RelayRuntime?.readContext("kendama-master") || {
+        history: [],
+        clearCount: 0,
+        previousStageId: null,
+      };
+
+      const KEN_X = VIEW.width / 2;
+      const KEN_Y = 430; // 컵 높이
+      const CATCH_Y = 300; // 공 중심이 이 근처에 오면 받을 수 있음
+      const ZONE_HALF = 30;
+      const MISS_Y = KEN_Y - 28; // 컵 높이까지 떨어지면 미스 (휴식 위치 390보다 아래)
+      const BALL_R = 26;
+      const STREAK_TO_CLEAR = 7;
+      const MAX_MISS = 3;
+
+      let animationFrame = 0;
+      let lastTimestamp = 0;
+      let hostFailedReported = false;
+      let hostClearedReported = false;
+
+      const state = {
+        mode: "menu",
+        elapsed: 0,
+        lastRunTime: 0,
+        streak: 0,
+        misses: 0,
+        ballPhase: "ready", // ready | flying | rest
+        ballY: KEN_Y - 40,
+        ballVY: 0,
+        gravity: 950,
+        apex: 0,
+        restTimer: 0,
+        feedback: null,
+        effects: [],
+        brushes: [],
+        failReason: "",
+        note: "공을 던져 올려 컵에 정확히 받으세요",
+      };
+
+      function inRelayHost() {
+        try {
+          return window.parent && window.parent !== window && window.RelayStageHost;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function reportReadyToHost() {
+        if (!inRelayHost()) {
+          return;
+        }
+        window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+      }
+
+      function reportFailedToHost(reason = "failed") {
+        if (!inRelayHost() || hostFailedReported) {
+          return;
+        }
+        hostFailedReported = true;
+        window.RelayStageHost.onStageFailed?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          reason,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function reportClearedToHost() {
+        if (!inRelayHost() || hostClearedReported) {
+          return;
+        }
+        hostClearedReported = true;
+        window.RelayStageHost.onStageCleared?.({
+          stageId: window.relayStageMeta.id,
+          stageTitle: window.relayStageMeta.title,
+          clearCountAfter: relayContext.clearCount + 1,
+          durationSec: Number(state.lastRunTime.toFixed(1)),
+        });
+      }
+
+      function startStage() {
+        state.mode = "running";
+        state.elapsed = 0;
+        state.lastRunTime = 0;
+        state.streak = 0;
+        state.misses = 0;
+        state.ballPhase = "ready";
+        state.ballY = KEN_Y - 40;
+        state.ballVY = 0;
+        state.gravity = 950;
+        state.apex = 0;
+        state.restTimer = 0;
+        state.feedback = null;
+        state.effects = [];
+        state.brushes = [];
+        state.failReason = "";
+        window.relayStageResult.status = "running";
+        hostFailedReported = false;
+        hostClearedReported = false;
+      }
+
+      function failStage(reason = "failed") {
+        state.mode = "failed";
+        state.failReason = reason;
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "failed";
+        reportFailedToHost(reason);
+      }
+
+      function clearStage() {
+        state.mode = "cleared";
+        state.lastRunTime = state.elapsed;
+        window.relayStageResult.status = "cleared";
+        reportClearedToHost();
+      }
+
+      function startFromTouch() {
+        if (state.mode === "menu") {
+          startStage();
+        }
+      }
+
+      function addEffect(text, x, y, color) {
+        state.effects.push({ text, x, y, color, age: 0 });
+      }
+
+      function addBrush() {
+        // 일본풍 붓터치 연출: 랜덤 각도의 붓질 궤적
+        state.brushes.push({
+          x: KEN_X + (Math.random() - 0.5) * 160,
+          y: CATCH_Y - 40 + (Math.random() - 0.5) * 60,
+          angle: -0.5 + Math.random() * 0.35,
+          len: 190 + Math.random() * 90,
+          age: 0,
+        });
+      }
+
+      function throwBall() {
+        if (state.ballPhase !== "ready") {
+          return;
+        }
+        // 성공이 쌓일수록 중력/상승 속도 증가 → 타이밍 난이도 상승
+        state.gravity = 950 + state.streak * 85;
+        state.apex = 170 + Math.random() * 130; // 최고점 높이(받는 위치 기준)
+        state.ballVY = -Math.sqrt(2 * state.gravity * state.apex);
+        state.ballPhase = "flying";
+      }
+
+      function ballInZone() {
+        return state.ballVY > 0 && Math.abs(state.ballY - CATCH_Y) <= ZONE_HALF;
+      }
+
+      function miss(reason) {
+        state.misses += 1;
+        state.streak = 0;
+        state.ballPhase = "ready";
+        state.ballY = KEN_Y - 40;
+        state.ballVY = 0;
+        state.feedback = { kind: "bad", age: 0 };
+        addEffect("미스!", KEN_X, CATCH_Y - 90, "#ef4444");
+        if (state.misses >= MAX_MISS) {
+          failStage(reason);
+        }
+      }
+
+      function tryCatch() {
+        if (state.ballPhase !== "flying") {
+          return;
+        }
+        if (ballInZone()) {
+          state.streak += 1;
+          state.ballPhase = "rest";
+          state.restTimer = 0.55;
+          state.ballY = KEN_Y - 40;
+          state.ballVY = 0;
+          state.feedback = { kind: "good", age: 0 };
+          addEffect("캐치! " + state.streak + "연속", KEN_X, CATCH_Y - 90, "#22c55e");
+          addBrush();
+          if (state.streak >= STREAK_TO_CLEAR) {
+            clearStage();
+          }
+        } else {
+          miss("공을 3회 놓치면 실패");
+        }
+      }
+
+      function handleTap() {
+        if (state.mode !== "running") {
+          return;
+        }
+        if (state.ballPhase === "ready") {
+          throwBall();
+        } else if (state.ballPhase === "flying") {
+          tryCatch();
+        }
+      }
+
+      function update(dt) {
+        state.effects.forEach((fx) => { fx.age += dt; });
+        state.effects = state.effects.filter((fx) => fx.age < 0.9);
+        state.brushes.forEach((b) => { b.age += dt; });
+        state.brushes = state.brushes.filter((b) => b.age < 1.1);
+        if (state.mode !== "running") {
+          return;
+        }
+        state.elapsed += dt;
+
+        if (state.feedback) {
+          state.feedback.age += dt;
+          if (state.feedback.age > 0.4) state.feedback = null;
+        }
+
+        if (state.ballPhase === "flying") {
+          state.ballVY += state.gravity * dt;
+          state.ballY += state.ballVY * dt;
+          if (state.ballVY > 0 && state.ballY > MISS_Y) {
+            miss("공을 3회 놓치면 실패");
+          }
+        } else if (state.ballPhase === "rest") {
+          state.restTimer -= dt;
+          if (state.restTimer <= 0) {
+            state.ballPhase = "ready";
+          }
+        }
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function renderBackground() {
+        const grad = ctx.createLinearGradient(0, 0, 0, VIEW.height);
+        grad.addColorStop(0, "#7f1d1d");
+        grad.addColorStop(0.5, "#991b1b");
+        grad.addColorStop(1, "#450a0a");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+        // 일본풍 원(日の丸 느낌)
+        ctx.fillStyle = "rgba(254, 243, 199, 0.1)";
+        ctx.beginPath();
+        ctx.arc(KEN_X, 260, 210, 0, Math.PI * 2);
+        ctx.fill();
+        // 바닥
+        ctx.fillStyle = "#292524";
+        ctx.fillRect(0, VIEW.height - 42, VIEW.width, 42);
+      }
+
+      function renderZone() {
+        if (state.mode !== "running") {
+          return;
+        }
+        const inZone = state.ballPhase === "flying" && ballInZone();
+        ctx.fillStyle = inZone ? "rgba(34, 197, 94, 0.45)" : "rgba(34, 197, 94, 0.16)";
+        ctx.fillRect(0, CATCH_Y - ZONE_HALF, VIEW.width, ZONE_HALF * 2);
+        ctx.strokeStyle = "rgba(34, 197, 94, 0.6)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([10, 8]);
+        ctx.beginPath();
+        ctx.moveTo(0, CATCH_Y - ZONE_HALF);
+        ctx.lineTo(VIEW.width, CATCH_Y - ZONE_HALF);
+        ctx.moveTo(0, CATCH_Y + ZONE_HALF);
+        ctx.lineTo(VIEW.width, CATCH_Y + ZONE_HALF);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "rgba(220, 252, 231, 0.9)";
+        ctx.font = "700 16px Trebuchet MS";
+        ctx.textAlign = "left";
+        ctx.fillText("캐치 존", 16, CATCH_Y - ZONE_HALF - 8);
+      }
+
+      function renderKen() {
+        ctx.save();
+        ctx.translate(KEN_X, KEN_Y);
+        // 십자 컵 (사리아시)
+        ctx.fillStyle = "#92400e";
+        roundRect(-86, 10, 172, 20, 9);
+        ctx.fill();
+        // 대컵·소컵
+        ctx.beginPath();
+        ctx.moveTo(-86, 10);
+        ctx.quadraticCurveTo(-78, -26, -52, -18);
+        ctx.lineTo(-52, 10);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(86, 10);
+        ctx.quadraticCurveTo(78, -26, 52, -18);
+        ctx.lineTo(52, 10);
+        ctx.closePath();
+        ctx.fill();
+        // 중앙 컵 + 스파이크
+        roundRect(-16, -24, 32, 40, 6);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(-7, -24);
+        ctx.lineTo(0, -52);
+        ctx.lineTo(7, -24);
+        ctx.closePath();
+        ctx.fill();
+        // 손잡이
+        roundRect(-13, 28, 26, 78, 12);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(15,23,42,0.5)";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function renderBall() {
+        const resting = state.ballPhase !== "flying";
+        const y = resting ? KEN_Y - 40 : state.ballY;
+        // 실
+        ctx.strokeStyle = "rgba(254, 243, 199, 0.75)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(KEN_X, KEN_Y - 20);
+        ctx.lineTo(KEN_X + (resting ? 0 : Math.sin(state.elapsed * 3) * 8), y + BALL_R - 4);
+        ctx.stroke();
+        // 공
+        ctx.fillStyle = "#dc2626";
+        ctx.beginPath();
+        ctx.arc(KEN_X, y, BALL_R, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#7f1d1d";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        // 공 무늬(구멍)
+        ctx.fillStyle = "#450a0a";
+        ctx.beginPath();
+        ctx.arc(KEN_X, y - 10, 6, 0, Math.PI * 2);
+        ctx.fill();
+        // 하이라이트
+        ctx.fillStyle = "rgba(255,255,255,0.35)";
+        ctx.beginPath();
+        ctx.arc(KEN_X - 8, y + 6, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function renderBrushes() {
+        for (const b of state.brushes) {
+          const progress = Math.min(1, b.age / 0.35);
+          const alpha = b.age < 0.45 ? 1 : Math.max(0, 1 - (b.age - 0.45) / 0.65);
+          ctx.save();
+          ctx.translate(b.x, b.y);
+          ctx.rotate(b.angle);
+          ctx.globalAlpha = alpha * 0.9;
+          ctx.strokeStyle = "#fef3c7";
+          ctx.lineCap = "round";
+          // 붓질: 시작 가늘게 → 중간 굵게 → 끝 가늘게
+          const segs = 12;
+          for (let i = 0; i < segs * progress; i += 1) {
+            const t0 = i / segs;
+            const w = 16 * Math.sin(Math.PI * Math.min(1, t0 + 0.08));
+            ctx.lineWidth = Math.max(2, w);
+            ctx.beginPath();
+            ctx.moveTo(-b.len / 2 + b.len * t0, Math.sin(t0 * 5) * 8);
+            ctx.lineTo(-b.len / 2 + b.len * (t0 + 1 / segs), Math.sin((t0 + 1 / segs) * 5) * 8);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function renderHud() {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.fillRect(0, 0, VIEW.width, 92);
+        ctx.textAlign = "left";
+        ctx.font = "800 26px Trebuchet MS";
+        ctx.fillStyle = "#4ade80";
+        ctx.fillText("성공 " + state.streak + "/" + STREAK_TO_CLEAR, 24, 38);
+        ctx.fillStyle = "#f87171";
+        ctx.fillText("미스 " + state.misses + "/" + MAX_MISS, 24, 74);
+        // 안내
+        ctx.textAlign = "center";
+        ctx.font = "700 20px Trebuchet MS";
+        ctx.fillStyle = "rgba(248,250,252,0.9)";
+        const hint = state.ballPhase === "ready"
+          ? "터치해서 공을 올리세요"
+          : state.ballPhase === "flying"
+            ? (state.ballVY > 0 ? "내려온다! 존에서 터치!" : "올라가는 중…")
+            : "…";
+        ctx.fillText(hint, VIEW.width / 2, 42);
+        ctx.font = "700 15px Trebuchet MS";
+        ctx.fillStyle = "rgba(248,250,252,0.6)";
+        ctx.fillText("속도 레벨 " + (state.streak + 1), VIEW.width / 2, 70);
+        ctx.textAlign = "left";
+        // 피드백 테두리
+        if (state.feedback) {
+          ctx.strokeStyle = state.feedback.kind === "good" ? "rgba(34,197,94,0.8)" : "rgba(239,68,68,0.8)";
+          ctx.lineWidth = 10;
+          ctx.strokeRect(5, 5, VIEW.width - 10, VIEW.height - 10);
+        }
+      }
+
+      function renderEffects() {
+        for (const fx of state.effects) {
+          const alpha = 1 - fx.age / 0.9;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = fx.color;
+          ctx.font = "800 32px Trebuchet MS";
+          ctx.textAlign = "center";
+          ctx.fillText(fx.text, fx.x, fx.y - fx.age * 40);
+          ctx.restore();
+        }
+        ctx.textAlign = "left";
+      }
+
+      function renderRunning() {
+        renderBackground();
+        renderZone();
+        renderBrushes();
+        renderKen();
+        renderBall();
+        renderEffects();
+        renderHud();
+      }
+
+      function renderCard(title, lines, accent, footer) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+        ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+
+        ctx.fillStyle = "rgba(248, 250, 252, 0.98)";
+        roundRect(190, 70, 580, 400, 18);
+        ctx.fill();
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = accent;
+        ctx.font = "700 40px Trebuchet MS";
+        ctx.textAlign = "center";
+        ctx.fillText(title, VIEW.width / 2, 138);
+
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "600 22px Trebuchet MS";
+        lines.forEach((line, index) => {
+          ctx.fillText(line, VIEW.width / 2, 208 + index * 42);
+        });
+
+        if (footer) {
+          ctx.fillStyle = accent;
+          roundRect(VIEW.width / 2 - 130, 408, 260, 46, 23);
+          ctx.fill();
+          ctx.fillStyle = "#f8fafc";
+          ctx.font = "800 22px Trebuchet MS";
+          ctx.fillText(footer, VIEW.width / 2, 438);
+        }
+        ctx.textAlign = "left";
+      }
+
+      function render() {
+        if (state.mode === "menu") {
+          renderBackground();
+          renderCard("켄다마", [
+            "공을 던져 올려 컵에 정확히 받으세요",
+            "조작: 터치로 공 올리고 다시 터치로 받기",
+            "클리어 조건: 7회 연속 받으면 클리어",
+            "실패 조건: 공을 3회 놓치면 실패",
+            "성공할수록 공이 빨라져 타이밍이 어려워집니다",
+          ], "#dc2626", "터치 또는 Enter로 시작");
+          return;
+        }
+
+        if (state.mode === "running") {
+          renderRunning();
+          return;
+        }
+
+        if (state.mode === "failed") {
+          renderRunning();
+          renderCard("실패", [
+            "실패 원인: " + state.failReason,
+            "공을 3회 놓치면 실패",
+            "공유 목숨 1개가 즉시 종료되었습니다.",
+          ], "#b91c1c");
+          return;
+        }
+
+        renderBackground();
+        renderBrushes();
+        renderKen();
+        renderBall();
+        renderCard("클리어!", [
+          "7회 연속 캐치에 성공했습니다",
+          "걸린 시간: " + state.lastRunTime.toFixed(1) + "초",
+          "호스트가 다음 미플레이 스테이지를 선택합니다.",
+        ], "#15803d");
+      }
+
+      function renderGameToText() {
+        return JSON.stringify({
+          coordinate_system: "960x540 canvas, x right, y down",
+          mode: state.mode,
+          elapsed: Math.round(state.elapsed * 10) / 10,
+          result: window.relayStageResult.status,
+          streak: state.streak,
+          streak_to_clear: STREAK_TO_CLEAR,
+          misses: state.misses,
+          max_misses: MAX_MISS,
+          ball: {
+            phase: state.ballPhase,
+            y: Math.round(state.ballY),
+            vy: Math.round(state.ballVY),
+            gravity: Math.round(state.gravity),
+            in_zone: state.ballPhase === "flying" && ballInZone(),
+          },
+          catch_zone: { y: CATCH_Y, half_height: ZONE_HALF },
+          fail_reason: state.failReason || undefined,
+          note: state.note,
+          relay_context: {
+            previous_stage_id: relayContext.previousStageId,
+            clear_count_before_this_stage: relayContext.clearCount,
+            visited_stage_ids: relayContext.history,
+          },
+        });
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Enter" && state.mode === "menu") {
+          event.preventDefault();
+          startStage();
+          return;
+        }
+        if ((event.key === " " || event.key === "Enter") && state.mode === "running") {
+          event.preventDefault();
+          handleTap();
+        }
+      }
+
+      function frame(timestamp) {
+        const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+        lastTimestamp = timestamp;
+        update(dt);
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      }
+
+      window.render_game_to_text = renderGameToText;
+      window.advanceTime = (ms = 16.67) => {
+        const steps = Math.max(1, Math.round(ms / (FIXED_DT * 1000)));
+        for (let index = 0; index < steps; index += 1) {
+          update(FIXED_DT);
+        }
+        render();
+        return renderGameToText();
+      };
+      window.relayStageMeta = {
+        id: "kendama-master",
+        title: "켄다마",
+        creator: "Anonymous Creator",
+        genre: "Catch timing",
+        clearCondition: "7회 연속 받으면 클리어",
+      };
+      window.relayStageResult = { status: "running" };
+      window.relayStageDebug = {
+        forceClear() {
+          startStage();
+          clearStage();
+          render();
+        },
+        forceFail() {
+          startStage();
+          failStage("debug_force_fail");
+          render();
+        },
+      };
+
+      canvas.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        canvas.focus();
+        if (state.mode !== "running") {
+          startFromTouch();
+          return;
+        }
+        handleTap();
+      }, { passive: false });
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+      reportReadyToHost();
+      render();
+      canvas.focus();
+      animationFrame = requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
