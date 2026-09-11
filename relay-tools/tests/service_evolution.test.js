@@ -22,6 +22,26 @@ const { reviewPool, summarize } = require("../scripts/review_pool.js");
 
 const repoRoot = path.resolve(__dirname, "../..");
 
+function loadV2QualityPackIds(root) {
+  const files = [
+    "v2-fifty-catalog.json",
+    "v2-twenty-catalog.json",
+    "v2-twenty-b-catalog.json",
+    "v2-twenty-c-catalog.json",
+  ];
+  const ids = [];
+  for (const file of files) {
+    const pack = JSON.parse(
+      fs.readFileSync(path.join(root, "community-stages", file), "utf8"),
+    );
+    ids.push(
+      ...(pack.existing || []),
+      ...pack.stages.map((stage) => stage.slug),
+    );
+  }
+  return [...new Set(ids)];
+}
+
 test("API client times out writes and does not retry them", async () => {
   let calls = 0;
   const fetchImpl = () => {
@@ -182,16 +202,7 @@ test("catalog generations split v1 legacy from v2 and gallery can filter by gene
   for (const id of priorV2) {
     assert.ok(v2Ids.has(id), `prior v2 stage missing: ${id}`);
   }
-  const qualityPack = JSON.parse(
-    fs.readFileSync(
-      path.join(repoRoot, "community-stages", "v2-fifty-catalog.json"),
-      "utf8",
-    ),
-  );
-  const qualityIds = [
-    ...qualityPack.existing,
-    ...qualityPack.stages.map((stage) => stage.slug),
-  ];
+  const qualityIds = loadV2QualityPackIds(repoRoot);
   for (const id of qualityIds) {
     assert.ok(v2Ids.has(id), `v2 quality pack stage missing: ${id}`);
   }
@@ -201,7 +212,7 @@ test("catalog generations split v1 legacy from v2 and gallery can filter by gene
       .map((entry) => entry.id),
   );
   assert.ok(v1Ids.has("slither-worm"), "legacy stages stay v1");
-  assert.equal(qualityIds.length, 50);
+  assert.equal(qualityIds.length, 110);
   const entries = [
     { id: "legacy", title: "Legacy", generation: "v1" },
     { id: "fresh", title: "Fresh", generation: "v2" },
@@ -216,6 +227,37 @@ test("catalog generations split v1 legacy from v2 and gallery can filter by gene
   );
   assert.equal(GalleryFilter.writeSearchParams({ gen: "v1" }), "?gen=v1");
   assert.equal(GalleryFilter.readSearchParams("?gen=v1").gen, "v1");
+});
+
+test("v2 quality pack stages are official eligible and switch the daily pool to v2-only", () => {
+  const reviews = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "content", "reviews.json"), "utf8"),
+  );
+  const qualityIds = loadV2QualityPackIds(repoRoot);
+  assert.equal(qualityIds.length, 110);
+  for (const id of qualityIds) {
+    const review = reviews.stages[id];
+    assert.ok(review, `missing review for ${id}`);
+    assert.equal(review.officialEligible, true);
+    assert.equal(review.status, "preliminary-eligible");
+    assert.equal(review.kind, "v2-quality-pack");
+  }
+  const catalog = buildCatalog(repoRoot);
+  const rules = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "content", "daily-rules.json"), "utf8"),
+  );
+  const pool = DailyV2.eligiblePool(catalog.entries, rules);
+  assert.ok(pool.length >= 110);
+  assert.ok(
+    pool.every((entry) => entry.generation === "v2"),
+    "official v2 pool must replace mixed daily once quality pack is approved",
+  );
+  const poolIds = new Set(pool.map((entry) => entry.id));
+  for (const id of qualityIds) {
+    assert.ok(poolIds.has(id), `quality pack stage not in official pool: ${id}`);
+  }
+  assert.equal(poolIds.has("slither-worm"), false);
+  assert.equal(poolIds.has("echo-twins"), false);
 });
 
 test("daily pool switches to v2-only once the v2 pool reaches the threshold", () => {
