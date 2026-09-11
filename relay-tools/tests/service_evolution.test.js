@@ -165,22 +165,43 @@ test("catalog generations split v1 legacy from v2 and gallery can filter by gene
   assert.equal(generationFor("not-a-date"), "v2");
   const catalog = buildCatalog(repoRoot);
   assert.ok(catalog.entries.length > 0);
-  const v2Entries = catalog.entries.filter(
-    (entry) => entry.generation === "v2",
+  const v2Ids = new Set(
+    catalog.entries
+      .filter((entry) => entry.generation === "v2")
+      .map((entry) => entry.id),
   );
-  assert.deepEqual(
-    v2Entries.map((entry) => entry.id).sort(),
-    [
-      "moonlight-greenhouse",
-      "neon-rail",
-      "orbit-ringer",
-      "tailwind-guide",
-      "tempo-conductor",
-      "tilt-marble",
-      "vacuum-tube-post",
-    ],
-    "v2는 신규 3D 스테이지와 신규 퍼즐·리듬·물리 스테이지뿐",
+  const priorV2 = [
+    "moonlight-greenhouse",
+    "neon-rail",
+    "orbit-ringer",
+    "tailwind-guide",
+    "tempo-conductor",
+    "tilt-marble",
+    "vacuum-tube-post",
+  ];
+  for (const id of priorV2) {
+    assert.ok(v2Ids.has(id), `prior v2 stage missing: ${id}`);
+  }
+  const qualityPack = JSON.parse(
+    fs.readFileSync(
+      path.join(repoRoot, "community-stages", "v2-fifty-catalog.json"),
+      "utf8",
+    ),
   );
+  const qualityIds = [
+    ...qualityPack.existing,
+    ...qualityPack.stages.map((stage) => stage.slug),
+  ];
+  for (const id of qualityIds) {
+    assert.ok(v2Ids.has(id), `v2 quality pack stage missing: ${id}`);
+  }
+  const v1Ids = new Set(
+    catalog.entries
+      .filter((entry) => entry.generation === "v1")
+      .map((entry) => entry.id),
+  );
+  assert.ok(v1Ids.has("slither-worm"), "legacy stages stay v1");
+  assert.equal(qualityIds.length, 50);
   const entries = [
     { id: "legacy", title: "Legacy", generation: "v1" },
     { id: "fresh", title: "Fresh", generation: "v2" },

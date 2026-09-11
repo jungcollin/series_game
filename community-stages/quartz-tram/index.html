@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>석영 광차</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #120c18; --accent: #7ee0ff; --accent-ink: #120c18; --danger: #ff6b7a; --ink: #e8f6ff; --muted: rgba(232,246,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">석영 광차. 분기 선로를 바꿔 석영 금고까지 광차를 이끄세요. 탭 또는 스페이스로 선로 전환. 석영 금고에 도착하면 클리어. 절벽 선로로 빠지거나 충돌하면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 탭해 선로를 바꿉니다.</p>
+    <main class="stage" aria-label="석영 광차 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="석영 광차" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">분기</p>
+          <p class="hud-value" id="hud-objective">좌</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">속도 7.2</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Quartz Tram</p>
+          <h1>석영 광차</h1>
+          <p class="brief-lead">분기 선로를 바꿔 석영 금고까지 광차를 이끄세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭 또는 스페이스로 선로 전환</span></li>
+            <li><strong>클리어</strong><span>석영 금고에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>절벽 선로로 빠지거나 충돌하면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">선로 이탈</p>
+          <h2>광차가 멈췄다</h2>
+          <p class="brief-lead" id="fail-detail">절벽 선로로 빠지거나 충돌하면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">금고 도착</p>
+          <h2>석영 인도</h2>
+          <p class="brief-lead">분기 선로를 모두 맞춰 금고에 들어섰습니다.</p>
+          <p class="hud-sub" id="clear-stat">석영 금고에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const LANE = 1.65;
+        const VAULT_Z = -214;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "quartz-tram",
+          title: "석영 광차",
+          description: "분기 선로를 바꿔 석영 금고까지 광차를 이끄세요.",
+          creator: "collin",
+          genre: "3D minecart switch",
+          clearCondition: "석영 금고에 도착하면 클리어",
+          failCondition: "절벽 선로로 빠지거나 충돌하면 실패",
+          controls: "탭 또는 스페이스로 선로 전환",
+        };
+        const COLORS = {
+          bg: "#120c18",
+          ink: "#e8f6ff",
+          cyan: "#7ee0ff",
+          quartz: "#d8b8ff",
+          rail: "#8aa0b8",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          void: "절벽 선로로 광차가 떨어졌습니다",
+          crash: "막힌 터널 벽에 충돌했습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const JUNCTIONS = [
+          { z: -48, correct: -1, fail: "void" },
+          { z: -84, correct: 1, fail: "crash" },
+          { z: -120, correct: 1, fail: "void" },
+          { z: -156, correct: -1, fail: "crash" },
+          { z: -192, correct: 1, fail: "void" },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          switchSide: -1,
+          lane: 0,
+          cartY: 0.42,
+          fall: 0,
+          speed: 7.15,
+          distance: 0,
+          junctions: [],
+          vaultZ: VAULT_Z,
+          vaultReached: false,
+          crystals: [],
+          sparks: [],
+          lanterns: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          passed: 0,
+        };
+        const input = { pointerId: null, downX: 0, downY: 0 };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            speed: 7.05 + difficulty * 1.55,
+          };
+        }
+
+        function sideLabel(side) {
+          return side < 0 ? "좌" : "우";
+        }
+
+        function nextJunction() {
+          return state.junctions.find((row) => !row.resolved) || null;
+        }
+
+        function spawnCourse() {
+          state.junctions = JUNCTIONS.map((row, index) => ({
+            id: index,
+            z: row.z,
+            correct: row.correct,
+            fail: row.fail,
+            resolved: false,
+            highlight: 0,
+          }));
+          state.crystals = [];
+          for (let index = 0; index < 14; index += 1) {
+            state.crystals.push({
+              side: index % 2 === 0 ? -1 : 1,
+              x: (index % 2 === 0 ? -1 : 1) * randRange(3.6, 5.8),
+              y: randRange(0.6, 3.4),
+              z: -12 - index * 16,
+              s: randRange(0.35, 0.85),
+              spin: randRange(0, Math.PI * 2),
+            });
+          }
+          state.lanterns = [];
+          for (let index = 0; index < 8; index += 1) {
+            state.lanterns.push({
+              side: index % 2 === 0 ? -1 : 1,
+              z: -18 - index * 26,
+            });
+          }
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.sparks.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(1.4, 4.8),
+              vy: randRange(1.5, 5.5),
+              vz: Math.sin(angle) * randRange(1.2, 3.6),
+              life: randRange(0.3, 0.7),
+              kind,
+              size: randRange(0.05, 0.12),
+            });
+          }
+          if (state.sparks.length > 60) state.sparks.splice(0, state.sparks.length - 60);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "switch") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(210, now + 0.07);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+              osc.start(now); osc.stop(now + 0.1);
+            } else if (kind === "pass") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(540, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.12);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+              osc.start(now); osc.stop(now + 0.16);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(1320, now + 0.24);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(160, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.28);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.switchSide = -1;
+          state.lane = 0;
+          state.cartY = 0.42;
+          state.fall = 0;
+          state.speed = 7.15;
+          state.distance = 0;
+          state.vaultZ = VAULT_Z;
+          state.vaultReached = false;
+          state.sparks = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "스위치 좌";
+          state.messageTime = 0.8;
+          state.failReason = "";
+          state.passed = 0;
+          reseed((Date.now() ^ 0xa5a5a5a5) >>> 0);
+          spawnCourse();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.68;
+          if (reason === "void") state.fall = 1;
+          playSfx("boom");
+          burst(state.lane, state.cartY, 0.2, 18, reason === "crash" ? "spark" : "void");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function toggleSwitch() {
+          if (state.mode !== "running") return;
+          const upcoming = nextJunction();
+          if (upcoming && upcoming.z > -3.2) return;
+          state.switchSide *= -1;
+          state.message = `스위치 ${sideLabel(state.switchSide)}`;
+          state.messageTime = 0.7;
+          playSfx("switch");
+        }
+
+        function updateJunctions(dt) {
+          state.junctions.forEach((row) => {
+            row.z += state.speed * dt;
+            if (row.resolved) return;
+            if (row.z > -18 && row.z < 2) row.highlight = 1;
+            if (row.z > -0.35 && row.z < 0.85) {
+              row.resolved = true;
+              if (state.switchSide === row.correct) {
+                state.passed += 1;
+                state.lane = row.correct * LANE;
+                state.flash = 0.4;
+                state.message = `분기 ${state.passed}/5`;
+                state.messageTime = 0.75;
+                burst(state.lane, 0.9, 0.2, 12, "cyan");
+                playSfx("pass");
+              } else {
+                failStage(row.fail);
+              }
+            }
+          });
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.fall > 0) {
+            state.fall += dt;
+            state.cartY -= dt * 7.5;
+          }
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          state.speed = params.speed;
+          state.distance += state.speed * dt;
+          const targetLane = nextJunction() && nextJunction().z > -22
+            ? state.switchSide * LANE * 0.35
+            : state.lane * 0.15;
+          if (!nextJunction() || nextJunction().z < -8) {
+            state.lane += (0 - state.lane) * Math.min(1, dt * 2.4);
+          } else if (nextJunction().z > -8) {
+            state.lane += (state.switchSide * LANE - state.lane) * Math.min(1, dt * 3.2);
+          } else {
+            state.lane += (targetLane - state.lane) * dt;
+          }
+          state.cartY = 0.42 + Math.sin(state.elapsed * 18) * 0.015;
+          updateJunctions(dt);
+          if (state.mode !== "running") return;
+          state.vaultZ += state.speed * dt;
+          if (!state.vaultReached && state.vaultZ > -1.2 && state.passed >= JUNCTIONS.length) {
+            state.vaultReached = true;
+            burst(0, 1.4, -2, 28, "quartz");
+            clearStage();
+            return;
+          }
+          state.crystals.forEach((crystal) => {
+            crystal.z += state.speed * dt;
+            crystal.spin += dt * 1.4;
+            if (crystal.z > 16) crystal.z -= 230;
+          });
+          state.lanterns.forEach((lantern) => {
+            lantern.z += state.speed * dt;
+            if (lantern.z > 14) lantern.z -= 208;
+          });
+          state.sparks.forEach((spark) => {
+            spark.x += spark.vx * dt;
+            spark.y += spark.vy * dt;
+            spark.z += spark.vz * dt + state.speed * dt * 0.3;
+            spark.vy -= 6 * dt;
+            spark.life -= dt;
+          });
+          state.sparks = state.sparks.filter((spark) => spark.life > 0);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `분기 ${state.passed} / 5 · 속도 ${state.speed.toFixed(1)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 분기 ${state.passed}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x120c18, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x120c18);
+          scene.fog = new THREE.Fog(0x160e1e, 10, 72);
+
+          const camera = new THREE.PerspectiveCamera(58, VIEW_W / VIEW_H, 0.1, 150);
+          camera.position.set(0, 3.4, 8.2);
+
+          scene.add(new THREE.AmbientLight(0x4a3a70, 0.45));
+          const hemi = new THREE.HemisphereLight(0xaad8ff, 0x1a1020, 0.4);
+          scene.add(hemi);
+          const key = new THREE.DirectionalLight(0xc8e8ff, 0.55);
+          key.position.set(6, 12, 4);
+          scene.add(key);
+          const quartzLight = new THREE.PointLight(0x7ee0ff, 1.2, 28);
+          quartzLight.position.set(0, 2.4, -8);
+          scene.add(quartzLight);
+          const cartLight = new THREE.PointLight(0xffc46b, 0.7, 10);
+          cartLight.position.set(0, 1.2, 1);
+          scene.add(cartLight);
+
+          const moteCount = reducedMotion ? 140 : 380;
+          const motePos = new Float32Array(moteCount * 3);
+          for (let index = 0; index < moteCount; index += 1) {
+            motePos[index * 3] = (Math.random() - 0.5) * 16;
+            motePos[index * 3 + 1] = Math.random() * 7;
+            motePos[index * 3 + 2] = -Math.random() * 80;
+          }
+          const moteGeo = new THREE.BufferGeometry();
+          moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+          const motes = new THREE.Points(moteGeo, new THREE.PointsMaterial({
+            color: 0x7ee0ff, size: 0.1, transparent: true, opacity: 0.65, sizeAttenuation: true,
+          }));
+          scene.add(motes);
+
+          const floorMat = new THREE.MeshStandardMaterial({
+            color: 0x1a1424, roughness: 0.9, metalness: 0.08,
+          });
+          const floor = new THREE.Mesh(new THREE.PlaneGeometry(18, 90), floorMat);
+          floor.rotation.x = -Math.PI / 2;
+          floor.position.y = -0.15;
+          floor.position.z = -20;
+          scene.add(floor);
+
+          const wallMat = new THREE.MeshStandardMaterial({
+            color: 0x241830, roughness: 0.86, metalness: 0.1, emissive: 0x120818, emissiveIntensity: 0.3,
+          });
+          const leftWall = new THREE.Mesh(new THREE.BoxGeometry(2.4, 8, 90), wallMat);
+          leftWall.position.set(-7.2, 3.2, -18);
+          scene.add(leftWall);
+          const rightWall = new THREE.Mesh(new THREE.BoxGeometry(2.4, 8, 90), wallMat);
+          rightWall.position.set(7.2, 3.2, -18);
+          scene.add(rightWall);
+
+          const railMat = new THREE.MeshStandardMaterial({
+            color: 0x8aa0b8, roughness: 0.35, metalness: 0.72, emissive: 0x203040, emissiveIntensity: 0.2,
+          });
+          const tieMat = new THREE.MeshStandardMaterial({ color: 0x3a2418, roughness: 0.9, metalness: 0.05 });
+          const railGeo = new THREE.BoxGeometry(0.08, 0.07, 70);
+          const railLeft = new THREE.Mesh(railGeo, railMat);
+          const railRight = new THREE.Mesh(railGeo, railMat);
+          railLeft.position.set(-0.38, 0.05, -22);
+          railRight.position.set(0.38, 0.05, -22);
+          scene.add(railLeft, railRight);
+          const forkGeo = new THREE.BoxGeometry(0.08, 0.07, 18);
+          const forkLL = new THREE.Mesh(forkGeo, railMat);
+          const forkLR = new THREE.Mesh(forkGeo, railMat);
+          const forkRL = new THREE.Mesh(forkGeo, railMat);
+          const forkRR = new THREE.Mesh(forkGeo, railMat);
+          scene.add(forkLL, forkLR, forkRL, forkRR);
+          const glowMat = new THREE.MeshBasicMaterial({
+            color: 0x7ee0ff, transparent: true, opacity: 0.55, depthWrite: false,
+          });
+          const switchGlow = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 10), glowMat);
+          switchGlow.position.y = 0.08;
+          scene.add(switchGlow);
+          const ties = [];
+          const tieGeo = new THREE.BoxGeometry(1.35, 0.08, 0.22);
+          for (let index = 0; index < 18; index += 1) {
+            const tie = new THREE.Mesh(tieGeo, tieMat);
+            scene.add(tie);
+            ties.push(tie);
+          }
+
+          const ironMat = new THREE.MeshStandardMaterial({
+            color: 0x4a5560, roughness: 0.4, metalness: 0.7, emissive: 0x101418, emissiveIntensity: 0.2,
+          });
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x5a3820, roughness: 0.75, metalness: 0.08 });
+          const cart = new THREE.Group();
+          const tub = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.42, 1.45), ironMat);
+          tub.position.y = 0.38;
+          cart.add(tub);
+          const lip = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.08, 1.55), woodMat);
+          lip.position.y = 0.6;
+          cart.add(lip);
+          const wheelGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.1, 10);
+          [[-0.42, 0.16, 0.42], [0.42, 0.16, 0.42], [-0.42, 0.16, -0.42], [0.42, 0.16, -0.42]].forEach((pos) => {
+            const wheel = new THREE.Mesh(wheelGeo, ironMat);
+            wheel.rotation.z = Math.PI / 2;
+            wheel.position.set(pos[0], pos[1], pos[2]);
+            cart.add(wheel);
+          });
+          const lamp = new THREE.Mesh(
+            new THREE.SphereGeometry(0.1, 8, 8),
+            new THREE.MeshStandardMaterial({ color: 0xffc46b, emissive: 0xff9a3a, emissiveIntensity: 0.9, roughness: 0.3 })
+          );
+          lamp.position.set(0, 0.72, 0.62);
+          cart.add(lamp);
+          const ore = new THREE.Mesh(
+            new THREE.OctahedronGeometry(0.22, 0),
+            new THREE.MeshStandardMaterial({ color: 0x7ee0ff, roughness: 0.25, metalness: 0.45, emissive: 0x3ad0ff, emissiveIntensity: 0.7 })
+          );
+          ore.position.set(0.1, 0.78, -0.1);
+          cart.add(ore);
+          scene.add(cart);
+
+          const crystalGeo = new THREE.ConeGeometry(0.28, 1.15, 5);
+          const crystalMat = new THREE.MeshStandardMaterial({
+            color: 0xb8e8ff, roughness: 0.22, metalness: 0.45, emissive: 0x4ad8ff, emissiveIntensity: 0.55,
+          });
+          const crystalAlt = new THREE.MeshStandardMaterial({
+            color: 0xd8b8ff, roughness: 0.22, metalness: 0.4, emissive: 0x9050ff, emissiveIntensity: 0.5,
+          });
+          const crystalMeshes = [];
+          for (let index = 0; index < 14; index += 1) {
+            const mesh = new THREE.Mesh(crystalGeo, index % 2 ? crystalAlt : crystalMat);
+            scene.add(mesh);
+            crystalMeshes.push(mesh);
+          }
+
+          const lanternGeo = new THREE.SphereGeometry(0.16, 8, 8);
+          const lanternMat = new THREE.MeshBasicMaterial({ color: 0xffc46b, transparent: true, opacity: 0.85 });
+          const lanternMeshes = [];
+          for (let index = 0; index < 8; index += 1) {
+            const mesh = new THREE.Mesh(lanternGeo, lanternMat);
+            scene.add(mesh);
+            lanternMeshes.push(mesh);
+          }
+
+          const vault = new THREE.Group();
+          const vaultMat = new THREE.MeshStandardMaterial({
+            color: 0x7ee0ff, roughness: 0.28, metalness: 0.55, emissive: 0x3ad8ff, emissiveIntensity: 0.8,
+          });
+          const arch = new THREE.Mesh(new THREE.TorusGeometry(2.1, 0.18, 8, 20, Math.PI), vaultMat);
+          arch.rotation.z = Math.PI;
+          arch.position.y = 2.1;
+          vault.add(arch);
+          const door = new THREE.Mesh(
+            new THREE.PlaneGeometry(3.2, 3.4),
+            new THREE.MeshBasicMaterial({ color: 0x7ee0ff, transparent: true, opacity: 0.22, side: THREE.DoubleSide })
+          );
+          door.position.y = 1.7;
+          vault.add(door);
+          const plinth = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.6, 0.3, 10), vaultMat);
+          plinth.position.y = 0.15;
+          vault.add(plinth);
+          scene.add(vault);
+
+          const voidMat = new THREE.MeshBasicMaterial({ color: 0x050308, transparent: true, opacity: 0.85 });
+          const voidLeft = new THREE.Mesh(new THREE.PlaneGeometry(5, 8), voidMat);
+          voidLeft.rotation.x = -Math.PI / 2;
+          const voidRight = new THREE.Mesh(new THREE.PlaneGeometry(5, 8), voidMat);
+          voidRight.rotation.x = -Math.PI / 2;
+          scene.add(voidLeft, voidRight);
+
+          const crashMat = new THREE.MeshStandardMaterial({ color: 0x3a2030, roughness: 0.8, metalness: 0.1 });
+          const crashWall = new THREE.Mesh(new THREE.BoxGeometry(3.4, 3.6, 0.5), crashMat);
+          scene.add(crashWall);
+
+          const sparkGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const sparkMat = new THREE.MeshBasicMaterial({ color: 0x7ee0ff, transparent: true, opacity: 1, depthWrite: false });
+
+          return {
+            renderer, scene, camera, motes, cart, cartLight, quartzLight, ore, lamp,
+            railLeft, railRight, forkLL, forkLR, forkRL, forkRR, switchGlow, ties,
+            crystalMeshes, lanternMeshes, vault, voidLeft, voidRight, crashWall,
+            sparkGeo, sparkMat, sparkMeshes: [],
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.elapsed;
+          webgl.cart.position.set(state.lane, state.cartY, 0.1);
+          webgl.cart.rotation.z = -state.lane * 0.04;
+          webgl.cart.rotation.x = state.fall > 0 ? -state.fall * 0.5 : Math.sin(t * 18) * 0.01;
+          webgl.ore.rotation.y = t * 1.6;
+          webgl.lamp.material.emissiveIntensity = reducedMotion ? 0.8 : 0.7 + Math.sin(t * 8) * 0.2;
+          webgl.cartLight.position.set(state.lane, 1.2, 1);
+          webgl.quartzLight.position.set(0, 2.2, -6 + Math.sin(t) * 2);
+
+          const upcoming = nextJunction();
+          const forkZ = upcoming ? upcoming.z - 6 : -80;
+          const forkX = 0.38;
+          webgl.railLeft.position.set(-forkX + state.lane * 0.05, 0.05, -22);
+          webgl.railRight.position.set(forkX + state.lane * 0.05, 0.05, -22);
+          webgl.forkLL.position.set(-forkX - 0.55, 0.05, forkZ);
+          webgl.forkLL.rotation.y = 0.22;
+          webgl.forkLR.position.set(-forkX + 0.15, 0.05, forkZ);
+          webgl.forkLR.rotation.y = 0.22;
+          webgl.forkRL.position.set(forkX - 0.15, 0.05, forkZ);
+          webgl.forkRL.rotation.y = -0.22;
+          webgl.forkRR.position.set(forkX + 0.55, 0.05, forkZ);
+          webgl.forkRR.rotation.y = -0.22;
+          const glowOn = Boolean(upcoming);
+          webgl.switchGlow.visible = glowOn;
+          if (glowOn) {
+            webgl.switchGlow.position.set(state.switchSide * 1.05, 0.1, upcoming.z - 5);
+            webgl.switchGlow.material.color.setHex(state.switchSide === upcoming.correct ? 0x7ee0ff : 0xffc46b);
+            webgl.switchGlow.material.opacity = 0.35 + Math.abs(Math.sin(t * 6)) * 0.4;
+          }
+          webgl.ties.forEach((tie, index) => {
+            const z = ((-index * 4 + state.distance * 1) % 72) - 36;
+            tie.position.set(state.lane * 0.08, 0.0, z);
+          });
+
+          state.crystals.forEach((crystal, index) => {
+            const mesh = webgl.crystalMeshes[index];
+            if (!mesh) return;
+            mesh.position.set(crystal.x, crystal.y, crystal.z);
+            mesh.scale.setScalar(crystal.s);
+            mesh.rotation.y = crystal.spin;
+            mesh.visible = crystal.z < 12 && crystal.z > -70;
+          });
+          state.lanterns.forEach((lantern, index) => {
+            const mesh = webgl.lanternMeshes[index];
+            if (!mesh) return;
+            mesh.position.set(lantern.side * 4.6, 2.4, lantern.z);
+            mesh.visible = lantern.z < 12 && lantern.z > -60;
+          });
+
+          webgl.vault.position.set(0, 0, state.vaultZ);
+          webgl.vault.visible = state.vaultZ > -55 && state.vaultZ < 10;
+
+          if (upcoming && upcoming.fail === "void") {
+            const side = -upcoming.correct;
+            webgl.voidLeft.visible = side < 0;
+            webgl.voidRight.visible = side > 0;
+            webgl.voidLeft.position.set(-3.6, -0.4, upcoming.z - 4);
+            webgl.voidRight.position.set(3.6, -0.4, upcoming.z - 4);
+            webgl.crashWall.visible = false;
+          } else if (upcoming && upcoming.fail === "crash") {
+            webgl.voidLeft.visible = false;
+            webgl.voidRight.visible = false;
+            webgl.crashWall.visible = true;
+            webgl.crashWall.position.set(-upcoming.correct * 2.4, 1.6, upcoming.z - 2.5);
+          } else {
+            webgl.voidLeft.visible = false;
+            webgl.voidRight.visible = false;
+            webgl.crashWall.visible = false;
+          }
+
+          while (webgl.sparkMeshes.length < state.sparks.length) {
+            const mesh = new THREE.Mesh(webgl.sparkGeo, webgl.sparkMat.clone());
+            webgl.scene.add(mesh);
+            webgl.sparkMeshes.push(mesh);
+          }
+          webgl.sparkMeshes.forEach((mesh, index) => {
+            const spark = state.sparks[index];
+            if (!spark) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(spark.x, spark.y, spark.z);
+            mesh.material.color.setHex(spark.kind === "quartz" ? 0xd8b8ff : spark.kind === "void" ? 0x9080b0 : 0x7ee0ff);
+            mesh.material.opacity = clamp(spark.life * 1.7, 0, 1);
+          });
+
+          const pos = webgl.motes.geometry.attributes.position;
+          for (let index = 0; index < pos.count; index += 1) {
+            let z = pos.getZ(index) + state.speed * FIXED_DT * 0.6;
+            if (z > 8) z -= 88;
+            pos.setZ(index, z);
+          }
+          pos.needsUpdate = true;
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.45 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          webgl.camera.position.set(state.lane * 0.35 + shakeX, 3.35 + shakeY, 8.15);
+          webgl.camera.lookAt(state.lane * 0.55, 0.8, -16);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project(x, y, z) {
+          const depth = Math.max(0.2, Math.min(1.35, 10 / (10 + Math.max(0, -z) * 0.08)));
+          return {
+            x: VIEW_W / 2 + x * 70 * (0.5 + 0.5 * depth),
+            y: VIEW_H * 0.7 - y * 48 * depth - z * 1.8,
+            depth,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#1c1228");
+          sky.addColorStop(1, "#09060e");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#1a1424";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#241830";
+          ctx.fillRect(0, 0, VIEW_W * 0.16, VIEW_H);
+          ctx.fillRect(VIEW_W * 0.84, 0, VIEW_W * 0.16, VIEW_H);
+
+          const upcoming = nextJunction();
+          ctx.strokeStyle = "rgba(138,160,184,0.8)";
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          const a = project(-0.38, 0.05, 4);
+          const b = project(-0.38, 0.05, -40);
+          const c = project(0.38, 0.05, 4);
+          const d = project(0.38, 0.05, -40);
+          ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+          ctx.moveTo(c.x, c.y); ctx.lineTo(d.x, d.y);
+          ctx.stroke();
+          if (upcoming) {
+            const left = project(-LANE, 0.05, upcoming.z);
+            const right = project(LANE, 0.05, upcoming.z);
+            const mid = project(0, 0.05, upcoming.z + 8);
+            ctx.strokeStyle = state.switchSide < 0 ? COLORS.cyan : "rgba(255,196,107,0.7)";
+            ctx.beginPath();
+            ctx.moveTo(mid.x - 20, mid.y);
+            ctx.lineTo(left.x, left.y);
+            ctx.stroke();
+            ctx.strokeStyle = state.switchSide > 0 ? COLORS.cyan : "rgba(255,196,107,0.7)";
+            ctx.beginPath();
+            ctx.moveTo(mid.x + 20, mid.y);
+            ctx.lineTo(right.x, right.y);
+            ctx.stroke();
+            ctx.fillStyle = COLORS.cyan;
+            ctx.font = "700 13px Trebuchet MS, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(`다음 ${sideLabel(upcoming.correct)}`, project(0, 2.2, upcoming.z).x, project(0, 2.2, upcoming.z).y);
+          }
+
+          state.crystals.forEach((crystal) => {
+            if (crystal.z > 10 || crystal.z < -50) return;
+            const p = project(crystal.x, crystal.y, crystal.z);
+            ctx.fillStyle = "rgba(126,224,255,0.8)";
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y - 14);
+            ctx.lineTo(p.x + 6, p.y + 8);
+            ctx.lineTo(p.x - 6, p.y + 8);
+            ctx.closePath();
+            ctx.fill();
+          });
+
+          const vault = project(0, 1.6, state.vaultZ);
+          if (state.vaultZ > -50 && state.vaultZ < 8) {
+            ctx.strokeStyle = COLORS.cyan;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.arc(vault.x, vault.y, 28, Math.PI, 0);
+            ctx.stroke();
+          }
+
+          const cart = project(state.lane, state.cartY, 0.1);
+          ctx.fillStyle = "#4a5560";
+          ctx.fillRect(cart.x - 16, cart.y - 12, 32, 20);
+          ctx.fillStyle = COLORS.cyan;
+          ctx.fillRect(cart.x - 6, cart.y - 18, 12, 8);
+
+          state.sparks.forEach((spark) => {
+            const p = project(spark.x, spark.y, spark.z);
+            ctx.globalAlpha = clamp(spark.life * 1.5, 0, 1);
+            ctx.fillStyle = COLORS.cyan;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(232,246,255,0.7)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const upcoming = nextJunction();
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) {
+            objective.textContent = upcoming
+              ? `${sideLabel(state.switchSide)} → ${sideLabel(upcoming.correct)}`
+              : "금고";
+          }
+          if (meter) meter.style.width = `${(state.passed / JUNCTIONS.length) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `속도 ${state.speed.toFixed(1)}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const upcoming = nextJunction();
+          if (upcoming) {
+            hud.save();
+            hud.textAlign = "center";
+            hud.fillStyle = state.switchSide === upcoming.correct ? COLORS.cyan : COLORS.danger;
+            hud.font = "800 15px Trebuchet MS, sans-serif";
+            hud.fillText(
+              `분기 ${sideLabel(upcoming.correct)} · 현재 ${sideLabel(state.switchSide)}`,
+              VIEW_W / 2,
+              VIEW_H - 28
+            );
+            hud.restore();
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.cyan;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(126,224,255,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const upcoming = nextJunction();
+          return JSON.stringify({
+            coordinate_system: "world units; cart at z=0; track scrolls +z",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.passed,
+            speed: Number(state.speed.toFixed(2)),
+            switch: state.switchSide,
+            lane: Number(state.lane.toFixed(2)),
+            next_junction: upcoming
+              ? { z: Number(upcoming.z.toFixed(1)), correct: upcoming.correct, fail: upcoming.fail }
+              : null,
+            vaultZ: Number(state.vaultZ.toFixed(1)),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running") {
+            const dx = event.clientX - input.downX;
+            const dy = event.clientY - input.downY;
+            if (Math.hypot(dx, dy) < 18) toggleSwitch();
+          }
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            toggleSwitch();
+          }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.passed = JUNCTIONS.length;
+            state.vaultZ = 0;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          toggle() { toggleSwitch(); render(); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

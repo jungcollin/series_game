@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>공허 고리</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #07060f; --accent: #a78bff; --accent-ink: #100818; --danger: #ff6b7a; --ink: #f0eaff; --muted: rgba(240,234,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">공허 고리. 회전하는 공허 고리 사이로 탐사선을 꿰세요. 드래그로 선회·피치. 고리 6개를 통과하면 클리어. 고리에 스치면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 터치한 채 드래그해 선회와 피치를 조절합니다.</p>
+    <main class="stage" aria-label="공허 고리 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="공허 고리" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">고리</p>
+          <p class="hud-value" id="hud-objective">0 / 6</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">정렬 중앙</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Void Ring</p>
+          <h1>공허 고리</h1>
+          <p class="brief-lead">회전하는 공허 고리 사이로 탐사선을 꿰세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 선회·피치</span></li>
+            <li><strong>클리어</strong><span>고리 6개를 통과하면 클리어</span></li>
+            <li><strong>실패</strong><span>고리에 스치면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">공허 충돌</p>
+          <h2>고리에 스쳤다</h2>
+          <p class="brief-lead" id="fail-detail">고리에 스치면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">관통 완료</p>
+          <h2>공허를 꿰었다</h2>
+          <p class="brief-lead">여섯 개의 회전 고리 구멍을 탐사선이 통과했습니다.</p>
+          <p class="hud-sub" id="clear-stat">고리 6개를 통과하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const GOAL = 6;
+        const SHIP_R = 0.22;
+        const TUBE_R = 0.2;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "void-ring",
+          title: "공허 고리",
+          description: "회전하는 공허 고리 사이로 탐사선을 꿰세요.",
+          creator: "collin",
+          genre: "3D ring threading",
+          clearCondition: "고리 6개를 통과하면 클리어",
+          failCondition: "고리에 스치면 실패",
+          controls: "드래그로 선회·피치",
+        };
+        const COLORS = {
+          void: "#07060f",
+          ink: "#f0eaff",
+          violet: "#a78bff",
+          hot: "#ff8ad4",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          graze: "고리 가장자리에 스쳤습니다",
+          hull: "탐사선 선체가 고리에 부딪혔습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          score: 0,
+          ship: { x: 0, y: 0, z: 0, vx: 0, vy: 0, yaw: 0, pitch: 0 },
+          rings: [],
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          align: 1,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, downX: 0, downY: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            speed: 7.1 + difficulty * 2.4,
+            inner: 1.42 - difficulty * 0.32,
+            slide: 0.15 + difficulty * 1.35,
+            spin: 0.4 + difficulty * 1.5,
+            steer: 7.8 + difficulty * 1.4,
+          };
+        }
+
+        function ringCenter(ring, t) {
+          return {
+            x: ring.cx + Math.sin(t * ring.fx + ring.px) * ring.ax,
+            y: ring.cy + Math.cos(t * ring.fy + ring.py) * ring.ay,
+            z: ring.z,
+          };
+        }
+
+        function makeRings() {
+          state.rings = [];
+          const count = 9;
+          for (let index = 0; index < count; index += 1) {
+            const easy = index < 3;
+            state.rings.push({
+              id: index,
+              z: 12 + index * 11.5,
+              cx: easy ? 0 : randRange(-1.1, 1.1),
+              cy: easy ? 0 : randRange(-0.7, 0.7),
+              ax: easy ? 0.12 : randRange(0.4, 1.35),
+              ay: easy ? 0.08 : randRange(0.3, 1.05),
+              fx: easy ? 0.55 : randRange(0.7, 1.5),
+              fy: easy ? 0.4 : randRange(0.55, 1.3),
+              px: randRange(0, Math.PI * 2),
+              py: randRange(0, Math.PI * 2),
+              spin: easy ? 0.35 : randRange(0.6, 1.8),
+              tilt: easy ? 0.08 : randRange(0.12, 0.42),
+              angle: randRange(0, Math.PI * 2),
+              inner: easy ? 1.55 : 1.28,
+              passed: false,
+              judged: false,
+            });
+          }
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(1.4, 5.2),
+              vy: Math.sin(angle) * randRange(1.4, 5.2),
+              vz: randRange(-1, 3),
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.04, 0.12),
+            });
+          }
+          if (state.particles.length > 56) state.particles.splice(0, state.particles.length - 56);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "pass") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(920, now + 0.1);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+              osc.start(now); osc.stop(now + 0.14);
+            } else if (kind === "graze") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(50, now + 0.16);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.19);
+            } else if (kind === "hum") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(220, now);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+              osc.start(now); osc.stop(now + 0.09);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.23);
+            } else if (kind === "boom") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.score = 0;
+          state.ship = { x: 0, y: 0, z: 0, vx: 0, vy: 0, yaw: 0, pitch: 0 };
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.align = 1;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          makeRings();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function nextRing() {
+          return state.rings.find((ring) => !ring.judged && ring.z > state.ship.z - 0.4) || null;
+        }
+
+        function judgeRing(ring, params) {
+          if (ring.judged) return;
+          ring.judged = true;
+          const c = ringCenter(ring, state.elapsed);
+          const dx = state.ship.x - c.x;
+          const dy = state.ship.y - c.y;
+          const dist = Math.hypot(dx, dy);
+          const inner = ring.inner * (params.inner / 1.42);
+          const hole = inner - TUBE_R - SHIP_R;
+          const rimInner = inner - TUBE_R - 0.02;
+          const rimOuter = inner + TUBE_R + SHIP_R;
+          if (dist <= hole) {
+            ring.passed = true;
+            state.score += 1;
+            state.flash = 0.4;
+            state.message = `관통 ${state.score}/${GOAL}`;
+            state.messageTime = 0.75;
+            burst(c.x, c.y, c.z, 18, "pass");
+            playSfx("pass");
+            if (state.score >= GOAL) clearStage();
+            return;
+          }
+          if (dist >= rimInner && dist <= rimOuter) {
+            burst(state.ship.x, state.ship.y, state.ship.z, 20, "graze");
+            failStage("graze");
+            return;
+          }
+          state.message = "빗나감";
+          state.messageTime = 0.5;
+        }
+
+        function updateShip(dt, params) {
+          const s = state.ship;
+          let ax = 0;
+          let ay = 0;
+          if (input.left) ax -= 1;
+          if (input.right) ax += 1;
+          if (input.up) ay += 1;
+          if (input.down) ay -= 1;
+          s.vx += ax * params.steer * dt;
+          s.vy += ay * params.steer * dt;
+          s.vx *= Math.pow(0.12, dt);
+          s.vy *= Math.pow(0.12, dt);
+          s.x = clamp(s.x + s.vx * dt, -4.4, 4.4);
+          s.y = clamp(s.y + s.vy * dt, -2.8, 2.8);
+          s.z += params.speed * dt;
+          s.yaw = lerp(s.yaw, s.vx * 0.08, 0.2);
+          s.pitch = lerp(s.pitch, s.vy * 0.08, 0.2);
+        }
+
+        function updateRings(dt, params) {
+          state.rings.forEach((ring) => {
+            ring.angle += dt * ring.spin * (0.7 + params.spin * 0.2);
+            if (!ring.judged && state.ship.z >= ring.z) judgeRing(ring, params);
+          });
+          const upcoming = nextRing();
+          if (upcoming) {
+            const c = ringCenter(upcoming, state.elapsed);
+            const dist = Math.hypot(state.ship.x - c.x, state.ship.y - c.y);
+            const inner = upcoming.inner * (params.inner / 1.42);
+            state.align = clamp(1 - dist / (inner + 0.4), 0, 1);
+          } else {
+            state.align = 1;
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateShip(dt, params);
+          if (state.mode !== "running") return;
+          updateRings(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `고리 ${state.score} / ${GOAL}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 고리 ${state.score}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x07060f, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x07060f);
+          scene.fog = new THREE.FogExp2(0x07060f, 0.032);
+
+          const camera = new THREE.PerspectiveCamera(64, VIEW_W / VIEW_H, 0.1, 160);
+          camera.position.set(0, 1.2, 6.4);
+
+          scene.add(new THREE.AmbientLight(0x2a2048, 0.48));
+          scene.add(new THREE.HemisphereLight(0xa78bff, 0x0a0618, 0.42));
+          const key = new THREE.DirectionalLight(0xd8c8ff, 0.55);
+          key.position.set(6, 10, 8);
+          scene.add(key);
+          const coreLight = new THREE.PointLight(0xa78bff, 1.3, 24);
+          coreLight.position.set(0, 0, 2);
+          scene.add(coreLight);
+          const rim = new THREE.PointLight(0xff8ad4, 0.7, 18);
+          rim.position.set(-4, 2, -2);
+          scene.add(rim);
+
+          const starCount = reducedMotion ? 280 : 900;
+          const starPos = new Float32Array(starCount * 3);
+          for (let i = 0; i < starCount; i += 1) {
+            starPos[i * 3] = randRange(-40, 40);
+            starPos[i * 3 + 1] = randRange(-24, 24);
+            starPos[i * 3 + 2] = randRange(-20, 140);
+          }
+          const starGeo = new THREE.BufferGeometry();
+          starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+          const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+            color: 0xf0eaff, size: 0.14, transparent: true, opacity: 0.85, sizeAttenuation: true,
+          }));
+          scene.add(stars);
+
+          const nebulaMat = new THREE.MeshBasicMaterial({
+            color: 0x3a1a68, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide,
+          });
+          const nebulae = [];
+          [[-12, 4, 20, 0x3a1a68], [14, -6, 40, 0x1a3060], [2, 8, 70, 0x4a1848]].forEach((row) => {
+            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(28, 16), nebulaMat.clone());
+            mesh.material.color.setHex(row[3]);
+            mesh.position.set(row[0], row[1], row[2]);
+            scene.add(mesh);
+            nebulae.push(mesh);
+          });
+
+          const debrisGeo = new THREE.DodecahedronGeometry(0.18, 0);
+          const debrisMat = new THREE.MeshStandardMaterial({ color: 0x3a3450, roughness: 0.8, metalness: 0.2 });
+          const debris = [];
+          for (let i = 0; i < 16; i += 1) {
+            const mesh = new THREE.Mesh(debrisGeo, debrisMat);
+            mesh.position.set(randRange(-10, 10), randRange(-6, 6), randRange(8, 90));
+            mesh.scale.setScalar(randRange(0.6, 1.6));
+            scene.add(mesh);
+            debris.push(mesh);
+          }
+
+          const pylonMat = new THREE.MeshStandardMaterial({
+            color: 0x2a1848, roughness: 0.45, metalness: 0.5, emissive: 0x3a1868, emissiveIntensity: 0.4,
+          });
+          const pylonGeo = new THREE.BoxGeometry(0.18, 4.6, 0.18);
+          const beamGeo = new THREE.BoxGeometry(3.4, 0.08, 0.08);
+          const pylons = [];
+          for (let i = 0; i < 6; i += 1) {
+            const g = new THREE.Group();
+            const left = new THREE.Mesh(pylonGeo, pylonMat);
+            left.position.set(-1.8, 0, 0);
+            const right = new THREE.Mesh(pylonGeo, pylonMat);
+            right.position.set(1.8, 0, 0);
+            const beam = new THREE.Mesh(beamGeo, pylonMat);
+            beam.position.y = 2.1;
+            g.add(left); g.add(right); g.add(beam);
+            g.position.set(i % 2 === 0 ? -7.4 : 7.4, 0, 18 + i * 14);
+            scene.add(g);
+            pylons.push(g);
+          }
+
+          const pulsar = new THREE.Mesh(
+            new THREE.SphereGeometry(0.9, 16, 16),
+            new THREE.MeshStandardMaterial({
+              color: 0xff8ad4, roughness: 0.2, metalness: 0.4, emissive: 0xff8ad4, emissiveIntensity: 0.9,
+            })
+          );
+          pulsar.position.set(-16, 8, 48);
+          scene.add(pulsar);
+          const pulsarHalo = new THREE.Mesh(
+            new THREE.SphereGeometry(1.6, 14, 14),
+            new THREE.MeshBasicMaterial({ color: 0xff8ad4, transparent: true, opacity: 0.12, depthWrite: false })
+          );
+          pulsarHalo.position.copy(pulsar.position);
+          scene.add(pulsarHalo);
+
+          const ribbonGeo = new THREE.PlaneGeometry(2.2, 36, 1, 12);
+          const ribbonMat = new THREE.MeshBasicMaterial({
+            color: 0xa78bff, transparent: true, opacity: 0.08, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+          });
+          const ribbons = [];
+          [-3.6, 3.6].forEach((x) => {
+            const mesh = new THREE.Mesh(ribbonGeo, ribbonMat);
+            mesh.position.set(x, 0, 28);
+            mesh.rotation.x = Math.PI / 2;
+            scene.add(mesh);
+            ribbons.push(mesh);
+          });
+
+          const ship = new THREE.Group();
+          const hullMat = new THREE.MeshStandardMaterial({
+            color: 0xc8b8ff, roughness: 0.32, metalness: 0.62, emissive: 0x2a1850, emissiveIntensity: 0.35,
+          });
+          const hull = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.85, 6), hullMat);
+          hull.rotation.x = Math.PI / 2;
+          ship.add(hull);
+          const cabin = new THREE.Mesh(
+            new THREE.SphereGeometry(0.12, 8, 8),
+            new THREE.MeshStandardMaterial({ color: 0xa78bff, roughness: 0.25, metalness: 0.4, emissive: 0xa78bff, emissiveIntensity: 0.5 })
+          );
+          cabin.position.z = -0.12;
+          ship.add(cabin);
+          const finGeo = new THREE.PlaneGeometry(0.42, 0.16);
+          const finMat = new THREE.MeshStandardMaterial({ color: 0xff8ad4, roughness: 0.4, metalness: 0.3, side: THREE.DoubleSide, emissive: 0x4a1830, emissiveIntensity: 0.3 });
+          const finL = new THREE.Mesh(finGeo, finMat);
+          finL.position.set(-0.18, 0, 0.18);
+          finL.rotation.y = 0.4;
+          const finR = new THREE.Mesh(finGeo, finMat);
+          finR.position.set(0.18, 0, 0.18);
+          finR.rotation.y = -0.4;
+          ship.add(finL); ship.add(finR);
+          const exhaust = new THREE.Mesh(
+            new THREE.ConeGeometry(0.08, 0.35, 8),
+            new THREE.MeshBasicMaterial({ color: 0xa78bff, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, depthWrite: false })
+          );
+          exhaust.rotation.x = -Math.PI / 2;
+          exhaust.position.z = 0.55;
+          ship.add(exhaust);
+          scene.add(ship);
+
+          const ringGeo = new THREE.TorusGeometry(1.3, 0.12, 10, 40);
+          const ringMat = new THREE.MeshStandardMaterial({
+            color: 0xa78bff, roughness: 0.28, metalness: 0.55, emissive: 0x4a28a0, emissiveIntensity: 0.7,
+          });
+          const glowGeo = new THREE.TorusGeometry(1.3, 0.22, 8, 32);
+          const glowMat = new THREE.MeshBasicMaterial({
+            color: 0xa78bff, transparent: true, opacity: 0.22, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+          const innerGeo = new THREE.TorusGeometry(1.05, 0.02, 6, 28);
+          const ringMeshes = [];
+          for (let i = 0; i < 9; i += 1) {
+            const group = new THREE.Group();
+            const mesh = new THREE.Mesh(ringGeo, ringMat.clone());
+            const glow = new THREE.Mesh(glowGeo, glowMat.clone());
+            const inner = new THREE.Mesh(innerGeo, new THREE.MeshBasicMaterial({
+              color: 0xff8ad4, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false,
+            }));
+            group.add(mesh); group.add(glow); group.add(inner);
+            scene.add(group);
+            ringMeshes.push({ group, mesh, glow, inner });
+          }
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const passMat = new THREE.MeshBasicMaterial({ color: 0xa78bff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending });
+
+          return {
+            renderer, scene, camera, coreLight, rim, stars, nebulae, debris,
+            ship, exhaust, ringMeshes, particleGeo, passMat, particleMeshes: [],
+            pylons, pulsar, pulsarHalo, ribbons, look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const s = state.ship;
+          webgl.ship.position.set(s.x, s.y, s.z);
+          webgl.ship.rotation.set(-s.pitch, s.yaw, -s.vx * 0.04);
+          const pulse = reducedMotion ? 1 : 0.8 + Math.sin(state.elapsed * 14) * 0.2;
+          webgl.exhaust.scale.set(pulse, 1.1 + pulse * 0.4, pulse);
+          webgl.coreLight.position.set(s.x, s.y + 0.4, s.z + 1.2);
+          const params = difficultyAt(state.elapsed);
+          state.rings.forEach((ring, index) => {
+            const g = webgl.ringMeshes[index];
+            if (!g) return;
+            const c = ringCenter(ring, state.elapsed);
+            g.group.position.set(c.x, c.y, c.z);
+            g.group.rotation.z = ring.angle;
+            g.group.rotation.x = Math.sin(ring.angle * 0.35) * ring.tilt;
+            const scale = (ring.inner * (params.inner / 1.42)) / 1.3;
+            g.group.scale.setScalar(scale);
+            const passed = ring.passed;
+            g.mesh.material.emissiveIntensity = passed ? 0.2 : 0.75;
+            g.glow.material.opacity = passed ? 0.06 : 0.24;
+            g.group.visible = ring.z > s.z - 8 && ring.z < s.z + 48;
+          });
+          webgl.debris.forEach((mesh) => {
+            mesh.rotation.x += 0.01;
+            mesh.rotation.y += 0.008;
+            if (mesh.position.z < s.z - 8) mesh.position.z += 90;
+          });
+          webgl.pylons.forEach((pylon, index) => {
+            pylon.rotation.y = Math.sin(state.elapsed * 0.4 + index) * 0.08;
+            if (pylon.position.z < s.z - 10) pylon.position.z += 84;
+          });
+          const pulsarPulse = 0.7 + Math.sin(state.elapsed * 3.2) * 0.3;
+          webgl.pulsar.material.emissiveIntensity = 0.6 + pulsarPulse * 0.5;
+          webgl.pulsarHalo.scale.setScalar(1 + pulsarPulse * 0.15);
+          webgl.ribbons.forEach((ribbon, index) => {
+            ribbon.position.z = s.z + 18 + index * 6;
+            ribbon.rotation.z = state.elapsed * (0.15 + index * 0.05);
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.passMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "graze" ? 0xff6b7a : 0xa78bff);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const s = state.ship;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          webgl.camera.position.set(s.x * 0.35 + shakeX, s.y * 0.35 + 1.05 + shakeY, s.z - 6.2);
+          webgl.look.set(s.x, s.y, s.z + 10);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const depth = Math.max(0.25, (z - state.ship.z + 6) / 18);
+          return {
+            x: VIEW_W * 0.5 + (x - state.ship.x) * 70 * depth,
+            y: VIEW_H * 0.52 - (y - state.ship.y) * 70 * depth,
+            visible: z > state.ship.z - 2,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#140c28");
+          g.addColorStop(0.5, "#07060f");
+          g.addColorStop(1, "#0c0818");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "rgba(240,234,255,0.7)";
+          for (let i = 0; i < 80; i += 1) {
+            ctx.globalAlpha = 0.2 + (i % 5) * 0.1;
+            ctx.fillRect((i * 97 + state.ship.z * 8) % VIEW_W, (i * 53) % VIEW_H, 2, 2);
+          }
+          ctx.globalAlpha = 1;
+          state.rings.forEach((ring) => {
+            if (ring.judged && !ring.passed) return;
+            const c = ringCenter(ring, state.elapsed);
+            const p = projectToScreen(c.x, c.y, c.z);
+            if (!p.visible) return;
+            const depth = clamp(18 / Math.max(4, ring.z - state.ship.z), 0.2, 1.4);
+            ctx.strokeStyle = ring.passed ? "rgba(167,139,255,0.25)" : COLORS.violet;
+            ctx.lineWidth = 4 * depth;
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, ring.inner * 28 * depth, ring.inner * 22 * depth, ring.angle, 0, Math.PI * 2);
+            ctx.stroke();
+          });
+          const ship = projectToScreen(state.ship.x, state.ship.y, state.ship.z);
+          ctx.fillStyle = COLORS.violet;
+          ctx.beginPath();
+          ctx.moveTo(ship.x, ship.y - 12);
+          ctx.lineTo(ship.x - 8, ship.y + 10);
+          ctx.lineTo(ship.x + 8, ship.y + 10);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = COLORS.hot;
+          ctx.beginPath();
+          ctx.moveTo(ship.x, ship.y + 10);
+          ctx.lineTo(ship.x - 4, ship.y + 18);
+          ctx.lineTo(ship.x + 4, ship.y + 18);
+          ctx.fill();
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.5, 0, 1);
+            ctx.fillStyle = particle.kind === "graze" ? COLORS.danger : COLORS.violet;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(240,234,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.score} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.score / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const pct = Math.round(state.align * 100);
+            sub.textContent = pct > 78 ? `정렬 양호 ${pct}%` : `정렬 ${pct}%`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const upcoming = nextRing();
+          if (upcoming) {
+            const c = ringCenter(upcoming, state.elapsed);
+            const p = projectToScreen(c.x, c.y, c.z);
+            hud.strokeStyle = `rgba(167,139,255,${0.25 + state.align * 0.5})`;
+            hud.lineWidth = 2;
+            hud.setLineDash([5, 6]);
+            hud.beginPath();
+            hud.arc(p.x, p.y, 16, 0, Math.PI * 2);
+            hud.stroke();
+            hud.setLineDash([]);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message === "빗나감" ? COLORS.danger : COLORS.violet;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(167,139,255,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const upcoming = nextRing();
+          return JSON.stringify({
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            score: state.score,
+            align: Number(state.align.toFixed(3)),
+            ship: {
+              x: Number(state.ship.x.toFixed(2)),
+              y: Number(state.ship.y.toFixed(2)),
+              z: Number(state.ship.z.toFixed(2)),
+            },
+            next: upcoming ? upcoming.id : null,
+            difficulty: Number(params.difficulty.toFixed(3)),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          const params = difficultyAt(state.elapsed);
+          state.ship.vx = clamp(dx * 0.12, -params.steer, params.steer);
+          state.ship.vy = clamp(-dy * 0.12, -params.steer, params.steer);
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+        }
+        function onPointerUp(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.score = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = false; input.right = false; input.up = false; input.down = false; input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

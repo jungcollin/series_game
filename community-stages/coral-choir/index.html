@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>산호 합창</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #061820; --accent: #7affd0; --accent-ink: #041418; --danger: #ff6b7a; --ink: #e6fff8; --muted: rgba(230,255,248,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">산호 합창. 울리는 산호로 헤엄쳐 화음을 맞추세요. 드래그로 수영. 화음 6마디를 맞추면 클리어. 불협화 3회면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 터치한 채 드래그해 헤엄칩니다.</p>
+    <main class="stage" aria-label="산호 합창 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="산호 합창" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">화음</p>
+          <p class="hud-value" id="hud-objective">0 / 6</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">40.0</p>
+          <p class="hud-sub" id="hud-sub">불협 0 / 3</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Coral Choir</p>
+          <h1>산호 합창</h1>
+          <p class="brief-lead">울리는 산호로 헤엄쳐 화음을 맞추세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 수영</span></li>
+            <li><strong>클리어</strong><span>화음 6마디를 맞추면 클리어</span></li>
+            <li><strong>실패</strong><span>불협화 3회면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">합창 붕괴</p>
+          <h2>불협화가 퍼졌다</h2>
+          <p class="brief-lead" id="fail-detail">불협화 3회면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">화음 완성</p>
+          <h2>산호가 화답했다</h2>
+          <p class="brief-lead">여섯 마디의 화음이 산호 정원에 울렸습니다.</p>
+          <p class="hud-sub" id="clear-stat">화음 6마디를 맞추면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 40;
+        const GOAL = 6;
+        const MAX_DISS = 3;
+        const PITCHES = [
+          { id: 0, name: "시안", hex: 0x7affd0, css: "#7affd0", freq: 392 },
+          { id: 1, name: "청록", hex: 0x4ec8ff, css: "#4ec8ff", freq: 494 },
+          { id: 2, name: "호박", hex: 0xffd36a, css: "#ffd36a", freq: 587 },
+          { id: 3, name: "자홍", hex: 0xff7ad4, css: "#ff7ad4", freq: 659 },
+        ];
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "coral-choir",
+          title: "산호 합창",
+          description: "울리는 산호로 헤엄쳐 화음을 맞추세요.",
+          creator: "collin",
+          genre: "3D harmonic swim",
+          clearCondition: "화음 6마디를 맞추면 클리어",
+          failCondition: "불협화 3회면 실패",
+          controls: "드래그로 수영",
+        };
+        const COLORS = {
+          deep: "#061820",
+          ink: "#e6fff8",
+          mint: "#7affd0",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          dissonance: "불협화가 3회 울렸습니다",
+          rock_hit: "암초에 부딪혔습니다",
+          time_limit: "제한 시간 40초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const CORAL_SLOTS = [
+          { x: -4.4, y: 3.1, z: -3.2 },
+          { x: 4.5, y: 3.6, z: -2.8 },
+          { x: -2.6, y: 5.4, z: -6.1 },
+          { x: 2.8, y: 2.15, z: -6.4 },
+        ];
+        const ROCKS = [
+          { x: -6.8, y: 2.4, z: -1.2, r: 1.35 },
+          { x: 6.9, y: 4.8, z: -4.2, r: 1.45 },
+          { x: 0.2, y: 7.4, z: -7.2, r: 1.2 },
+          { x: -5.4, y: 0.8, z: -5.6, r: 1.5 },
+        ];
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          hits: 0,
+          diss: 0,
+          swimmer: { x: 0, y: 3.4, z: 0.4, vx: 0, vy: 0, vz: 0 },
+          corals: [],
+          target: 0,
+          windowAge: 0,
+          windowDur: 3.4,
+          rest: 1.35,
+          inRest: true,
+          stun: 0,
+          stunVX: 0,
+          stunVY: 0,
+          particles: [],
+          bubbles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          resolved: false,
+        };
+        const input = {
+          dragging: false, downX: 0, downY: 0, pointerId: null,
+          left: false, right: false, up: false, down: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            window: 3.35 - difficulty * 1.15,
+            rest: 1.15 - difficulty * 0.35,
+            swim: 7.2 + difficulty * 1.4,
+            coralR: 1.38 - difficulty * 0.18,
+          };
+        }
+
+        function assignPitches() {
+          const order = [0, 1, 2, 3];
+          for (let index = order.length - 1; index > 0; index -= 1) {
+            const j = Math.floor(random() * (index + 1));
+            const tmp = order[index];
+            order[index] = order[j];
+            order[j] = tmp;
+          }
+          state.corals = CORAL_SLOTS.map((slot, index) => ({
+            x: slot.x, y: slot.y, z: slot.z,
+            pitch: order[index],
+            pulse: random() * Math.PI * 2,
+            hit: false,
+          }));
+        }
+
+        function beginPhrase(params) {
+          state.inRest = false;
+          state.windowAge = 0;
+          state.windowDur = params.window;
+          state.resolved = false;
+          assignPitches();
+          state.target = Math.floor(random() * 4);
+          state.message = `${PITCHES[state.target].name} 화음`;
+          state.messageTime = 0.8;
+          playSfx("cue", PITCHES[state.target].freq);
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(1.4, 4.2),
+              vy: randRange(0.6, 3.4),
+              vz: Math.sin(angle) * randRange(1.4, 4.2),
+              life: randRange(0.3, 0.75),
+              kind,
+              size: randRange(0.05, 0.13),
+            });
+          }
+          if (state.particles.length > 52) state.particles.splice(0, state.particles.length - 52);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind, freq) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "cue") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(freq || 440, now);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else if (kind === "hit") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(freq || 520, now);
+              osc.frequency.exponentialRampToValueAtTime((freq || 520) * 1.5, now + 0.12);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "wrong") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.14);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.22);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            } else if (kind === "boom") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.hits = 0;
+          state.diss = 0;
+          state.swimmer = { x: 0, y: 3.4, z: 0.4, vx: 0, vy: 0, vz: 0 };
+          state.windowAge = 0;
+          state.windowDur = 3.4;
+          state.rest = 1.35;
+          state.inRest = true;
+          state.stun = 0;
+          state.stunVX = 0;
+          state.stunVY = 0;
+          state.particles = [];
+          state.bubbles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.resolved = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          assignPitches();
+          state.target = 0;
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.62;
+          playSfx("boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function nearestRock(x, y, z) {
+          let best = ROCKS[0];
+          let bestD = Infinity;
+          ROCKS.forEach((rock) => {
+            const d = dist3(x, y, z, rock.x, rock.y, rock.z);
+            if (d < bestD) { bestD = d; best = rock; }
+          });
+          return best;
+        }
+
+        function applyDissonance(coral, params) {
+          state.diss += 1;
+          state.resolved = true;
+          state.inRest = true;
+          state.rest = params.rest * 0.7;
+          state.flash = 0.5;
+          state.shake = reducedMotion ? 0.12 : 0.4;
+          state.message = `불협 ${state.diss}/${MAX_DISS}`;
+          state.messageTime = 0.9;
+          const rock = nearestRock(state.swimmer.x, state.swimmer.y, state.swimmer.z);
+          const dx = rock.x - state.swimmer.x;
+          const dy = rock.y - state.swimmer.y;
+          const len = Math.max(0.2, Math.hypot(dx, dy));
+          state.stun = 0.55;
+          state.stunVX = (dx / len) * 6.4;
+          state.stunVY = (dy / len) * 4.8;
+          burst(coral.x, coral.y, coral.z, 16, "wrong");
+          playSfx("wrong");
+          if (state.diss >= MAX_DISS) failStage("dissonance");
+        }
+
+        function applyHit(coral, params) {
+          state.hits += 1;
+          state.resolved = true;
+          state.inRest = true;
+          state.rest = params.rest;
+          state.flash = 0.42;
+          state.message = `화음 ${state.hits}/${GOAL}`;
+          state.messageTime = 0.85;
+          burst(coral.x, coral.y, coral.z, 20, "hit");
+          playSfx("hit", PITCHES[coral.pitch].freq);
+          if (state.hits >= GOAL) clearStage();
+        }
+
+        function updateChoir(dt, params) {
+          if (state.stun > 0) return;
+          if (state.inRest) {
+            state.rest -= dt;
+            if (state.rest <= 0) beginPhrase(params);
+            return;
+          }
+          state.windowAge += dt;
+          const sw = state.swimmer;
+          if (!state.resolved) {
+            for (let index = 0; index < state.corals.length; index += 1) {
+              const coral = state.corals[index];
+              const d = dist3(sw.x, sw.y, sw.z, coral.x, coral.y, coral.z);
+              if (d <= params.coralR) {
+                if (coral.pitch === state.target) applyHit(coral, params);
+                else applyDissonance(coral, params);
+                return;
+              }
+            }
+          }
+          if (state.windowAge >= state.windowDur && !state.resolved) {
+            const dummy = state.corals.find((c) => c.pitch === state.target) || state.corals[0];
+            applyDissonance(dummy, params);
+          }
+        }
+
+        function updateSwim(dt, params) {
+          const sw = state.swimmer;
+          if (state.stun > 0) {
+            state.stun -= dt;
+            sw.vx = state.stunVX;
+            sw.vy = state.stunVY;
+          } else {
+            let ax = 0;
+            let ay = 0;
+            if (input.left) ax -= 1;
+            if (input.right) ax += 1;
+            if (input.up) ay += 1;
+            if (input.down) ay -= 1;
+            if (input.dragging) {
+              /* drag sets velocity in onPointerMove */
+            } else {
+              sw.vx += ax * params.swim * dt;
+              sw.vy += ay * params.swim * dt;
+              sw.vx *= Math.pow(0.08, dt);
+              sw.vy *= Math.pow(0.08, dt);
+            }
+          }
+          sw.x = clamp(sw.x + sw.vx * dt, -6.4, 6.4);
+          sw.y = clamp(sw.y + sw.vy * dt, 0.9, 7.2);
+          sw.z = clamp(sw.z + sw.vz * dt, -1.2, 1.6);
+          sw.vz *= Math.pow(0.12, dt);
+          ROCKS.forEach((rock) => {
+            const d = dist3(sw.x, sw.y, sw.z, rock.x, rock.y, rock.z);
+            if (d < rock.r + 0.28) {
+              burst(sw.x, sw.y, sw.z, 14, "wrong");
+              failStage("rock_hit");
+            }
+          });
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          if (!reducedMotion && random() < 0.35) {
+            const sw = state.swimmer;
+            state.bubbles.push({
+              x: sw.x + randRange(-0.2, 0.2),
+              y: sw.y + randRange(-0.1, 0.2),
+              z: sw.z + randRange(-0.2, 0.2),
+              vy: randRange(0.4, 1.1),
+              life: randRange(0.6, 1.4),
+              r: randRange(0.03, 0.07),
+            });
+          }
+          state.bubbles.forEach((b) => { b.y += b.vy * dt; b.life -= dt; });
+          state.bubbles = state.bubbles.filter((b) => b.life > 0);
+          if (state.bubbles.length > 40) state.bubbles.splice(0, state.bubbles.length - 40);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.5);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateSwim(dt, params);
+          if (state.mode !== "running") return;
+          updateChoir(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `화음 ${state.hits} / ${GOAL} · 불협 ${state.diss} / ${MAX_DISS}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 불협 ${state.diss}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x061820, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x061820);
+          scene.fog = new THREE.Fog(0x061820, 8, 28);
+
+          const camera = new THREE.PerspectiveCamera(62, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(0, 4.2, 8.4);
+
+          scene.add(new THREE.AmbientLight(0x1a4a58, 0.55));
+          scene.add(new THREE.HemisphereLight(0x7affd0, 0x082028, 0.42));
+          const sun = new THREE.DirectionalLight(0xb8fff0, 0.7);
+          sun.position.set(4, 18, 8);
+          scene.add(sun);
+          const caustic = new THREE.PointLight(0x7affd0, 1.1, 22);
+          caustic.position.set(0, 6.5, -2);
+          scene.add(caustic);
+
+          const sand = new THREE.Mesh(
+            new THREE.CircleGeometry(28, 28),
+            new THREE.MeshStandardMaterial({ color: 0x1a3a40, roughness: 0.95, metalness: 0.04 })
+          );
+          sand.rotation.x = -Math.PI / 2;
+          sand.position.y = -0.4;
+          scene.add(sand);
+
+          const kelpMat = new THREE.MeshStandardMaterial({ color: 0x1e6a58, roughness: 0.7, metalness: 0.05, side: THREE.DoubleSide });
+          const kelpGeo = new THREE.PlaneGeometry(0.35, 3.4, 1, 8);
+          const kelps = [];
+          for (let index = 0; index < 18; index += 1) {
+            const mesh = new THREE.Mesh(kelpGeo, kelpMat);
+            mesh.position.set(randRange(-10, 10), 1.4, randRange(-9, 4));
+            mesh.rotation.y = randRange(0, Math.PI);
+            scene.add(mesh);
+            kelps.push({ mesh, orig: kelpGeo.attributes.position.array.slice(), phase: randRange(0, 6) });
+          }
+
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x3a4a4e, roughness: 0.9, metalness: 0.08 });
+          const rockGeo = new THREE.DodecahedronGeometry(1, 0);
+          const rockMeshes = ROCKS.map((rock) => {
+            const mesh = new THREE.Mesh(rockGeo, rockMat);
+            mesh.position.set(rock.x, rock.y, rock.z);
+            mesh.scale.setScalar(rock.r);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const coralGeo = new THREE.ConeGeometry(0.55, 1.6, 7);
+          const branchGeo = new THREE.CylinderGeometry(0.07, 0.12, 0.9, 6);
+          const glowGeo = new THREE.SphereGeometry(0.85, 10, 10);
+          const coralGroups = [];
+          CORAL_SLOTS.forEach((slot, index) => {
+            const group = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({
+              color: PITCHES[index].hex, roughness: 0.45, metalness: 0.12,
+              emissive: PITCHES[index].hex, emissiveIntensity: 0.55,
+            });
+            const core = new THREE.Mesh(coralGeo, mat);
+            core.position.y = 0.8;
+            group.add(core);
+            for (let b = 0; b < 4; b += 1) {
+              const branch = new THREE.Mesh(branchGeo, mat);
+              branch.position.set(Math.cos(b * 1.6) * 0.32, 0.7, Math.sin(b * 1.6) * 0.32);
+              branch.rotation.z = 0.55;
+              branch.rotation.y = b;
+              group.add(branch);
+            }
+            const glow = new THREE.Mesh(
+              glowGeo,
+              new THREE.MeshBasicMaterial({
+                color: PITCHES[index].hex, transparent: true, opacity: 0.22, depthWrite: false, blending: THREE.AdditiveBlending,
+              })
+            );
+            glow.position.y = 0.7;
+            group.add(glow);
+            group.position.set(slot.x, slot.y - 0.8, slot.z);
+            scene.add(group);
+            coralGroups.push({ group, mat, glow, core });
+          });
+
+          const diver = new THREE.Group();
+          const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1a3a48, roughness: 0.5, metalness: 0.22 });
+          const body = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.72, 8), bodyMat);
+          body.rotation.x = Math.PI / 2;
+          diver.add(body);
+          const mask = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 10, 10),
+            new THREE.MeshStandardMaterial({ color: 0x7affd0, roughness: 0.25, metalness: 0.4, emissive: 0x145040, emissiveIntensity: 0.3 })
+          );
+          mask.position.z = -0.38;
+          diver.add(mask);
+          const finGeo = new THREE.PlaneGeometry(0.22, 0.4);
+          const finMat = new THREE.MeshStandardMaterial({ color: 0x4ec8ff, roughness: 0.5, side: THREE.DoubleSide });
+          const finL = new THREE.Mesh(finGeo, finMat);
+          finL.position.set(-0.22, 0, 0.28);
+          const finR = new THREE.Mesh(finGeo, finMat);
+          finR.position.set(0.22, 0, 0.28);
+          diver.add(finL); diver.add(finR);
+          scene.add(diver);
+
+          const cue = new THREE.Mesh(
+            new THREE.TorusGeometry(0.55, 0.06, 8, 20),
+            new THREE.MeshStandardMaterial({ color: 0x7affd0, emissive: 0x7affd0, emissiveIntensity: 0.8, roughness: 0.3, metalness: 0.2 })
+          );
+          scene.add(cue);
+
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const moteGeo = new THREE.BufferGeometry();
+          const moteCount = reducedMotion ? 80 : 220;
+          const motePos = new Float32Array(moteCount * 3);
+          for (let i = 0; i < moteCount; i += 1) {
+            motePos[i * 3] = randRange(-12, 12);
+            motePos[i * 3 + 1] = randRange(0, 9);
+            motePos[i * 3 + 2] = randRange(-10, 6);
+          }
+          moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+          scene.add(new THREE.Points(moteGeo, new THREE.PointsMaterial({
+            color: 0xa8fff0, size: 0.08, transparent: true, opacity: 0.45,
+          })));
+
+          return {
+            renderer, scene, camera, caustic, kelps, rockMeshes, coralGroups,
+            diver, finL, finR, cue, particleGeo,
+            hitMat: new THREE.MeshBasicMaterial({ color: 0x7affd0, transparent: true, opacity: 0.9, depthWrite: false }),
+            wrongMat: new THREE.MeshBasicMaterial({ color: 0xff6b7a, transparent: true, opacity: 0.9, depthWrite: false }),
+            bubbleMat: new THREE.MeshBasicMaterial({ color: 0xc8fff4, transparent: true, opacity: 0.35, depthWrite: false }),
+            particleMeshes: [], bubbleMeshes: [], look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const sw = state.swimmer;
+          webgl.diver.position.set(sw.x, sw.y, sw.z);
+          webgl.diver.rotation.z = -sw.vx * 0.08;
+          webgl.diver.rotation.x = sw.vy * 0.06;
+          const kick = reducedMotion ? 0 : Math.sin(state.elapsed * 8) * 0.35;
+          webgl.finL.rotation.y = -0.4 + kick;
+          webgl.finR.rotation.y = 0.4 - kick;
+          webgl.cue.position.set(sw.x, sw.y + 0.85, sw.z);
+          webgl.cue.material.color.setHex(PITCHES[state.target].hex);
+          webgl.cue.material.emissive.setHex(PITCHES[state.target].hex);
+          webgl.cue.visible = !state.inRest && state.mode === "running";
+          webgl.cue.rotation.z = state.elapsed * 1.4;
+          const pulse = reducedMotion ? 1 : 0.85 + Math.sin(state.elapsed * 5.2) * 0.18;
+          state.corals.forEach((coral, index) => {
+            const g = webgl.coralGroups[index];
+            if (!g) return;
+            g.group.position.set(coral.x, coral.y - 0.8, coral.z);
+            const pitch = PITCHES[coral.pitch];
+            g.mat.color.setHex(pitch.hex);
+            g.mat.emissive.setHex(pitch.hex);
+            const isTarget = !state.inRest && coral.pitch === state.target;
+            g.mat.emissiveIntensity = isTarget ? 0.7 + pulse * 0.5 : 0.22;
+            g.glow.material.color.setHex(pitch.hex);
+            g.glow.material.opacity = isTarget ? 0.32 * pulse : 0.1;
+            g.glow.scale.setScalar(isTarget ? 1.15 * pulse : 0.85);
+          });
+          webgl.caustic.intensity = 0.85 + Math.sin(state.elapsed * 1.7) * 0.25;
+          if (!reducedMotion) {
+            webgl.kelps.forEach((kelp) => {
+              kelp.mesh.rotation.z = Math.sin(state.elapsed * 1.3 + kelp.phase) * 0.18;
+            });
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.hitMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "wrong" ? 0xff6b7a : 0x7affd0);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+          while (webgl.bubbleMeshes.length < state.bubbles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.bubbleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.bubbleMeshes.push(mesh);
+          }
+          webgl.bubbleMeshes.forEach((mesh, index) => {
+            const b = state.bubbles[index];
+            if (!b) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(b.x, b.y, b.z);
+            mesh.scale.setScalar(b.r / 0.06);
+            mesh.material.opacity = clamp(b.life * 0.4, 0, 0.45);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const sw = state.swimmer;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.45 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          webgl.camera.position.set(sw.x * 0.35 + shakeX, sw.y * 0.25 + 3.6 + shakeY, 8.2);
+          webgl.look.set(sw.x, sw.y + 0.2, sw.z - 3);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          return {
+            x: VIEW_W * 0.5 + x * 48,
+            y: VIEW_H * 0.62 - (y - 3.4) * 42 - z * 8,
+            visible: true,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#0a3040");
+          g.addColorStop(0.5, "#061820");
+          g.addColorStop(1, "#031018");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#1a3a40";
+          ctx.fillRect(0, VIEW_H * 0.82, VIEW_W, VIEW_H * 0.18);
+          ROCKS.forEach((rock) => {
+            const p = projectToScreen(rock.x, rock.y, rock.z);
+            ctx.fillStyle = "#3a4a4e";
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, rock.r * 18, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          state.corals.forEach((coral) => {
+            const p = projectToScreen(coral.x, coral.y, coral.z);
+            const pitch = PITCHES[coral.pitch];
+            const isTarget = !state.inRest && coral.pitch === state.target;
+            ctx.fillStyle = pitch.css;
+            ctx.globalAlpha = isTarget ? 0.95 : 0.55;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y - 22);
+            ctx.lineTo(p.x + 14, p.y + 16);
+            ctx.lineTo(p.x - 14, p.y + 16);
+            ctx.closePath();
+            ctx.fill();
+            if (isTarget) {
+              ctx.strokeStyle = "#e6fff8";
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, 26, 0, Math.PI * 2);
+              ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+          });
+          const sw = projectToScreen(state.swimmer.x, state.swimmer.y, state.swimmer.z);
+          ctx.fillStyle = "#4ec8ff";
+          ctx.beginPath();
+          ctx.ellipse(sw.x, sw.y, 14, 8, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = COLORS.mint;
+          ctx.beginPath();
+          ctx.arc(sw.x + 10, sw.y, 5, 0, Math.PI * 2);
+          ctx.fill();
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.5, 0, 1);
+            ctx.fillStyle = particle.kind === "wrong" ? COLORS.danger : COLORS.mint;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(230,255,248,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.hits} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.hits / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            if (state.inRest) sub.textContent = `불협 ${state.diss} / ${MAX_DISS}`;
+            else sub.textContent = `${PITCHES[state.target].name} · 불협 ${state.diss} / ${MAX_DISS}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (!state.inRest && state.mode === "running") {
+            const remain = Math.max(0, 1 - state.windowAge / state.windowDur);
+            hud.fillStyle = "rgba(6,24,32,0.35)";
+            hud.fillRect(VIEW_W / 2 - 90, 86, 180, 8);
+            hud.fillStyle = PITCHES[state.target].css;
+            hud.fillRect(VIEW_W / 2 - 90, 86, 180 * remain, 8);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.startsWith("불협") ? COLORS.danger : COLORS.mint;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 124);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(122,255,208,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            hits: state.hits,
+            diss: state.diss,
+            target: state.target,
+            inRest: state.inRest,
+            windowAge: Number(state.windowAge.toFixed(2)),
+            swimmer: {
+              x: Number(state.swimmer.x.toFixed(2)),
+              y: Number(state.swimmer.y.toFixed(2)),
+              z: Number(state.swimmer.z.toFixed(2)),
+            },
+            difficulty: Number(params.difficulty.toFixed(3)),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          const params = difficultyAt(state.elapsed);
+          state.swimmer.vx = clamp(dx * 0.085, -params.swim, params.swim);
+          state.swimmer.vy = clamp(-dy * 0.085, -params.swim, params.swim);
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+        }
+        function onPointerUp(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.hits = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = false; input.right = false; input.up = false; input.down = false; input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

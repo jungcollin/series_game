@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>프리즘 반사</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #140818; --accent: #ff6ad5; --accent-ink: #140818; --danger: #ff6b7a; --ink: #ffe8fb; --muted: rgba(255,232,251,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">프리즘 반사. 프리즘을 돌려 빛줄기를 성소 핵까지 이으세요. 프리즘을 드래그해 회전. 성소 핵에 빛을 연결하면 클리어. 빛줄기가 공허로 3번 새면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 프리즘을 터치한 채 드래그해 각도를 돌립니다.</p>
+    <main class="stage" aria-label="프리즘 반사 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="프리즘 반사" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">연결</p>
+          <p class="hud-value" id="hud-objective">0 / 4</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">40.0</p>
+          <p class="hud-sub" id="hud-sub">누출 0 / 3</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Prism Bounce</p>
+          <h1>프리즘 반사</h1>
+          <p class="brief-lead">프리즘을 돌려 빛줄기를 성소 핵까지 이으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>프리즘을 드래그해 회전</span></li>
+            <li><strong>클리어</strong><span>성소 핵에 빛을 연결하면 클리어</span></li>
+            <li><strong>실패</strong><span>빛줄기가 공허로 3번 새면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">성소 단절</p>
+          <h2>빛이 새었다</h2>
+          <p class="brief-lead" id="fail-detail">빛줄기가 공허로 3번 새면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">핵 점등</p>
+          <h2>성소 연결</h2>
+          <p class="brief-lead">네 프리즘이 빛줄기를 핵까지 이었습니다.</p>
+          <p class="hud-sub" id="clear-stat">성소 핵에 빛을 연결하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 40;
+        const MAX_LEAK = 3;
+        const PRISM_R = 1.02;
+        const CORE_R = 1.05;
+        const RIFT_R = 1.15;
+        const SRC = { x: -8.6, y: 1.18, z: 0 };
+        const CORE = { x: 7.35, y: 1.18, z: 3.35 };
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "prism-bounce",
+          title: "프리즘 반사",
+          description: "프리즘을 돌려 빛줄기를 성소 핵까지 이으세요.",
+          creator: "collin",
+          genre: "3D laser prism",
+          clearCondition: "성소 핵에 빛을 연결하면 클리어",
+          failCondition: "빛줄기가 공허로 3번 새면 실패",
+          controls: "프리즘을 드래그해 회전",
+        };
+        const COLORS = {
+          hall: "#140818",
+          ink: "#ffe8fb",
+          pink: "#ff6ad5",
+          gold: "#ffd36a",
+          cyan: "#7af0ff",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          leak_limit: "빛줄기가 공허로 세 번 샜습니다",
+          time_limit: "제한 시간 40초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 13.4, y: 11.6, z: 13.8 },
+          right: { x: 0.718, y: 0, z: -0.696 },
+          up: { x: -0.38, y: 0.838, z: -0.392 },
+          fwd: { x: -0.583, y: -0.546, z: -0.601 },
+          focal: 430,
+        };
+        const RIFTS = [
+          { x: -1.2, y: 1.18, z: 6.8 },
+          { x: 7.6, y: 1.18, z: -7.1 },
+          { x: 8.4, y: 1.18, z: 7.2 },
+        ];
+        const WALLS = { x0: -10.4, x1: 10.2, z0: -8.8, z1: 8.8 };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function dist2(ax, az, bx, bz) { return Math.hypot(ax - bx, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          leaks: 0,
+          links: 0,
+          connected: false,
+          selected: 0,
+          prisms: [],
+          beam: { points: [], hit: "wall", links: 0 },
+          particles: [],
+          leakWait: 5.7,
+          pulse: 0,
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = {
+          left: false, right: false,
+          dragging: false, ignoreUp: false, pointerId: null,
+          lastX: 0, grab: -1,
+        };
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            leakEvery: 2.55 - difficulty * 0.45,
+          };
+        }
+
+        function makePrisms() {
+          return [
+            { x: -4.15, y: 1.18, z: 0, angle: 0.04, hue: 0 },
+            { x: -4.15, y: 1.18, z: -5.15, angle: 0.08, hue: 1 },
+            { x: 3.35, y: 1.18, z: -5.15, angle: -0.1, hue: 2 },
+            { x: 3.35, y: 1.18, z: 3.35, angle: 0.12, hue: 3 },
+          ];
+        }
+
+        function raySphere(ox, oy, oz, dx, dy, dz, cx, cy, cz, r) {
+          const ex = ox - cx;
+          const ey = oy - cy;
+          const ez = oz - cz;
+          const b = ex * dx + ey * dy + ez * dz;
+          const c = ex * ex + ey * ey + ez * ez - r * r;
+          const disc = b * b - c;
+          if (disc < 0) return null;
+          const s = Math.sqrt(disc);
+          const t0 = -b - s;
+          if (t0 > 0.12) return t0;
+          const t1 = -b + s;
+          return t1 > 0.12 ? t1 : null;
+        }
+
+        function rayWall(ox, oz, dx, dz) {
+          let best = 40;
+          let hit = "void";
+          function test(t, kind) {
+            if (t > 0.08 && t < best) { best = t; hit = kind; }
+          }
+          if (Math.abs(dx) > 1e-5) {
+            test((WALLS.x0 - ox) / dx, "wall");
+            test((WALLS.x1 - ox) / dx, "wall");
+          }
+          if (Math.abs(dz) > 1e-5) {
+            test((WALLS.z0 - oz) / dz, "wall");
+            test((WALLS.z1 - oz) / dz, "wall");
+          }
+          return { t: best, hit };
+        }
+
+        function reflect(dx, dz, angle) {
+          const nx = Math.cos(angle);
+          const nz = Math.sin(angle);
+          const dot = dx * nx + dz * nz;
+          return { dx: dx - 2 * dot * nx, dz: dz - 2 * dot * nz };
+        }
+
+        function traceBeam() {
+          let x = SRC.x + 0.35;
+          let y = SRC.y;
+          let z = SRC.z;
+          let dx = 1;
+          let dz = 0;
+          const points = [{ x: SRC.x, y, z: SRC.z }, { x, y, z }];
+          const used = new Set();
+          let hit = "wall";
+          let links = 0;
+          for (let bounce = 0; bounce < 8; bounce += 1) {
+            const len = Math.hypot(dx, dz) || 1;
+            dx /= len;
+            dz /= len;
+            let bestT = 36;
+            let bestKind = "void";
+            let bestIndex = -1;
+            state.prisms.forEach((prism, index) => {
+              if (used.has(index)) return;
+              const t = raySphere(x, y, z, dx, 0, dz, prism.x, prism.y, prism.z, PRISM_R);
+              if (t != null && t < bestT) {
+                bestT = t;
+                bestKind = "prism";
+                bestIndex = index;
+              }
+            });
+            const coreT = raySphere(x, y, z, dx, 0, dz, CORE.x, CORE.y, CORE.z, CORE_R);
+            if (coreT != null && coreT < bestT) {
+              bestT = coreT;
+              bestKind = "core";
+              bestIndex = -1;
+            }
+            RIFTS.forEach((rift, index) => {
+              const t = raySphere(x, y, z, dx, 0, dz, rift.x, rift.y, rift.z, RIFT_R);
+              if (t != null && t < bestT) {
+                bestT = t;
+                bestKind = "rift";
+                bestIndex = index;
+              }
+            });
+            const wall = rayWall(x, z, dx, dz);
+            if (wall.t < bestT) {
+              bestT = wall.t;
+              bestKind = wall.hit;
+              bestIndex = -1;
+            }
+            x += dx * bestT;
+            z += dz * bestT;
+            points.push({ x, y, z });
+            hit = bestKind;
+            if (bestKind === "prism") {
+              used.add(bestIndex);
+              links += 1;
+              const bounced = reflect(dx, dz, state.prisms[bestIndex].angle);
+              dx = bounced.dx;
+              dz = bounced.dz;
+              x += dx * 0.14;
+              z += dz * 0.14;
+              continue;
+            }
+            break;
+          }
+          return { points, hit, links };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(5, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const a = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * 3.4,
+              vy: 1.8 + Math.sin(a * 2),
+              vz: Math.sin(a) * 3.4,
+              life: 0.45 + (index % 3) * 0.1,
+              kind,
+              size: 0.07,
+            });
+          }
+          if (state.particles.length > 56) state.particles.splice(0, state.particles.length - 56);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "turn") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(520, now + 0.05);
+              gain.gain.setValueAtTime(0.025, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+              osc.start(now); osc.stop(now + 0.08);
+            } else if (kind === "leak") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(60, now + 0.14);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "clear") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(1040, now + 0.22);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else if (kind === "boom") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(32, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.leaks = 0;
+          state.links = 0;
+          state.connected = false;
+          state.selected = 0;
+          state.prisms = makePrisms();
+          state.beam = traceBeam();
+          state.particles = [];
+          state.leakWait = 5.7;
+          state.pulse = 0;
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          input.dragging = false;
+          input.grab = -1;
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.62;
+          playSfx("boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function registerLeak() {
+          if (state.mode !== "running") return;
+          state.leaks += 1;
+          state.flash = 0.55;
+          state.message = `누출 ${state.leaks}/${MAX_LEAK}`;
+          state.messageTime = 0.95;
+          const last = state.beam.points[state.beam.points.length - 1];
+          if (last) burst(last.x, last.y, last.z, 16, "leak");
+          playSfx("leak");
+          if (state.leaks >= MAX_LEAK) failStage("leak_limit");
+        }
+
+        function pickPrism(clientX, clientY) {
+          let best = -1;
+          let bestD = 72;
+          const rect = glCanvas.getBoundingClientRect();
+          state.prisms.forEach((prism, index) => {
+            const p = projectToScreen(prism.x, prism.y, prism.z);
+            const dist = Math.hypot(p.x - (clientX - rect.left), p.y - (clientY - rect.top));
+            if (dist < bestD) { bestD = dist; best = index; }
+          });
+          return bestD < 72 ? best : -1;
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.2);
+          state.shake = Math.max(0, state.shake - dt * 2.4);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.pulse += dt;
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 2.2 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+          if (state.mode !== "running") {
+            state.beam = traceBeam();
+            return;
+          }
+          state.elapsed += dt;
+          const turn = 1.35 * dt;
+          if (input.left) state.prisms[state.selected].angle -= turn;
+          if (input.right) state.prisms[state.selected].angle += turn;
+          state.beam = traceBeam();
+          state.links = state.beam.links;
+          if (state.beam.hit === "core" && !state.connected) {
+            state.connected = true;
+            state.flash = 0.8;
+            burst(CORE.x, CORE.y, CORE.z, 28, "core");
+            clearStage();
+            return;
+          }
+          const params = difficultyAt(state.elapsed);
+          if (state.elapsed >= 5.55) {
+            state.leakWait -= dt;
+            if (state.leakWait <= 0) {
+              state.leakWait = params.leakEvery;
+              if (state.beam.hit === "rift" || state.beam.hit === "void") registerLeak();
+            }
+          }
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `연결 ${state.links} / 4 · 누출 ${state.leaks} / ${MAX_LEAK}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 누출 ${state.leaks}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x140818, 1);
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x140818);
+          scene.fog = new THREE.Fog(0x140818, 12, 42);
+          const camera = new THREE.PerspectiveCamera(46, VIEW_W / VIEW_H, 0.1, 90);
+          camera.position.set(13.4, 11.6, 13.8);
+          camera.lookAt(0.4, 1.1, -0.4);
+          scene.add(new THREE.AmbientLight(0x3a1840, 0.5));
+          scene.add(new THREE.HemisphereLight(0xff8ad8, 0x180818, 0.42));
+          const dir = new THREE.DirectionalLight(0xffe8fb, 0.48);
+          dir.position.set(6, 14, 8);
+          scene.add(dir);
+          const beamLamp = new THREE.PointLight(0xff6ad5, 1.2, 22);
+          beamLamp.position.set(SRC.x, 2.4, SRC.z);
+          scene.add(beamLamp);
+          const coreLamp = new THREE.PointLight(0x7af0ff, 1.05, 16);
+          coreLamp.position.set(CORE.x, 2.2, CORE.z);
+          scene.add(coreLamp);
+
+          const floor = new THREE.Mesh(
+            new THREE.PlaneGeometry(24, 20),
+            new THREE.MeshStandardMaterial({ color: 0x1c0c22, roughness: 0.9, metalness: 0.08, emissive: 0x120814, emissiveIntensity: 0.4 })
+          );
+          floor.rotation.x = -Math.PI / 2;
+          scene.add(floor);
+          const tileGeo = new THREE.BoxGeometry(1.6, 0.04, 1.6);
+          const tileMat = new THREE.MeshStandardMaterial({ color: 0x241028, roughness: 0.7, metalness: 0.12 });
+          for (let gx = -4; gx <= 4; gx += 1) {
+            for (let gz = -3; gz <= 3; gz += 1) {
+              if ((gx + gz) % 2 === 0) continue;
+              const tile = new THREE.Mesh(tileGeo, tileMat);
+              tile.position.set(gx * 1.7, 0.02, gz * 1.7);
+              scene.add(tile);
+            }
+          }
+          const colGeo = new THREE.CylinderGeometry(0.32, 0.4, 4.4, 8);
+          const colMat = new THREE.MeshStandardMaterial({ color: 0x3a2048, roughness: 0.62, metalness: 0.18, emissive: 0x220818, emissiveIntensity: 0.25 });
+          [[-9.2, -7.4], [9.2, -7.4], [-9.2, 7.4], [9.2, 7.4], [-9.2, 0], [9.2, 0]].forEach((pos) => {
+            const col = new THREE.Mesh(colGeo, colMat);
+            col.position.set(pos[0], 2.2, pos[1]);
+            scene.add(col);
+          });
+          const wallMat = new THREE.MeshStandardMaterial({ color: 0x2a1434, roughness: 0.86, metalness: 0.06 });
+          const back = new THREE.Mesh(new THREE.BoxGeometry(22, 5.2, 0.4), wallMat);
+          back.position.set(0, 2.4, -9.1);
+          scene.add(back);
+          const srcMat = new THREE.MeshStandardMaterial({ color: 0xff6ad5, roughness: 0.25, metalness: 0.45, emissive: 0xff6ad5, emissiveIntensity: 0.9 });
+          const source = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.42, 0.7, 8), srcMat);
+          source.rotation.z = Math.PI / 2;
+          source.position.set(SRC.x, SRC.y, SRC.z);
+          scene.add(source);
+
+          const prismGeo = new THREE.CylinderGeometry(0.85, 0.85, 1.5, 3);
+          const prismMats = [
+            new THREE.MeshStandardMaterial({ color: 0xff6ad5, roughness: 0.22, metalness: 0.55, emissive: 0xff6ad5, emissiveIntensity: 0.45, transparent: true, opacity: 0.86 }),
+            new THREE.MeshStandardMaterial({ color: 0x7af0ff, roughness: 0.22, metalness: 0.55, emissive: 0x3ad0ff, emissiveIntensity: 0.4, transparent: true, opacity: 0.86 }),
+            new THREE.MeshStandardMaterial({ color: 0xffd36a, roughness: 0.22, metalness: 0.55, emissive: 0xffb020, emissiveIntensity: 0.4, transparent: true, opacity: 0.86 }),
+            new THREE.MeshStandardMaterial({ color: 0xc08cff, roughness: 0.22, metalness: 0.55, emissive: 0x8040ff, emissiveIntensity: 0.45, transparent: true, opacity: 0.86 }),
+          ];
+          const prismMeshes = prismMats.map((mat) => {
+            const mesh = new THREE.Mesh(prismGeo, mat);
+            scene.add(mesh);
+            return mesh;
+          });
+          const core = new THREE.Mesh(
+            new THREE.OctahedronGeometry(0.85, 0),
+            new THREE.MeshStandardMaterial({ color: 0x7af0ff, roughness: 0.18, metalness: 0.6, emissive: 0x7af0ff, emissiveIntensity: 0.85 })
+          );
+          core.position.set(CORE.x, CORE.y, CORE.z);
+          scene.add(core);
+          const coreGlow = new THREE.Mesh(
+            new THREE.OctahedronGeometry(1.25, 0),
+            new THREE.MeshBasicMaterial({ color: 0x7af0ff, transparent: true, opacity: 0.18, depthWrite: false, blending: THREE.AdditiveBlending })
+          );
+          coreGlow.position.copy(core.position);
+          scene.add(coreGlow);
+          const riftGeo = new THREE.TorusGeometry(0.85, 0.12, 8, 18);
+          const riftMat = new THREE.MeshBasicMaterial({ color: 0x6a20ff, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending });
+          const riftMeshes = RIFTS.map((rift) => {
+            const mesh = new THREE.Mesh(riftGeo, riftMat);
+            mesh.position.set(rift.x, rift.y, rift.z);
+            mesh.rotation.x = Math.PI / 2;
+            scene.add(mesh);
+            return mesh;
+          });
+          const beamPositions = new Float32Array(20 * 3);
+          const beamGeo = new THREE.BufferGeometry();
+          beamGeo.setAttribute("position", new THREE.BufferAttribute(beamPositions, 3));
+          beamGeo.setDrawRange(0, 0);
+          const beamLine = new THREE.Line(beamGeo, new THREE.LineBasicMaterial({
+            color: 0xff6ad5, transparent: true, opacity: 0.92, blending: THREE.AdditiveBlending,
+          }));
+          scene.add(beamLine);
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({ color: 0xff6ad5, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending });
+          return {
+            renderer, scene, camera, beamLamp, coreLamp, core, coreGlow,
+            prismMeshes, riftMeshes, beamLine, beamPositions, particleGeo, particleMat,
+            particleMeshes: [],
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const pulse = reducedMotion ? 1 : 0.88 + Math.sin(state.pulse * 3.4) * 0.12;
+          state.prisms.forEach((prism, index) => {
+            const mesh = webgl.prismMeshes[index];
+            mesh.position.set(prism.x, prism.y, prism.z);
+            mesh.rotation.y = -prism.angle + Math.PI / 6;
+            const selected = index === state.selected ? 1.12 : 1;
+            mesh.scale.set(selected, 1, selected);
+            mesh.material.emissiveIntensity = (index === state.selected ? 0.75 : 0.4) * pulse;
+          });
+          webgl.core.rotation.y = state.pulse * 0.8;
+          webgl.core.rotation.x = Math.sin(state.pulse) * 0.2;
+          webgl.coreGlow.scale.setScalar(pulse * (state.connected ? 1.6 : 1));
+          webgl.riftMeshes.forEach((mesh, index) => {
+            mesh.rotation.z = state.pulse * (0.6 + index * 0.2);
+            mesh.material.opacity = 0.45 + Math.sin(state.pulse * 2 + index) * 0.2;
+          });
+          const points = state.beam.points;
+          for (let index = 0; index < points.length; index += 1) {
+            webgl.beamPositions[index * 3] = points[index].x;
+            webgl.beamPositions[index * 3 + 1] = points[index].y;
+            webgl.beamPositions[index * 3 + 2] = points[index].z;
+          }
+          webgl.beamLine.geometry.attributes.position.needsUpdate = true;
+          webgl.beamLine.geometry.setDrawRange(0, points.length);
+          webgl.beamLine.material.color.setHex(state.beam.hit === "core" ? 0x7af0ff : state.beam.hit === "rift" || state.beam.hit === "void" ? 0xff6b7a : 0xff6ad5);
+          const last = points[points.length - 1];
+          if (last) webgl.beamLamp.position.set(last.x, 2.2, last.z);
+          webgl.coreLamp.intensity = state.beam.hit === "core" ? 2.2 : 0.9;
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.material.color.setHex(particle.kind === "core" ? 0x7af0ff : 0xff6b7a);
+            mesh.material.opacity = clamp(particle.life * 2, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.18) * 0.15;
+          webgl.camera.position.set(13.4 + sway + shakeX, 11.6 + shakeY, 13.8);
+          webgl.camera.lookAt(0.5, 1.05, -0.2);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.6 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#2a1030");
+          sky.addColorStop(1, "#140818");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#1c0c22";
+          const floor = projectToScreen(0, 0, 0);
+          ctx.beginPath();
+          ctx.ellipse(floor.x, floor.y + 20, 210, 90, -0.4, 0, Math.PI * 2);
+          ctx.fill();
+          RIFTS.forEach((rift) => {
+            const p = projectToScreen(rift.x, rift.y, rift.z);
+            ctx.strokeStyle = "rgba(120,60,255,0.8)";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 16, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = "rgba(90,30,180,0.35)";
+            ctx.fill();
+          });
+          if (state.beam.points.length > 1) {
+            ctx.beginPath();
+            state.beam.points.forEach((point, index) => {
+              const p = projectToScreen(point.x, point.y, point.z);
+              if (index === 0) ctx.moveTo(p.x, p.y);
+              else ctx.lineTo(p.x, p.y);
+            });
+            ctx.strokeStyle = state.beam.hit === "core" ? COLORS.cyan : state.beam.hit === "rift" || state.beam.hit === "void" ? COLORS.danger : COLORS.pink;
+            ctx.lineWidth = 4;
+            ctx.stroke();
+          }
+          state.prisms.forEach((prism, index) => {
+            const p = projectToScreen(prism.x, prism.y, prism.z);
+            ctx.fillStyle = index === 0 ? COLORS.pink : index === 1 ? COLORS.cyan : index === 2 ? COLORS.gold : "#c08cff";
+            ctx.beginPath();
+            for (let k = 0; k < 3; k += 1) {
+              const a = -prism.angle + (k * Math.PI * 2) / 3;
+              const x = p.x + Math.cos(a) * 16;
+              const y = p.y + Math.sin(a) * 10;
+              if (k === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            ctx.fill();
+            if (index === state.selected) {
+              ctx.strokeStyle = "#fff";
+              ctx.lineWidth = 2;
+              ctx.stroke();
+            }
+          });
+          const core = projectToScreen(CORE.x, CORE.y, CORE.z);
+          ctx.fillStyle = COLORS.cyan;
+          ctx.beginPath();
+          ctx.arc(core.x, core.y, 12, 0, Math.PI * 2);
+          ctx.fill();
+          const src = projectToScreen(SRC.x, SRC.y, SRC.z);
+          ctx.fillStyle = COLORS.pink;
+          ctx.fillRect(src.x - 8, src.y - 6, 16, 12);
+          ctx.fillStyle = "rgba(255,232,251,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.links} / 4`;
+          if (meter) meter.style.width = `${(state.links / 4) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `누출 ${state.leaks} / ${MAX_LEAK}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.danger;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 110);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,106,213,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; hall y-up; prisms rotate in XZ",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.links,
+            leaks: state.leaks,
+            hit: state.beam.hit,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            selected: state.selected,
+            angles: state.prisms.map((prism) => Number(prism.angle.toFixed(3))),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            input.ignoreUp = true;
+            return;
+          }
+          input.ignoreUp = false;
+          const picked = pickPrism(event.clientX, event.clientY);
+          if (picked >= 0) {
+            state.selected = picked;
+            input.grab = picked;
+            input.dragging = true;
+            input.lastX = event.clientX;
+            input.pointerId = event.pointerId;
+            safeCapture(stageEl, event.pointerId);
+          }
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || input.grab < 0 || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.lastX;
+          input.lastX = event.clientX;
+          state.prisms[input.grab].angle += dx * 0.012;
+        }
+        function onPointerUp(event) {
+          if (input.ignoreUp) {
+            input.ignoreUp = false;
+            input.dragging = false;
+            input.grab = -1;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          input.dragging = false;
+          input.grab = -1;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.key === "1" || event.key === "2" || event.key === "3" || event.key === "4") {
+            state.selected = Number(event.key) - 1;
+          }
+          if (event.code === "ArrowLeft" || event.code === "KeyA") { event.preventDefault(); input.left = true; }
+          if (event.code === "ArrowRight" || event.code === "KeyD") { event.preventDefault(); input.right = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = false;
+          if (event.code === "ArrowRight" || event.code === "KeyD") input.right = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.prisms[0].angle = Math.PI / 4;
+            state.prisms[1].angle = Math.PI / 4;
+            state.prisms[2].angle = (3 * Math.PI) / 4;
+            state.prisms[3].angle = -Math.PI / 4;
+            state.beam = traceBeam();
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
