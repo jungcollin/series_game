@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>체 보석</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #1a140c; --accent: #ffc46b; --accent-ink: #1a140c; --danger: #ff6b7a; --ink: #fff1d4; --muted: rgba(255,241,212,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">체 보석. 체를 흔들어 모래는 빼고 보석만 남기세요. 드래그로 체 흔들기. 보석 8개를 모으면 클리어. 보석이 4개 떨어지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 드래그해 체를 흔들고 살며시 기울여 주머니에 담습니다.</p>
+    <main class="stage" aria-label="체 보석 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="체 보석" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">보석</p>
+          <p class="hud-value" id="hud-objective">0 / 8</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">유실 0 / 4</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Sieve Gem</p>
+          <h1>체 보석</h1>
+          <p class="brief-lead">체를 흔들어 모래는 빼고 보석만 남기세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 체 흔들기</span></li>
+            <li><strong>클리어</strong><span>보석 8개를 모으면 클리어</span></li>
+            <li><strong>실패</strong><span>보석이 4개 떨어지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">유실</p>
+          <h2>보석이 떨어졌다</h2>
+          <p class="brief-lead" id="fail-detail">보석이 4개 떨어지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">선별 완료</p>
+          <h2>주머니가 가득</h2>
+          <p class="brief-lead">모래를 털고 보석 여덟을 담았습니다.</p>
+          <p class="hud-sub" id="clear-stat">보석 8개를 모으면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const GOAL = 8;
+        const MAX_LOST = 4;
+        const DUMP_SHAKE = 2.15;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "sieve-gem",
+          title: "체 보석",
+          description: "체를 흔들어 모래는 빼고 보석만 남기세요.",
+          creator: "collin",
+          genre: "3D sieving",
+          clearCondition: "보석 8개를 모으면 클리어",
+          failCondition: "보석이 4개 떨어지면 실패",
+          controls: "드래그로 체 흔들기",
+        };
+        const COLORS = {
+          night: "#1a140c",
+          ink: "#fff1d4",
+          accent: "#ffc46b",
+          sand: "#c4a06a",
+          gem: "#5ad0c8",
+          ruby: "#e07070",
+          pouch: "#6a3a28",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          lost_limit: "보석이 모래와 함께 4개 떨어졌습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 1.9, y: 1.7, z: 2.6 },
+          right: { x: 0.82, y: 0, z: -0.57 },
+          up: { x: -0.12, y: 0.97, z: -0.18 },
+          fwd: { x: -0.55, y: -0.22, z: -0.8 },
+          focal: 520,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          pouch: 0,
+          lost: 0,
+          sand: 1,
+          tiltX: 0,
+          tiltZ: 0,
+          shake: 0,
+          gems: [],
+          grains: [],
+          particles: [],
+          spawnLeft: GOAL,
+          flash: 0,
+          camShake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          dumpCool: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, lastX: 0, lastY: 0, vx: 0, vy: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            dump: DUMP_SHAKE - difficulty * 0.18,
+            sandRate: 0.42 + difficulty * 0.12,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const angle = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(0.6, 2.6);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.4, 2.2),
+              vz: Math.sin(angle) * lift,
+              life: randRange(0.25, 0.7),
+              kind,
+              size: randRange(0.03, 0.08),
+            });
+          }
+        }
+
+        function spawnGem() {
+          if (state.spawnLeft <= 0) return;
+          if (state.gems.length >= 4) return;
+          state.spawnLeft -= 1;
+          state.gems.push({
+            x: randRange(-0.28, 0.28),
+            z: randRange(-0.28, 0.28),
+            y: 0.08,
+            vx: 0,
+            vz: 0,
+            hue: random() < 0.5 ? "gem" : "ruby",
+            caught: false,
+            lost: false,
+          });
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "shake") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(90, now);
+              gain.gain.setValueAtTime(0.012, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+              osc.start(now); osc.stop(now + 0.05);
+            } else if (kind === "pouch") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.08);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "lost") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.18);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+              osc.start(now); osc.stop(now + 0.22);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.pouch = 0;
+          state.lost = 0;
+          state.sand = 1;
+          state.tiltX = 0;
+          state.tiltZ = 0;
+          state.shake = 0;
+          state.gems = [];
+          state.grains = [];
+          state.particles = [];
+          state.spawnLeft = GOAL;
+          state.flash = 0;
+          state.camShake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.dumpCool = 0;
+          input.dragging = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          spawnGem();
+          spawnGem();
+          spawnGem();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.camShake = reducedMotion ? 0.16 : 0.55;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function loseGem(gem, reasonKind) {
+          if (gem.lost || gem.caught) return;
+          gem.lost = true;
+          state.lost += 1;
+          burst(gem.x, 0.2, gem.z, 10, reasonKind);
+          playSfx("lost");
+          state.message = `유실 ${state.lost}/${MAX_LOST}`;
+          state.messageTime = 0.8;
+          if (state.lost >= MAX_LOST) failStage("lost_limit");
+        }
+
+        function catchGem(gem) {
+          if (gem.caught || gem.lost) return;
+          gem.caught = true;
+          state.pouch += 1;
+          burst(0.85, 0.15, 0.55, 12, "gem");
+          playSfx("pouch");
+          state.flash = 0.35;
+          state.message = `보석 ${state.pouch}/${GOAL}`;
+          state.messageTime = 0.7;
+          if (state.pouch >= GOAL) clearStage();
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 3.4 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          state.grains.forEach((g) => {
+            g.x += g.vx * dt; g.y += g.vy * dt; g.z += g.vz * dt;
+            g.vy -= 5.5 * dt; g.life -= dt;
+          });
+          state.grains = state.grains.filter((g) => g.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.2);
+          state.camShake = Math.max(0, state.camShake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.dumpCool = Math.max(0, state.dumpCool - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+
+          let shakeIn = Math.hypot(input.vx, input.vy);
+          if (input.left || input.right || input.up || input.down) {
+            const kx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+            const kz = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+            state.tiltX = lerp(state.tiltX, kx * 0.45, clamp(dt * 6, 0, 1));
+            state.tiltZ = lerp(state.tiltZ, kz * 0.45, clamp(dt * 6, 0, 1));
+            shakeIn = Math.max(shakeIn, 0.55);
+          }
+          state.shake = lerp(state.shake, shakeIn, clamp(dt * 10, 0, 1));
+          if (!input.dragging && !input.left && !input.right && !input.up && !input.down) {
+            state.tiltX *= Math.pow(0.12, dt);
+            state.tiltZ *= Math.pow(0.12, dt);
+            input.vx *= 0.85;
+            input.vy *= 0.85;
+          }
+          state.tiltX = clamp(state.tiltX, -0.7, 0.7);
+          state.tiltZ = clamp(state.tiltZ, -0.7, 0.7);
+          const tiltMag = Math.hypot(state.tiltX, state.tiltZ);
+
+          if (state.shake > 0.18 && state.sand > 0) {
+            const fall = state.shake * params.sandRate * dt;
+            state.sand = Math.max(0, state.sand - fall);
+            if (Math.random() < dt * 18 * state.shake) {
+              state.grains.push({
+                x: randRange(-0.3, 0.3), y: 0.05, z: randRange(-0.3, 0.3),
+                vx: randRange(-0.4, 0.4), vy: randRange(-0.2, 0.1), vz: randRange(-0.4, 0.4),
+                life: randRange(0.3, 0.7),
+              });
+            }
+            if (Math.random() < dt * 10) playSfx("shake");
+          }
+
+          if (state.shake > params.dump && state.dumpCool <= 0) {
+            const live = state.gems.find((g) => !g.caught && !g.lost);
+            if (live) {
+              loseGem(live, "sand");
+              state.dumpCool = 0.55;
+              state.camShake = 0.28;
+            }
+          }
+
+          const pour = state.sand < 0.22 && tiltMag > 0.28 && state.shake < 0.55;
+          const violentTilt = tiltMag > 0.58 && state.sand > 0.35;
+
+          state.gems.forEach((gem) => {
+            if (gem.caught || gem.lost) return;
+            gem.vx += (state.tiltX * 2.6 - gem.x * 1.4) * dt;
+            gem.vz += (state.tiltZ * 2.6 - gem.z * 1.4) * dt;
+            gem.vx += (random() - 0.5) * state.shake * 2.2 * dt;
+            gem.vz += (random() - 0.5) * state.shake * 2.2 * dt;
+            gem.vx *= 0.92;
+            gem.vz *= 0.92;
+            gem.x = clamp(gem.x + gem.vx * dt, -0.42, 0.42);
+            gem.z = clamp(gem.z + gem.vz * dt, -0.42, 0.42);
+            gem.y = 0.06 + Math.sin(state.elapsed * 18 + gem.x * 8) * state.shake * 0.04;
+            if (violentTilt) loseGem(gem, "sand");
+            else if (pour && gem.x > 0.18 && gem.z > 0.12) catchGem(gem);
+          });
+          state.gems = state.gems.filter((g) => !g.caught && !g.lost);
+
+          if (state.gems.length < 3 && state.spawnLeft > 0 && state.sand < 0.85) spawnGem();
+          if (state.sand < 0.08 && state.spawnLeft > 0 && state.gems.length === 0) {
+            state.sand = 0.72;
+            spawnGem();
+            spawnGem();
+          }
+
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `보석 ${state.pouch} / ${GOAL} · 유실 ${state.lost} / ${MAX_LOST}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 유실 ${state.lost}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x1a140c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a140c);
+          scene.fog = new THREE.Fog(0x1a140c, 5, 14);
+
+          const camera = new THREE.PerspectiveCamera(42, VIEW_W / VIEW_H, 0.08, 40);
+          camera.position.set(1.95, 1.72, 2.65);
+
+          scene.add(new THREE.AmbientLight(0x4a3820, 0.45));
+          const hemi = new THREE.HemisphereLight(0xffd8a0, 0x2a180c, 0.4);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffe2b0, 0.55);
+          sun.position.set(3, 6, 2);
+          scene.add(sun);
+          const fireLight = new THREE.PointLight(0xff8a3a, 0.95, 8);
+          fireLight.position.set(-1.3, 0.6, 0.8);
+          scene.add(fireLight);
+
+          const dune = new THREE.Mesh(
+            new THREE.CircleGeometry(8, 24),
+            new THREE.MeshStandardMaterial({ color: 0x6a4a28, roughness: 0.95, metalness: 0.04 })
+          );
+          dune.rotation.x = -Math.PI / 2;
+          dune.position.y = -0.35;
+          scene.add(dune);
+          const cloth = new THREE.Mesh(
+            new THREE.BoxGeometry(2.4, 0.06, 1.8),
+            new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.85 })
+          );
+          cloth.position.y = -0.12;
+          scene.add(cloth);
+
+          const brassMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a05a, metalness: 0.65, roughness: 0.32, emissive: 0x3a2a10, emissiveIntensity: 0.12,
+          });
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.8, metalness: 0.08 });
+          const sieve = new THREE.Group();
+          const rim = new THREE.Mesh(new THREE.TorusGeometry(0.55, 0.045, 8, 28), brassMat);
+          rim.rotation.x = Math.PI / 2;
+          sieve.add(rim);
+          const wall = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.55, 0.5, 0.16, 20, 1, true),
+            brassMat
+          );
+          wall.position.y = 0.02;
+          sieve.add(wall);
+          const meshMat = new THREE.MeshStandardMaterial({
+            color: 0x8a7048, metalness: 0.4, roughness: 0.45, wireframe: true,
+          });
+          const grid = new THREE.Mesh(new THREE.CircleGeometry(0.5, 12), meshMat);
+          grid.rotation.x = -Math.PI / 2;
+          grid.position.y = -0.02;
+          sieve.add(grid);
+          const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.04, 0.7, 6), woodMat);
+          handle.rotation.z = Math.PI / 2;
+          handle.position.set(-0.85, 0.04, 0);
+          sieve.add(handle);
+          sieve.position.set(0, 0.55, 0);
+          scene.add(sieve);
+
+          const sandDisk = new THREE.Mesh(
+            new THREE.CircleGeometry(0.46, 16),
+            new THREE.MeshStandardMaterial({ color: 0xc4a06a, roughness: 0.9, metalness: 0.05 })
+          );
+          sandDisk.rotation.x = -Math.PI / 2;
+          sandDisk.position.y = 0.04;
+          sieve.add(sandDisk);
+
+          const pouch = new THREE.Group();
+          const bag = new THREE.Mesh(
+            new THREE.SphereGeometry(0.28, 12, 10, 0, Math.PI * 2, 0, 2.2),
+            new THREE.MeshStandardMaterial({ color: 0x6a3a28, roughness: 0.78 })
+          );
+          pouch.add(bag);
+          const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.03, 6, 12), brassMat);
+          mouth.rotation.x = Math.PI / 2;
+          mouth.position.y = 0.22;
+          pouch.add(mouth);
+          pouch.position.set(0.95, -0.02, 0.55);
+          scene.add(pouch);
+
+          const tent = new THREE.Mesh(
+            new THREE.ConeGeometry(1.4, 1.8, 4),
+            new THREE.MeshStandardMaterial({ color: 0x4a3020, roughness: 0.9 })
+          );
+          tent.position.set(-2.4, 0.55, -1.4);
+          scene.add(tent);
+          const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.9, 6), woodMat);
+          pole.position.set(-2.4, 0.6, -1.4);
+          scene.add(pole);
+
+          const logGeo = new THREE.CylinderGeometry(0.06, 0.07, 0.5, 6);
+          [[-1.35, -0.2, 0.7], [-1.15, -0.2, 0.9], [-1.45, -0.2, 0.95]].forEach((p, i) => {
+            const log = new THREE.Mesh(logGeo, woodMat);
+            log.position.set(p[0], p[1], p[2]);
+            log.rotation.z = 1.2 + i * 0.3;
+            scene.add(log);
+          });
+          const flame = new THREE.Mesh(
+            new THREE.ConeGeometry(0.12, 0.32, 6),
+            new THREE.MeshBasicMaterial({ color: 0xff8a3a, transparent: true, opacity: 0.85 })
+          );
+          flame.position.set(-1.3, 0.12, 0.85);
+          scene.add(flame);
+
+          const crate = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.32, 0.4), woodMat);
+          crate.position.set(1.4, -0.02, -0.55);
+          scene.add(crate);
+          const jar = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.1, 0.12, 0.22, 8),
+            new THREE.MeshStandardMaterial({ color: 0x8a5a32, roughness: 0.55, metalness: 0.1 })
+          );
+          jar.position.set(1.35, 0.22, -0.5);
+          scene.add(jar);
+
+          const gemGeo = new THREE.OctahedronGeometry(0.07, 0);
+          const gemMat = new THREE.MeshStandardMaterial({
+            color: 0x5ad0c8, emissive: 0x146060, emissiveIntensity: 0.6, roughness: 0.22, metalness: 0.45,
+          });
+          const rubyMat = new THREE.MeshStandardMaterial({
+            color: 0xe07070, emissive: 0x601020, emissiveIntensity: 0.55, roughness: 0.22, metalness: 0.45,
+          });
+          const gemMeshes = [];
+          for (let i = 0; i < 6; i += 1) {
+            const mesh = new THREE.Mesh(gemGeo, gemMat.clone());
+            mesh.visible = false;
+            sieve.add(mesh);
+            gemMeshes.push(mesh);
+          }
+
+          const grainGeo = new THREE.SphereGeometry(0.025, 5, 5);
+          const grainMat = new THREE.MeshStandardMaterial({ color: 0xc4a06a, roughness: 0.9 });
+          const particleGeo = new THREE.SphereGeometry(0.04, 6, 6);
+          const sparkMat = new THREE.MeshBasicMaterial({
+            color: 0xffc46b, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          return {
+            renderer, scene, camera, sieve, sandDisk, pouch, flame, fireLight,
+            gemMeshes, gemMat, rubyMat, grainGeo, grainMat, grainMeshes: [],
+            particleGeo, sparkMat, particleMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const jx = reducedMotion ? 0 : Math.sin(state.elapsed * 28) * state.shake * 0.04;
+          const jz = reducedMotion ? 0 : Math.cos(state.elapsed * 24) * state.shake * 0.04;
+          webgl.sieve.position.set(jx, 0.55, jz);
+          webgl.sieve.rotation.z = -state.tiltX * 0.55;
+          webgl.sieve.rotation.x = state.tiltZ * 0.55;
+          webgl.sandDisk.scale.setScalar(0.25 + state.sand * 0.75);
+          webgl.sandDisk.visible = state.sand > 0.04;
+          webgl.flame.scale.y = 0.8 + Math.sin(state.elapsed * 9) * 0.25;
+          webgl.fireLight.intensity = 0.75 + Math.sin(state.elapsed * 7) * 0.2;
+          webgl.pouch.scale.setScalar(1 + state.pouch * 0.035);
+
+          webgl.gemMeshes.forEach((mesh, i) => {
+            const gem = state.gems[i];
+            if (!gem) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(gem.x, gem.y, gem.z);
+            mesh.material.color.setHex(gem.hue === "ruby" ? 0xe07070 : 0x5ad0c8);
+            mesh.rotation.y = state.elapsed * 2 + i;
+          });
+
+          while (webgl.grainMeshes.length < state.grains.length) {
+            const mesh = new THREE.Mesh(webgl.grainGeo, webgl.grainMat);
+            webgl.scene.add(mesh);
+            webgl.grainMeshes.push(mesh);
+          }
+          webgl.grainMeshes.forEach((mesh, i) => {
+            const g = state.grains[i];
+            if (!g) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(g.x + webgl.sieve.position.x, g.y + 0.4, g.z + webgl.sieve.position.z);
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.sparkMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, i) => {
+            const p = state.particles[i];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.04);
+            mesh.material.color.setHex(p.kind === "gem" ? 0x5ad0c8 : 0xffc46b);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.camShake > 0 ? (Math.random() - 0.5) * state.camShake * 0.3 : 0;
+          const shakeY = state.camShake > 0 ? (Math.random() - 0.5) * state.camShake * 0.22 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.3) * 0.05;
+          webgl.camera.position.set(1.95 + sway + shakeX, 1.72 + shakeY, 2.65);
+          webgl.camera.lookAt(0.15, 0.35, 0.1);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = webgl.look.set(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#3a2a18");
+          sky.addColorStop(1, "#1a140c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#6a4a28";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H);
+          const s = projectToScreen(0, 0.55, 0);
+          ctx.strokeStyle = COLORS.accent;
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.ellipse(s.x, s.y, 70, 28, state.tiltX, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = `rgba(196,160,106,${0.25 + state.sand * 0.6})`;
+          ctx.beginPath();
+          ctx.ellipse(s.x, s.y, 58 * (0.3 + state.sand * 0.7), 20, 0, 0, Math.PI * 2);
+          ctx.fill();
+          state.gems.forEach((gem) => {
+            const p = projectToScreen(gem.x, 0.62, gem.z);
+            ctx.fillStyle = gem.hue === "ruby" ? COLORS.ruby : COLORS.gem;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          const pouch = projectToScreen(0.95, 0, 0.55);
+          ctx.fillStyle = COLORS.pouch;
+          ctx.beginPath();
+          ctx.ellipse(pouch.x, pouch.y, 28, 22, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(255,241,212,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.pouch} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.pouch / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const hint = state.sand < 0.22 ? "기울여 담기" : state.shake > 1.4 ? "너무 세게" : "모래 털기";
+            sub.textContent = `유실 ${state.lost} / ${MAX_LOST} · ${hint}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.startsWith("유실") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 112);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,196,107,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; sieve origin; +y up; tilt pours toward pouch +x+z",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.pouch,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            sand: Number(state.sand.toFixed(3)),
+            shake: Number(state.shake.toFixed(3)),
+            lost: state.lost,
+            gems: state.gems.length,
+            tilt: { x: Number(state.tiltX.toFixed(3)), z: Number(state.tiltZ.toFixed(3)) },
+          });
+        }
+
+        function safeCapture(el, id) { try { el.setPointerCapture?.(id); } catch (_e) { /* synthetic */ } }
+        function safeRelease(el, id) { try { el.releasePointerCapture?.(id); } catch (_e) { /* synthetic */ } }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.lastX = event.clientX;
+          input.lastY = event.clientY;
+          input.vx = 0;
+          input.vy = 0;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.lastX;
+          const dy = event.clientY - input.lastY;
+          input.lastX = event.clientX;
+          input.lastY = event.clientY;
+          input.vx = dx * 0.08;
+          input.vy = dy * 0.08;
+          state.tiltX = clamp(state.tiltX + dx * 0.0024, -0.7, 0.7);
+          state.tiltZ = clamp(state.tiltZ + dy * 0.0024, -0.7, 0.7);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) { ignoreUp = false; input.dragging = false; safeRelease(stageEl, event.pointerId); return; }
+          input.dragging = false;
+          input.vx = 0;
+          input.vy = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.pouch = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

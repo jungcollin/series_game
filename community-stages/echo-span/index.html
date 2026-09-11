@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>메아리 다리</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #08141c; --accent: #7ad8ff; --accent-ink: #08141c; --danger: #ff6b7a; --ink: #e6f7ff; --muted: rgba(230,247,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">메아리 다리. 외침으로 얼음 다리를 잠깐 얼려 협곡을 건너세요. 탭으로 외침, 드래그로 이동. 반대편에 도착하면 클리어. 협곡에 떨어지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 드래그로 이동하고 탭으로 외칩니다.</p>
+    <main class="stage" aria-label="메아리 다리 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="메아리 다리" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">거리</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">38.0</p>
+          <p class="hud-sub" id="hud-sub">빙결 대기</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Echo Span</p>
+          <h1>메아리 다리</h1>
+          <p class="brief-lead">외침으로 얼음 다리를 잠깐 얼려 협곡을 건너세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 외침, 드래그로 이동</span></li>
+            <li><strong>클리어</strong><span>반대편에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>협곡에 떨어지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">추락</p>
+          <h2>안개 속으로</h2>
+          <p class="brief-lead" id="fail-detail">협곡에 떨어지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">횡단 완료</p>
+          <h2>반대편 도착</h2>
+          <p class="brief-lead">외침이 얼린 다리로 협곡을 건넜습니다.</p>
+          <p class="hud-sub" id="clear-stat">반대편에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 38;
+        const GOAL_Z = 42;
+        const FREEZE_TIME = 1.4;
+        const SHOUT_CD = 0.38;
+        const PATH_HALF = 1.05;
+        const GAPS = [
+          { z: 11.8, len: 1.62 },
+          { z: 19.6, len: 1.72 },
+          { z: 27.4, len: 1.82 },
+          { z: 35.0, len: 1.92 },
+        ];
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "echo-span",
+          title: "메아리 다리",
+          description: "외침으로 얼음 다리를 잠깐 얼려 협곡을 건너세요.",
+          creator: "collin",
+          genre: "3D echo bridging",
+          clearCondition: "반대편에 도착하면 클리어",
+          failCondition: "협곡에 떨어지면 실패",
+          controls: "탭으로 외침, 드래그로 이동",
+        };
+        const COLORS = {
+          night: "#08141c",
+          ink: "#e6f7ff",
+          accent: "#7ad8ff",
+          ice: "#c8f0ff",
+          rock: "#3a4a52",
+          mist: "#9ad0dc",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          gap_fall: "녹은 안개 다리에서 떨어졌습니다",
+          cliff: "협곡 가장자리에서 미끄러졌습니다",
+          time_limit: "제한 시간 38초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0, y: 3.4, z: -6.2 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.96, z: 0.28 },
+          fwd: { x: 0, y: -0.28, z: 0.96 },
+          focal: 380,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          x: 0,
+          z: 0,
+          y: 0,
+          vx: 0,
+          freeze: 0,
+          shoutCd: 0,
+          shoutFlash: 0,
+          falling: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = {
+          left: false, right: false,
+          dragging: false, downX: 0, downY: 0, nowX: 0, nowY: 0,
+          pointerId: null, downAt: 0, moved: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            speed: 1.62 + difficulty * 0.42,
+          };
+        }
+
+        function gapAt(z) {
+          for (let i = 0; i < GAPS.length; i += 1) {
+            const g = GAPS[i];
+            if (z >= g.z && z <= g.z + g.len) return g;
+          }
+          return null;
+        }
+
+        function upcomingGap(z) {
+          for (let i = 0; i < GAPS.length; i += 1) {
+            if (GAPS[i].z + GAPS[i].len > z) return GAPS[i];
+          }
+          return null;
+        }
+
+        function progress() {
+          return clamp(state.z / GOAL_Z, 0, 1);
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const angle = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(1.2, 4.4);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift * 0.4,
+              vy: randRange(0.8, 3.6),
+              vz: Math.sin(angle) * lift * 0.4,
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.04, 0.11),
+            });
+          }
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "shout") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(220, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.16);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+              osc.start(now); osc.stop(now + 0.22);
+            } else if (kind === "ice") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(740, now);
+              osc.frequency.exponentialRampToValueAtTime(1240, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(110, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function shout() {
+          if (state.mode !== "running" || state.shoutCd > 0 || state.falling > 0) return;
+          state.shoutCd = SHOUT_CD;
+          state.shoutFlash = 0.35;
+          state.freeze = FREEZE_TIME;
+          state.flash = 0.28;
+          state.shake = reducedMotion ? 0.08 : 0.22;
+          const gap = upcomingGap(state.z);
+          const zx = gap ? gap.z + gap.len * 0.5 : state.z + 2;
+          burst(state.x, 1.1, zx, 16, "ice");
+          burst(state.x, 1.4, state.z + 0.4, 8, "echo");
+          playSfx("shout");
+          playSfx("ice");
+          state.message = "빙결";
+          state.messageTime = 0.45;
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.x = 0;
+          state.z = 0;
+          state.y = 0;
+          state.vx = 0;
+          state.freeze = 0;
+          state.shoutCd = 0;
+          state.shoutFlash = 0;
+          state.falling = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          input.dragging = false;
+          input.moved = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.18 : 0.7;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 3.4 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.8);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.shoutFlash = Math.max(0, state.shoutFlash - dt * 3);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          state.freeze = Math.max(0, state.freeze - dt);
+          state.shoutCd = Math.max(0, state.shoutCd - dt);
+
+          let steer = 0;
+          if (input.left) steer -= 1;
+          if (input.right) steer += 1;
+          if (input.dragging) {
+            const rect = stageEl.getBoundingClientRect();
+            const nx = ((input.nowX - rect.left) / rect.width) * 2 - 1;
+            steer += clamp(nx * 1.6, -1.2, 1.2);
+          }
+          state.vx = lerp(state.vx, steer * 3.4, clamp(dt * 8, 0, 1));
+          state.x = clamp(state.x + state.vx * dt, -1.45, 1.45);
+
+          if (state.falling > 0) {
+            state.falling += dt;
+            state.y -= dt * 6.5;
+            if (state.falling > 0.45) failStage(state.failReason || "gap_fall");
+            updateParticles(dt);
+            return;
+          }
+
+          state.z += params.speed * dt;
+          state.y = lerp(state.y, Math.sin(state.elapsed * 10) * 0.03, 0.4);
+
+          if (Math.abs(state.x) > PATH_HALF) {
+            state.falling = 0.01;
+            state.failReason = "cliff";
+            burst(state.x, 0.4, state.z, 12, "rock");
+            return;
+          }
+
+          const gap = gapAt(state.z);
+          if (gap && state.freeze <= 0) {
+            state.falling = 0.01;
+            state.failReason = "gap_fall";
+            burst(state.x, 0.2, state.z, 14, "mist");
+            return;
+          }
+
+          if (state.z >= GOAL_Z) {
+            state.z = GOAL_Z;
+            clearStage();
+            return;
+          }
+
+          if (gap && state.freeze > 0 && Math.random() < dt * 8) {
+            burst(state.x, 0.35, state.z, 1, "ice");
+          }
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `거리 ${Math.round(progress() * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 횡단 완료`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x08141c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x08141c);
+          scene.fog = new THREE.Fog(0x08141c, 8, 28);
+
+          const camera = new THREE.PerspectiveCamera(56, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(0, 3.2, -6);
+
+          scene.add(new THREE.AmbientLight(0x1a3040, 0.5));
+          const hemi = new THREE.HemisphereLight(0x7ad8ff, 0x081018, 0.45);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xc8e8ff, 0.42);
+          sun.position.set(-6, 12, 4);
+          scene.add(sun);
+          const echoLight = new THREE.PointLight(0x7ad8ff, 0.9, 12);
+          echoLight.position.set(0, 2.2, 2);
+          scene.add(echoLight);
+
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x3a4a52, roughness: 0.88, metalness: 0.08 });
+          const iceMat = new THREE.MeshStandardMaterial({
+            color: 0xa8d8e8, roughness: 0.28, metalness: 0.22, emissive: 0x123040, emissiveIntensity: 0.25,
+          });
+          const farMat = new THREE.MeshStandardMaterial({ color: 0x1a2830, roughness: 0.95 });
+
+          const wallGeo = new THREE.BoxGeometry(1.6, 5.5, 8);
+          const leftWalls = [];
+          const rightWalls = [];
+          for (let i = 0; i < 10; i += 1) {
+            const L = new THREE.Mesh(wallGeo, rockMat);
+            const R = new THREE.Mesh(wallGeo, rockMat);
+            scene.add(L); scene.add(R);
+            leftWalls.push(L); rightWalls.push(R);
+          }
+          const farL = new THREE.Mesh(new THREE.BoxGeometry(8, 10, 4), farMat);
+          farL.position.set(-8, 2, 48);
+          scene.add(farL);
+          const farR = farL.clone();
+          farR.position.x = 8;
+          scene.add(farR);
+
+          const pathGeo = new THREE.BoxGeometry(2.2, 0.22, 3.2);
+          const pathChunks = [];
+          for (let i = 0; i < 16; i += 1) {
+            const chunk = new THREE.Mesh(pathGeo, iceMat);
+            scene.add(chunk);
+            pathChunks.push(chunk);
+          }
+
+          const mistGeo = new THREE.PlaneGeometry(2.4, 2.8);
+          const mistMat = new THREE.MeshBasicMaterial({
+            color: 0x9ad0dc, transparent: true, opacity: 0.28, depthWrite: false, side: THREE.DoubleSide,
+          });
+          const mists = GAPS.map((gap) => {
+            const mesh = new THREE.Mesh(mistGeo, mistMat.clone());
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(0, 0.15, gap.z + gap.len * 0.5);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const bridgeGeo = new THREE.BoxGeometry(1.7, 0.08, 1);
+          const bridgeMat = new THREE.MeshStandardMaterial({
+            color: 0xc8f0ff, emissive: 0x3aa0c8, emissiveIntensity: 0.7, roughness: 0.2, metalness: 0.35,
+            transparent: true, opacity: 0.85,
+          });
+          const bridges = GAPS.map(() => {
+            const mesh = new THREE.Mesh(bridgeGeo, bridgeMat.clone());
+            scene.add(mesh);
+            return mesh;
+          });
+          const latticeGeo = new THREE.BoxGeometry(0.05, 0.22, 1);
+          const lattices = [];
+          GAPS.forEach((_, gi) => {
+            const group = new THREE.Group();
+            for (let k = 0; k < 4; k += 1) {
+              const bar = new THREE.Mesh(latticeGeo, bridgeMat);
+              bar.position.x = -0.55 + k * 0.36;
+              group.add(bar);
+            }
+            scene.add(group);
+            lattices.push(group);
+          });
+
+          const runner = new THREE.Group();
+          const body = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.16, 0.2, 0.7, 8),
+            new THREE.MeshStandardMaterial({ color: 0x2a4050, roughness: 0.6, metalness: 0.15 })
+          );
+          body.position.y = 0.55;
+          runner.add(body);
+          const hood = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 10, 10),
+            new THREE.MeshStandardMaterial({ color: 0x3a5868, roughness: 0.5 })
+          );
+          hood.position.set(0, 0.98, 0.02);
+          runner.add(hood);
+          const scarf = new THREE.Mesh(
+            new THREE.BoxGeometry(0.22, 0.08, 0.28),
+            new THREE.MeshStandardMaterial({ color: 0x7ad8ff, emissive: 0x1a6080, emissiveIntensity: 0.4, roughness: 0.45 })
+          );
+          scarf.position.set(0, 0.78, 0.04);
+          runner.add(scarf);
+          scene.add(runner);
+
+          const shoutWave = new THREE.Mesh(
+            new THREE.TorusGeometry(0.4, 0.03, 6, 20),
+            new THREE.MeshBasicMaterial({
+              color: 0x7ad8ff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending,
+            })
+          );
+          shoutWave.rotation.x = Math.PI / 2;
+          scene.add(shoutWave);
+
+          const pinnacleGeo = new THREE.ConeGeometry(0.55, 2.2, 5);
+          const pins = [];
+          for (let i = 0; i < 12; i += 1) {
+            const pin = new THREE.Mesh(pinnacleGeo, rockMat);
+            scene.add(pin);
+            pins.push(pin);
+          }
+
+          const farGoal = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.9, 1.1, 0.3, 8),
+            new THREE.MeshStandardMaterial({ color: 0x7ad8ff, emissive: 0x2a80a8, emissiveIntensity: 0.6, roughness: 0.35 })
+          );
+          farGoal.position.set(0, 0.2, GOAL_Z + 0.6);
+          scene.add(farGoal);
+          const cairn = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), iceMat);
+          cairn.position.set(0, 0.7, GOAL_Z + 0.6);
+          scene.add(cairn);
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const iceP = new THREE.MeshBasicMaterial({
+            color: 0xc8f0ff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+          const mistP = new THREE.MeshBasicMaterial({
+            color: 0x9ad0dc, transparent: true, opacity: 0.7, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, runner, shoutWave, echoLight,
+            leftWalls, rightWalls, pathChunks, mists, bridges, lattices, pins,
+            particleGeo, iceP, mistP, particleMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function isGapRange(z0, z1) {
+          return GAPS.some((g) => z1 > g.z && z0 < g.z + g.len);
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.runner.position.set(state.x, 0.12 + state.y, state.z);
+          webgl.runner.rotation.z = -state.vx * 0.08;
+          webgl.shoutWave.position.set(state.x, 1.1, state.z + 0.4);
+          webgl.shoutWave.scale.setScalar(1 + state.shoutFlash * 8);
+          webgl.shoutWave.material.opacity = state.shoutFlash * 0.7;
+          webgl.echoLight.position.set(state.x, 2.1, state.z + 1.2);
+          webgl.echoLight.intensity = 0.5 + state.freeze * 0.7 + state.shoutFlash * 1.4;
+
+          webgl.pathChunks.forEach((chunk, i) => {
+            const z = Math.floor(state.z / 3.2) * 3.2 + (i - 4) * 3.2;
+            const gapped = isGapRange(z - 1.5, z + 1.5);
+            chunk.visible = !gapped && z > -6 && z < GOAL_Z + 4;
+            chunk.position.set(0, -0.08, z);
+          });
+          webgl.leftWalls.forEach((mesh, i) => {
+            const z = Math.floor(state.z / 7) * 7 + (i - 3) * 7;
+            mesh.position.set(-2.35, 1.6, z);
+            mesh.rotation.y = Math.sin(z * 0.2) * 0.08;
+          });
+          webgl.rightWalls.forEach((mesh, i) => {
+            const z = Math.floor(state.z / 7) * 7 + (i - 3) * 7 + 2.2;
+            mesh.position.set(2.35, 1.5, z);
+            mesh.rotation.y = Math.sin(z * 0.17) * 0.08;
+          });
+          webgl.pins.forEach((pin, i) => {
+            const side = i % 2 === 0 ? -1 : 1;
+            const z = Math.floor(state.z / 6) * 6 + (i - 4) * 5.5;
+            pin.position.set(side * (2.9 + (i % 3) * 0.2), 1.4, z);
+          });
+          GAPS.forEach((gap, i) => {
+            const mid = gap.z + gap.len * 0.5;
+            const frozen = state.freeze > 0;
+            webgl.mists[i].position.z = mid;
+            webgl.mists[i].material.opacity = frozen ? 0.08 : 0.32;
+            webgl.mists[i].scale.set(1, frozen ? 0.4 : 1 + Math.sin(state.elapsed * 2 + i) * 0.12, 1);
+            webgl.bridges[i].visible = frozen;
+            webgl.bridges[i].position.set(0, 0.02, mid);
+            webgl.bridges[i].scale.set(1, 1, gap.len);
+            webgl.bridges[i].material.opacity = clamp(state.freeze / FREEZE_TIME, 0, 1) * 0.9;
+            webgl.lattices[i].visible = frozen;
+            webgl.lattices[i].position.set(0, 0.12, mid);
+            webgl.lattices[i].scale.set(1, 1, gap.len);
+          });
+
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.iceP.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, i) => {
+            const p = state.particles[i];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.05);
+            mesh.material.color.setHex(p.kind === "rock" ? 0x3a4a52 : p.kind === "mist" ? 0x9ad0dc : 0xc8f0ff);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 1.6) * 0.05;
+          webgl.camera.position.set(state.x * 0.35 + shakeX, 2.85 + shakeY, state.z - 6.2);
+          webgl.camera.lookAt(state.x * 0.2, 0.7 + sway, state.z + 4.5);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = webgl.look.set(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const relz = z - state.z;
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = relz - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#102838");
+          sky.addColorStop(1, "#08141c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#1a2830";
+          ctx.fillRect(0, VIEW_H * 0.55, VIEW_W * 0.28, VIEW_H);
+          ctx.fillRect(VIEW_W * 0.72, VIEW_H * 0.52, VIEW_W * 0.28, VIEW_H);
+          GAPS.forEach((gap) => {
+            const a = projectToScreen(-1, 0, gap.z);
+            const b = projectToScreen(1, 0, gap.z + gap.len);
+            ctx.fillStyle = state.freeze > 0 ? "rgba(200,240,255,0.7)" : "rgba(20,40,50,0.9)";
+            ctx.fillRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x) + 40, 18);
+          });
+          const p = projectToScreen(state.x, 0.6 + state.y, state.z);
+          ctx.fillStyle = COLORS.accent;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
+          ctx.fill();
+          if (state.shoutFlash > 0) {
+            ctx.strokeStyle = `rgba(122,216,255,${state.shoutFlash})`;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 18 + state.shoutFlash * 40, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          state.particles.forEach((pt) => {
+            const s = projectToScreen(pt.x, pt.y, pt.z);
+            ctx.globalAlpha = clamp(pt.life * 1.5, 0, 1);
+            ctx.fillStyle = COLORS.ice;
+            ctx.fillRect(s.x, s.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(230,247,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(progress() * 100)}%`;
+          if (meter) meter.style.width = `${progress() * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            if (state.freeze > 0) sub.textContent = `빙결 ${state.freeze.toFixed(1)}s`;
+            else {
+              const gap = upcomingGap(state.z);
+              const dist = gap ? Math.max(0, gap.z - state.z) : 0;
+              sub.textContent = gap && dist < 6 ? `틈 ${dist.toFixed(1)}m · 외침` : "빙결 대기";
+            }
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.freeze > 0) {
+            hud.fillStyle = `rgba(122,216,255,${state.freeze * 0.08})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 114);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(122,216,255,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const gap = gapAt(state.z);
+          return JSON.stringify({
+            coordinate_system: "world units; canyon +z forward; +y up; player on rim path",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: Number(progress().toFixed(3)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            player: { x: Number(state.x.toFixed(2)), z: Number(state.z.toFixed(2)), y: Number(state.y.toFixed(2)) },
+            freeze: Number(state.freeze.toFixed(2)),
+            inGap: Boolean(gap),
+            falling: state.falling,
+          });
+        }
+
+        function safeCapture(el, id) { try { el.setPointerCapture?.(id); } catch (_e) { /* synthetic */ } }
+        function safeRelease(el, id) { try { el.releasePointerCapture?.(id); } catch (_e) { /* synthetic */ } }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.nowX = event.clientX;
+          input.nowY = event.clientY;
+          input.downAt = performance.now();
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          input.nowX = event.clientX;
+          input.nowY = event.clientY;
+          if (Math.hypot(event.clientX - input.downX, event.clientY - input.downY) > 10) input.moved = true;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) { ignoreUp = false; input.dragging = false; safeRelease(stageEl, event.pointerId); return; }
+          const tap = !input.moved && performance.now() - input.downAt < 280;
+          input.dragging = false;
+          input.moved = false;
+          safeRelease(stageEl, event.pointerId);
+          if (tap && state.mode === "running") shout();
+        }
+        const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right" };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            shout();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.z = GOAL_Z;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

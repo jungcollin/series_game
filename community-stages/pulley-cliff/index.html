@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>도르래 절벽</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #14180c; --accent: #c45c32; --accent-ink: #14180c; --danger: #ff6b7a; --ink: #fff1d4; --muted: rgba(255,241,212,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">도르래 절벽. 도르래를 바꿔 가며 절벽 위로 몸을 끌어올리세요. 홀드로 끌어올리기, 탭으로 도르래 전환. 절벽 정상에 도착하면 클리어. 줄이 느슨해져 떨어지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 길게 눌러 끌어올리고 짧게 탭해 줄을 바꿉니다.</p>
+    <main class="stage" aria-label="도르래 절벽 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="도르래 절벽" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">고도</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">38.0</p>
+          <p class="hud-sub" id="hud-sub">장력 안정</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Pulley Cliff</p>
+          <h1>도르래 절벽</h1>
+          <p class="brief-lead">도르래를 바꿔 가며 절벽 위로 몸을 끌어올리세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>홀드로 끌어올리기, 탭으로 도르래 전환</span></li>
+            <li><strong>클리어</strong><span>절벽 정상에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>줄이 느슨해져 떨어지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">하강 실패</p>
+          <h2>줄이 풀렸다</h2>
+          <p class="brief-lead" id="fail-detail">줄이 느슨해져 떨어지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">정상 도착</p>
+          <h2>절벽을 넘었다</h2>
+          <p class="brief-lead">도르래를 바꿔 가며 정상에 올랐습니다.</p>
+          <p class="hud-sub" id="clear-stat">절벽 정상에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 38;
+        const TOP_Y = 18.4;
+        const START_Y = 1.2;
+        const LINE_X = [-2.15, 0, 2.15];
+        const GRACE = 5.15;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "pulley-cliff",
+          title: "도르래 절벽",
+          description: "도르래를 바꿔 가며 절벽 위로 몸을 끌어올리세요.",
+          creator: "collin",
+          genre: "3D pulley haul",
+          clearCondition: "절벽 정상에 도착하면 클리어",
+          failCondition: "줄이 느슨해져 떨어지면 실패",
+          controls: "홀드로 끌어올리기, 탭으로 도르래 전환",
+        };
+        const COLORS = {
+          night: "#14180c",
+          ink: "#fff1d4",
+          rust: "#c45c32",
+          moss: "#6a8a3a",
+          rope: "#d8b070",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          slack: "줄이 느슨해져 떨어졌습니다",
+          snap: "줄이 끊어져 추락했습니다",
+          time_limit: "제한 시간 38초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const GUSTS = [8.4, 16.2, 24.8, 31.5];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          idle: 0,
+          lastRunTime: 0,
+          y: START_Y,
+          line: 1,
+          targetX: LINE_X[1],
+          x: LINE_X[1],
+          fatigue: [0.08, 0.12, 0.06],
+          slack: 0.12,
+          hauling: false,
+          gust: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          wheel: [0, 0, 0],
+        };
+        const input = {
+          haul: false, dragging: false, holdTime: 0, downX: 0, downY: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            haul: 1.55 + difficulty * 0.35,
+            fatigueRate: 0.22 + difficulty * 0.18,
+            recover: 0.16 + difficulty * 0.02,
+            slackRate: 0.14 + difficulty * 0.12,
+            gustKick: 0.18 + difficulty * 0.1,
+          };
+        }
+
+        function burst(x, y, z, count, color) {
+          const amount = reducedMotion ? Math.min(5, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.6, 2.8),
+              vy: randRange(0.4, 3.4),
+              vz: Math.sin(a) * randRange(0.4, 2.2),
+              life: randRange(0.28, 0.7),
+              color: color || 0xc45c32,
+            });
+          }
+          if (state.particles.length > 64) state.particles.splice(0, state.particles.length - 64);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination);
+            if (kind === "haul") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.07);
+              gain.gain.setValueAtTime(0.028, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+              osc.start(now); osc.stop(now + 0.09);
+            } else if (kind === "switch") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(540, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "gust") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.18);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+              osc.start(now); osc.stop(now + 0.21);
+            } else if (kind === "warn") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.1);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "win") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.24);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(64, now);
+              osc.frequency.exponentialRampToValueAtTime(26, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.y = START_Y;
+          state.line = 1;
+          state.targetX = LINE_X[1];
+          state.x = LINE_X[1];
+          state.fatigue = [0.08, 0.12, 0.06];
+          state.slack = 0.12;
+          state.hauling = false;
+          state.gust = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.wheel = [0, 0, 0];
+          input.haul = false;
+          input.holdTime = 0;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          resumeAudio();
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          state.flash = 0.6;
+          window.relayStageResult.status = "cleared";
+          playSfx("win");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          state.shake = reducedMotion ? 0.12 : 0.72;
+          state.flash = 0.7;
+          window.relayStageResult.status = "failed";
+          burst(state.x, state.y, 0.4, 22, 0xff6b7a);
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function switchLine() {
+          if (state.mode !== "running") return;
+          state.line = (state.line + 1) % 3;
+          state.targetX = LINE_X[state.line];
+          state.slack = clamp(state.slack - 0.08, 0, 1);
+          state.message = `도르래 ${state.line + 1}`;
+          state.messageTime = 0.55;
+          playSfx("switch");
+          burst(state.x, state.y + 0.4, 0.2, 8, 0xd8b070);
+        }
+
+        function tension() {
+          return clamp(1 - state.slack, 0, 1);
+        }
+
+        function update(dt) {
+          state.idle += dt;
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.8);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.gust = Math.max(0, state.gust - dt);
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 5.2 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          if (state.mode !== "running") return;
+
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          if (input.dragging) input.holdTime += dt;
+          state.hauling = input.haul || (input.dragging && input.holdTime > 0.16);
+
+          GUSTS.forEach((at) => {
+            if (state.elapsed >= at && state.elapsed - dt < at) {
+              state.gust = 1.15;
+              state.slack = clamp(state.slack + params.gustKick, 0, 1);
+              state.shake = reducedMotion ? 0.08 : 0.38;
+              state.message = "돌풍!";
+              state.messageTime = 0.8;
+              playSfx("gust");
+              burst(state.x, state.y + 1.2, 0.6, 12, 0xfff1d4);
+            }
+          });
+
+          for (let i = 0; i < 3; i += 1) {
+            if (i === state.line && state.hauling) {
+              state.fatigue[i] = clamp(state.fatigue[i] + params.fatigueRate * dt, 0, 1);
+              state.wheel[i] += dt * 8;
+            } else {
+              state.fatigue[i] = clamp(state.fatigue[i] - params.recover * dt, 0, 1);
+            }
+          }
+
+          if (state.hauling) {
+            const tired = state.fatigue[state.line];
+            const lift = params.haul * (1 - tired * 0.55) * dt;
+            state.y += lift;
+            state.slack = clamp(state.slack - 0.42 * dt, 0, 1);
+            if (Math.floor(state.elapsed * 7) !== Math.floor((state.elapsed - dt) * 7)) playSfx("haul");
+          } else if (state.elapsed > GRACE) {
+            state.slack = clamp(state.slack + params.slackRate * dt, 0, 1);
+            state.y -= state.slack * 0.55 * dt;
+          }
+          state.y = clamp(state.y, 0.4, TOP_Y + 0.2);
+          state.x = lerp(state.x, state.targetX, 1 - Math.pow(0.04, dt));
+
+          if (state.fatigue[state.line] > 0.78 && Math.floor(state.elapsed * 3) !== Math.floor((state.elapsed - dt) * 3)) {
+            state.message = "줄이 닳는다";
+            state.messageTime = 0.45;
+            playSfx("warn");
+          }
+
+          if (state.elapsed > GRACE && state.fatigue[state.line] >= 1) {
+            failStage("snap");
+            return;
+          }
+          if (state.elapsed > GRACE && state.slack >= 1) {
+            failStage("slack");
+            return;
+          }
+          if (state.y >= TOP_Y) {
+            state.y = TOP_Y;
+            clearStage();
+            return;
+          }
+          if (state.elapsed >= DURATION) failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function climbPct() {
+          return clamp((state.y - START_Y) / (TOP_Y - START_Y), 0, 1);
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 고도 ${Math.round(climbPct() * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · ${META.clearCondition}`;
+          }
+        }
+
+        function probeWebGL() {
+          if (typeof THREE === "undefined") return false;
+          try {
+            const probe = document.createElement("canvas");
+            const gl = probe.getContext("webgl") || probe.getContext("experimental-webgl");
+            if (!gl) return false;
+            gl.getExtension("WEBGL_lose_context")?.loseContext();
+            return true;
+          } catch (_error) { return false; }
+        }
+
+        function setupThree() {
+          if (!probeWebGL()) return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.shadowMap.enabled = false;
+          renderer.setClearColor(0x14180c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x14180c);
+          scene.fog = new THREE.Fog(0x14180c, 10, 38);
+
+          const camera = new THREE.PerspectiveCamera(56, VIEW_W / VIEW_H, 0.1, 90);
+          camera.position.set(7.4, 6.2, 11.5);
+
+          scene.add(new THREE.AmbientLight(0x4a5830, 0.48));
+          const hemi = new THREE.HemisphereLight(0xffe2b0, 0x243018, 0.42);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffe8c0, 0.78);
+          sun.position.set(8, 16, 10);
+          scene.add(sun);
+          const rustLight = new THREE.PointLight(0xc45c32, 1.05, 18);
+          rustLight.position.set(0, 8, 3);
+          scene.add(rustLight);
+
+          const geos = {
+            box: new THREE.BoxGeometry(1, 1, 1),
+            sphere: new THREE.SphereGeometry(1, 12, 10),
+            sphereLo: new THREE.SphereGeometry(1, 8, 6),
+            cyl: new THREE.CylinderGeometry(1, 1, 1, 12),
+            cone: new THREE.ConeGeometry(1, 1, 8),
+            torus: new THREE.TorusGeometry(1, 0.18, 8, 16),
+          };
+          const mats = {
+            rock: new THREE.MeshStandardMaterial({ color: 0x6a7048, roughness: 0.92, metalness: 0.06 }),
+            moss: new THREE.MeshStandardMaterial({ color: 0x4a6a28, roughness: 0.88, metalness: 0.04 }),
+            rust: new THREE.MeshStandardMaterial({ color: 0xc45c32, roughness: 0.42, metalness: 0.55 }),
+            rope: new THREE.MeshStandardMaterial({ color: 0xd8b070, roughness: 0.7, metalness: 0.12 }),
+            wood: new THREE.MeshStandardMaterial({ color: 0x6a4022, roughness: 0.84, metalness: 0.05 }),
+            coat: new THREE.MeshStandardMaterial({ color: 0x3a2a1c, roughness: 0.72, metalness: 0.08 }),
+            cloth: new THREE.MeshStandardMaterial({ color: 0xc45c32, roughness: 0.55, metalness: 0.1 }),
+            spark: new THREE.MeshBasicMaterial({ color: 0xc45c32, transparent: true, opacity: 1, depthWrite: false }),
+          };
+
+          const cliff = new THREE.Group();
+          for (let i = 0; i < 14; i += 1) {
+            const block = new THREE.Mesh(geos.box, i % 3 === 0 ? mats.moss : mats.rock);
+            block.position.set(-4.2 + (i % 2) * 0.55, 1.2 + i * 1.35, -1.4 - (i % 3) * 0.2);
+            block.scale.set(5.6 + (i % 4) * 0.4, 1.5, 3.2 + (i % 2) * 0.6);
+            block.rotation.y = (i % 5) * 0.04;
+            cliff.add(block);
+          }
+          scene.add(cliff);
+          const ground = new THREE.Mesh(geos.box, mats.moss);
+          ground.position.set(0, -0.6, 2);
+          ground.scale.set(16, 0.6, 12);
+          scene.add(ground);
+          const summit = new THREE.Mesh(geos.box, mats.rock);
+          summit.position.set(0, 19.1, -0.8);
+          summit.scale.set(8.4, 0.7, 4.2);
+          scene.add(summit);
+          const flagPole = new THREE.Mesh(geos.cyl, mats.wood);
+          flagPole.position.set(2.8, 20.6, -0.4);
+          flagPole.scale.set(0.06, 2.4, 0.06);
+          scene.add(flagPole);
+          const flag = new THREE.Mesh(geos.box, mats.cloth);
+          flag.position.set(3.35, 21.4, -0.4);
+          flag.scale.set(1.1, 0.55, 0.05);
+          scene.add(flag);
+
+          const cragMats = [mats.rock, mats.moss];
+          for (let i = 0; i < 9; i += 1) {
+            const shard = new THREE.Mesh(geos.cone, cragMats[i % 2]);
+            shard.position.set(-2.4 + (i % 3) * 2.3, 3.4 + i * 1.55, -2.6);
+            shard.scale.set(0.55 + (i % 2) * 0.2, 1.1, 0.55);
+            shard.rotation.z = (i % 2 ? -0.2 : 0.15);
+            scene.add(shard);
+          }
+          const nest = new THREE.Mesh(geos.cyl, mats.wood);
+          nest.position.set(-3.4, 16.4, -0.2);
+          nest.scale.set(0.45, 0.18, 0.45);
+          scene.add(nest);
+          const pines = [];
+          [[-6.5, 1.4, 3.2], [6.8, 1.6, 2.4], [-7.2, 8.4, -2.2], [5.6, 12.2, -1.8], [4.2, 6.4, 3.6]].forEach((row) => {
+            const trunk = new THREE.Mesh(geos.cyl, mats.wood);
+            trunk.position.set(row[0], row[1], row[2]);
+            trunk.scale.set(0.16, 2.2, 0.16);
+            scene.add(trunk);
+            const crown = new THREE.Mesh(geos.cone, mats.moss);
+            crown.position.set(row[0], row[1] + 1.6, row[2]);
+            crown.scale.set(0.9, 2.1, 0.9);
+            scene.add(crown);
+            pines.push(crown);
+          });
+
+          const wheels = [];
+          const ropes = [];
+          LINE_X.forEach((x, index) => {
+            const arm = new THREE.Mesh(geos.box, mats.wood);
+            arm.position.set(x, 18.85, 0.15);
+            arm.scale.set(0.18, 0.18, 2.4);
+            scene.add(arm);
+            const wheel = new THREE.Mesh(geos.torus, mats.rust.clone());
+            wheel.position.set(x, 18.7, 1.15);
+            wheel.scale.set(0.42, 0.42, 0.42);
+            scene.add(wheel);
+            wheels.push(wheel);
+            const rope = new THREE.Mesh(geos.cyl, mats.rope.clone());
+            rope.position.set(x, 10, 1.15);
+            rope.scale.set(0.045, 18, 0.045);
+            scene.add(rope);
+            ropes.push(rope);
+          });
+
+          const player = new THREE.Group();
+          const harness = new THREE.Mesh(geos.box, mats.rust);
+          harness.scale.set(0.42, 0.12, 0.28);
+          harness.position.y = 0.22;
+          player.add(harness);
+          const body = new THREE.Mesh(geos.cyl, mats.coat);
+          body.scale.set(0.18, 0.55, 0.18);
+          player.add(body);
+          const head = new THREE.Mesh(geos.sphereLo, mats.cloth);
+          head.position.y = 0.42;
+          head.scale.setScalar(0.15);
+          player.add(head);
+          scene.add(player);
+
+          const dustCount = reducedMotion ? 40 : 110;
+          const dustPos = new Float32Array(dustCount * 3);
+          for (let i = 0; i < dustCount; i += 1) {
+            dustPos[i * 3] = (Math.random() - 0.5) * 14;
+            dustPos[i * 3 + 1] = Math.random() * 20;
+            dustPos[i * 3 + 2] = (Math.random() - 0.5) * 8;
+          }
+          const dustGeo = new THREE.BufferGeometry();
+          dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+          const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+            color: 0xfff1d4, size: 0.06, transparent: true, opacity: 0.45, depthWrite: false,
+          }));
+          scene.add(dust);
+
+          return {
+            renderer, scene, camera, rustLight, geos, mats,
+            wheels, ropes, player, flag, pines, dust,
+            particleMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.mode === "menu" ? state.idle : state.elapsed;
+          webgl.player.position.set(state.x, state.y, 1.05);
+          webgl.player.rotation.z = (state.x - state.targetX) * 0.12;
+          webgl.flag.scale.x = 1.1 + Math.sin(t * 4) * 0.08;
+          webgl.rustLight.position.set(state.x, state.y + 1.4, 2.4);
+          webgl.rustLight.intensity = 0.85 + state.gust * 0.5;
+          LINE_X.forEach((x, i) => {
+            const active = i === state.line;
+            const len = Math.max(0.8, 18.7 - state.y);
+            webgl.ropes[i].position.set(x, 18.7 - len * 0.5, 1.15);
+            webgl.ropes[i].scale.set(active ? 0.055 : 0.04, len, active ? 0.055 : 0.04);
+            const heat = state.fatigue[i];
+            webgl.ropes[i].material.color.setRGB(0.85, 0.69 - heat * 0.4, 0.44 - heat * 0.3);
+            webgl.wheels[i].rotation.z = state.wheel[i];
+            webgl.wheels[i].material.color.setRGB(0.77 + heat * 0.2, 0.36 - heat * 0.2, 0.2);
+          });
+          if (!reducedMotion) {
+            const pos = webgl.dust.geometry.attributes.position;
+            for (let i = 0; i < pos.count; i += 1) {
+              let x = pos.getX(i) + (0.4 + state.gust * 2.2) * FIXED_DT;
+              if (x > 8) x = -8;
+              pos.setX(i, x);
+            }
+            pos.needsUpdate = true;
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.geos.sphereLo, webgl.mats.spark.clone());
+            mesh.scale.setScalar(0.07);
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const q = state.particles[index];
+            if (!q) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(q.x, q.y, q.z);
+            mesh.material.opacity = clamp(q.life * 1.7, 0, 1);
+            mesh.material.color.setHex(q.color);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.45 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.32 : 0;
+          const camY = clamp(state.y + 4.6, 5.4, 16.5);
+          webgl.camera.position.x += (7.2 + shakeX - webgl.camera.position.x) * 0.08;
+          webgl.camera.position.y += (camY + shakeY - webgl.camera.position.y) * 0.1;
+          webgl.camera.position.z += (11.2 - webgl.camera.position.z) * 0.08;
+          webgl.look.set(state.x * 0.25, state.y + 1.4, 0);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function worldTo2D(x, y) {
+          return {
+            x: VIEW_W * 0.55 + x * 70,
+            y: VIEW_H * 0.78 - (y - state.y) * 20,
+          };
+        }
+
+        function renderFallback2D(ctx) {
+          if (!ctx) return;
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#2a3418");
+          g.addColorStop(1, "#14180c");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#4a6a28";
+          const cliff = worldTo2D(-4.5, 0);
+          ctx.fillRect(40, 0, VIEW_W * 0.28, VIEW_H);
+          LINE_X.forEach((x, i) => {
+            const top = worldTo2D(x, 18.7);
+            const bot = worldTo2D(x, state.y);
+            ctx.strokeStyle = i === state.line ? "#c45c32" : "#d8b070";
+            ctx.lineWidth = i === state.line ? 5 : 3;
+            ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(bot.x, bot.y); ctx.stroke();
+            ctx.fillStyle = "#c45c32";
+            ctx.beginPath(); ctx.arc(top.x, top.y, 8, 0, Math.PI * 2); ctx.fill();
+          });
+          const summit = worldTo2D(0, TOP_Y);
+          ctx.fillStyle = COLORS.rust;
+          ctx.fillRect(summit.x - 40, summit.y - 8, 80, 10);
+          const p = worldTo2D(state.x, state.y);
+          ctx.fillStyle = "#fff1d4";
+          ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = COLORS.rust;
+          ctx.font = "800 13px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(climbPct() * 100)}%`;
+          if (meter) meter.style.width = `${climbPct() * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          const fat = state.fatigue[state.line];
+          if (sub) {
+            if (state.slack > 0.72) sub.textContent = "장력 위험 · 당기세요";
+            else if (fat > 0.72) sub.textContent = "피로 위험 · 줄을 바꾸세요";
+            else sub.textContent = state.hauling ? `장력 ${Math.round(tension() * 100)}% · 끌어올리는 중` : `장력 ${Math.round(tension() * 100)}%`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const cx = VIEW_W - 54;
+          const cy = 92;
+          hud.strokeStyle = "rgba(255,241,212,0.35)";
+          hud.lineWidth = 4;
+          hud.beginPath(); hud.arc(cx, cy, 18, 0, Math.PI * 2); hud.stroke();
+          hud.strokeStyle = state.fatigue[state.line] > 0.7 ? COLORS.danger : COLORS.rust;
+          hud.beginPath();
+          hud.arc(cx, cy, 18, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * state.fatigue[state.line]);
+          hud.stroke();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.includes("돌풍") || state.message.includes("닳") ? COLORS.danger : COLORS.rust;
+            hud.font = "900 30px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            const tone = state.mode === "failed" ? "255,107,122" : "196,92,50";
+            hud.fillStyle = `rgba(${tone},${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (!webgl) {
+            hud.fillStyle = COLORS.rust;
+            hud.font = "800 12px Trebuchet MS, sans-serif";
+            hud.textAlign = "left";
+            hud.fillText("2D 대체 화면", 22, VIEW_H - 20);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          else if (game2d) renderFallback2D(game2d);
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl && !game2d) renderFallback2D(hud);
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "cliff face; y up to summit; 3 pulley x lanes",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            altitude: Number(state.y.toFixed(2)),
+            line: state.line,
+            slack: Number(state.slack.toFixed(3)),
+            fatigue: state.fatigue.map((v) => Number(v.toFixed(3))),
+            hauling: state.hauling,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.holdTime = 0;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.haul = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.dragging) {
+            const dist = Math.hypot(event.clientX - input.downX, event.clientY - input.downY);
+            if (input.holdTime < 0.2 && dist < 22) switchLine();
+          }
+          input.dragging = false;
+          input.holdTime = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault(); startStage(); return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) {
+              input.haul = true;
+              return;
+            }
+            if (state.mode !== "running") { startStage(); return; }
+            input.haul = true;
+            return;
+          }
+          if (event.code === "ArrowRight" || event.code === "KeyD" || event.code === "ArrowLeft" || event.code === "KeyA") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode === "running") switchLine();
+          }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.haul = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.y = TOP_Y;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.haul = false; input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) game2d = glCanvas.getContext("2d");
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
