@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>종이학 상승</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #161018; --accent: #ff8ab8; --accent-ink: #180812; --danger: #ff6b7a; --ink: #ffeaf2; --muted: rgba(255,234,242,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">종이학 상승. 접힌 날개를 펴 상승기류로 종이학을 올리세요. 탭으로 날개 펴기, 드래그로 선회. 상승기류 7개를 타면 클리어. 날개가 찢기거나 추락하면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 짧게 탭하면 날개를 접거나 펴고, 드래그하면 선회합니다.</p>
+    <main class="stage" aria-label="종이학 상승 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="종이학 상승" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">기류</p>
+          <p class="hud-value" id="hud-objective">0 / 7</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">40.0</p>
+          <p class="hud-sub" id="hud-sub">날개 100</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Paper Crane</p>
+          <h1>종이학 상승</h1>
+          <p class="brief-lead">접힌 날개를 펴 상승기류로 종이학을 올리세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 날개 펴기, 드래그로 선회</span></li>
+            <li><strong>클리어</strong><span>상승기류 7개를 타면 클리어</span></li>
+            <li><strong>실패</strong><span>날개가 찢기거나 추락하면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">상승 중단</p>
+          <h2>학이 추락했다</h2>
+          <p class="brief-lead" id="fail-detail">날개가 찢기거나 추락하면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">지붕 위</p>
+          <h2>종이학이 떴다</h2>
+          <p class="brief-lead">일곱 줄기 꽃잎 기류를 타고 밤 도시 위로 올랐습니다.</p>
+          <p class="hud-sub" id="clear-stat">상승기류 7개를 타면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 40;
+        const GOAL = 7;
+        const WING_MAX = 100;
+        const TAP_STRESS = 28;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "crane-lift",
+          title: "종이학 상승",
+          description: "접힌 날개를 펴 상승기류로 종이학을 올리세요.",
+          creator: "collin",
+          genre: "3D origami climb",
+          clearCondition: "상승기류 7개를 타면 클리어",
+          failCondition: "날개가 찢기거나 추락하면 실패",
+          controls: "탭으로 날개 펴기, 드래그로 선회",
+        };
+        const COLORS = {
+          night: "#161018",
+          ink: "#ffeaf2",
+          pink: "#ff8ab8",
+          paper: "#ffe4ec",
+          neon: "#7ad0ff",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          torn: "날개가 찢어졌습니다",
+          fall: "옥상 아래로 추락했습니다",
+          building: "건물 벽에 부딪혔습니다",
+          time_limit: "제한 시간 40초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const BUILDINGS = [
+          { x: -5.4, z: -6.2, w: 2.2, d: 2.4, h: 7.4, hue: 0x2a1830 },
+          { x: 5.8, z: -5.1, w: 2.6, d: 2.2, h: 9.2, hue: 0x241828 },
+          { x: -7.2, z: 2.4, w: 2.0, d: 2.8, h: 6.1, hue: 0x301820 },
+          { x: 7.1, z: 3.6, w: 2.4, d: 2.2, h: 8.4, hue: 0x1c1424 },
+          { x: -3.2, z: 7.4, w: 2.8, d: 2.4, h: 5.2, hue: 0x28141c },
+          { x: 3.6, z: 8.2, w: 2.2, d: 2.6, h: 10.4, hue: 0x22101a },
+          { x: 0.2, z: -9.4, w: 3.2, d: 2.2, h: 4.6, hue: 0x2c1828 },
+          { x: -8.4, z: -2.2, w: 1.8, d: 3.0, h: 11.2, hue: 0x1a1020 },
+          { x: 8.8, z: -1.4, w: 2.0, d: 2.4, h: 7.8, hue: 0x26141e },
+        ];
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          rides: 0,
+          wing: WING_MAX,
+          folded: false,
+          unfold: 1,
+          yaw: 0,
+          crane: { x: 0, y: 6.4, z: 1.2, vx: 0, vy: 0, vz: 0 },
+          thermals: [],
+          particles: [],
+          petals: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          inLift: false,
+          tapLock: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, downX: 0, downY: 0, pointerId: null, moved: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            sinkFold: 2.4 + difficulty * 1.1,
+            sinkOpen: 0.22 + difficulty * 0.12,
+            lift: 4.6 - difficulty * 0.6,
+            turn: 1.7 + difficulty * 0.3,
+            thermalR: 1.55 - difficulty * 0.22,
+          };
+        }
+
+        function makeThermals() {
+          const spots = [
+            { x: 0.1, z: 1.0, y: 6.2 },
+            { x: -2.4, z: -1.6, y: 7.4 },
+            { x: 2.8, z: -2.2, y: 8.6 },
+            { x: -1.6, z: 3.4, y: 9.5 },
+            { x: 3.1, z: 1.8, y: 10.6 },
+            { x: -3.2, z: 0.4, y: 11.8 },
+            { x: 0.6, z: -3.6, y: 13.0 },
+          ];
+          state.thermals = spots.map((spot, index) => ({
+            ...spot,
+            taken: false,
+            phase: index * 0.7,
+          }));
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(1.2, 4.4),
+              vy: randRange(0.8, 3.8),
+              vz: Math.sin(angle) * randRange(1.2, 4.4),
+              life: randRange(0.3, 0.8),
+              kind,
+              size: randRange(0.05, 0.14),
+            });
+          }
+          if (state.particles.length > 52) state.particles.splice(0, state.particles.length - 52);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "fold") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(180, now + 0.08);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "open") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(280, now);
+              osc.frequency.exponentialRampToValueAtTime(520, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "lift") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.14);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "tear") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.16);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.19);
+            } else if (kind === "clear") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.23);
+            } else if (kind === "boom") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.rides = 0;
+          state.wing = WING_MAX;
+          state.folded = false;
+          state.unfold = 1;
+          state.yaw = 0;
+          state.crane = { x: 0, y: 6.4, z: 1.2, vx: 0, vy: 0, vz: 0 };
+          state.particles = [];
+          state.petals = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "날개를 편 채 꽃잎 기둥으로";
+          state.messageTime = 1.2;
+          state.failReason = "";
+          state.inLift = false;
+          state.tapLock = 0;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          makeThermals();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.62;
+          playSfx(reason === "torn" ? "tear" : "boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function toggleWings() {
+          if (state.mode !== "running" || state.tapLock > 0) return;
+          state.folded = !state.folded;
+          state.tapLock = 0.12;
+          state.wing = Math.max(0, state.wing - TAP_STRESS);
+          playSfx(state.folded ? "fold" : "open");
+          state.message = state.folded ? "접기 · 급강하" : "펴기 · 활공";
+          state.messageTime = 0.55;
+          const c = state.crane;
+          burst(c.x, c.y, c.z, 8, "paper");
+          if (state.wing <= 0) {
+            burst(c.x, c.y, c.z, 22, "tear");
+            failStage("torn");
+          }
+        }
+
+        function hitBuilding(c) {
+          for (let index = 0; index < BUILDINGS.length; index += 1) {
+            const b = BUILDINGS[index];
+            if (c.y > b.h + 0.35) continue;
+            if (Math.abs(c.x - b.x) < b.w * 0.5 + 0.28 && Math.abs(c.z - b.z) < b.d * 0.5 + 0.28) {
+              return true;
+            }
+          }
+          return false;
+        }
+
+        function updateFlight(dt, params) {
+          const c = state.crane;
+          const targetUnfold = state.folded ? 0.12 : 1;
+          state.unfold += (targetUnfold - state.unfold) * Math.min(1, dt * 6);
+          let yawRate = 0;
+          if (input.left) yawRate += params.turn;
+          if (input.right) yawRate -= params.turn;
+          state.yaw += yawRate * dt;
+          const speed = state.folded ? 4.8 : 2.35;
+          const thrust = (input.up ? 1 : 0) + (input.down ? -0.45 : 0.35);
+          c.vx = Math.sin(state.yaw) * speed * thrust;
+          c.vz = Math.cos(state.yaw) * speed * thrust;
+          let lift = state.folded ? -params.sinkFold : -params.sinkOpen;
+          state.inLift = false;
+          const r = params.thermalR;
+          state.thermals.forEach((thermal) => {
+            const dx = c.x - thermal.x;
+            const dz = c.z - thermal.z;
+            const inCol = Math.hypot(dx, dz) < r && c.y > thermal.y - 1.6 && c.y < thermal.y + 4.2;
+            if (!inCol) return;
+            if (state.unfold > 0.55) {
+              lift = params.lift;
+              state.inLift = true;
+              if (!thermal.taken) {
+                thermal.taken = true;
+                state.rides += 1;
+                state.flash = 0.4;
+                state.message = `기류 ${state.rides}/${GOAL}`;
+                state.messageTime = 0.85;
+                burst(thermal.x, c.y, thermal.z, 18, "petal");
+                playSfx("lift");
+                if (state.rides >= GOAL) clearStage();
+              }
+            }
+          });
+          c.vy += (lift - c.vy) * Math.min(1, dt * 3.2);
+          c.x = clamp(c.x + c.vx * dt, -9.2, 9.2);
+          c.z = clamp(c.z + c.vz * dt, -10.4, 9.6);
+          c.y += c.vy * dt;
+          if (c.y > 16.5) c.y = 16.5;
+          if (state.elapsed > 5.2 && c.y < 1.15) {
+            burst(c.x, c.y, c.z, 16, "tear");
+            failStage("fall");
+            return;
+          }
+          if (c.y < 1.15) c.y = 1.15;
+          if (state.elapsed > 4.8 && hitBuilding(c)) {
+            burst(c.x, c.y, c.z, 14, "tear");
+            failStage("building");
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          if (!reducedMotion && random() < 0.4) {
+            state.petals.push({
+              x: randRange(-8, 8),
+              y: randRange(4, 14),
+              z: randRange(-8, 8),
+              vy: randRange(-0.4, -0.1),
+              spin: randRange(0, 6),
+              life: randRange(1.2, 2.4),
+            });
+          }
+          state.petals.forEach((p) => {
+            p.y += p.vy * dt;
+            p.spin += dt * 2;
+            p.life -= dt;
+          });
+          state.petals = state.petals.filter((p) => p.life > 0);
+          if (state.petals.length > 36) state.petals.splice(0, state.petals.length - 36);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.5);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.tapLock = Math.max(0, state.tapLock - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          if (state.wing < WING_MAX) state.wing = Math.min(WING_MAX, state.wing + dt * 11.5);
+          const params = difficultyAt(state.elapsed);
+          updateFlight(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `기류 ${state.rides} / ${GOAL} · 날개 ${Math.round(state.wing)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 날개 ${Math.round(state.wing)}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x161018, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x161018);
+          scene.fog = new THREE.Fog(0x161018, 14, 46);
+
+          const camera = new THREE.PerspectiveCamera(58, VIEW_W / VIEW_H, 0.1, 120);
+          camera.position.set(4.2, 8.4, 10.5);
+
+          scene.add(new THREE.AmbientLight(0x3a2030, 0.5));
+          scene.add(new THREE.HemisphereLight(0xffc0d8, 0x120810, 0.48));
+          const moon = new THREE.DirectionalLight(0xffe0f0, 0.55);
+          moon.position.set(-10, 16, 8);
+          scene.add(moon);
+          const neon = new THREE.PointLight(0xff8ab8, 1.15, 22);
+          neon.position.set(3, 9, 2);
+          scene.add(neon);
+          const cyan = new THREE.PointLight(0x7ad0ff, 0.7, 18);
+          cyan.position.set(-4, 8, -2);
+          scene.add(cyan);
+
+          const ground = new THREE.Mesh(
+            new THREE.PlaneGeometry(60, 60),
+            new THREE.MeshStandardMaterial({ color: 0x1a1018, roughness: 0.95, metalness: 0.05 })
+          );
+          ground.rotation.x = -Math.PI / 2;
+          scene.add(ground);
+
+          const bGeo = new THREE.BoxGeometry(1, 1, 1);
+          const winGeo = new THREE.PlaneGeometry(0.28, 0.38);
+          const winMat = new THREE.MeshBasicMaterial({ color: 0xffc07a, transparent: true, opacity: 0.55 });
+          const buildingMeshes = BUILDINGS.map((b) => {
+            const mat = new THREE.MeshStandardMaterial({ color: b.hue, roughness: 0.78, metalness: 0.12 });
+            const mesh = new THREE.Mesh(bGeo, mat);
+            mesh.position.set(b.x, b.h / 2, b.z);
+            mesh.scale.set(b.w, b.h, b.d);
+            scene.add(mesh);
+            for (let wy = 1; wy < b.h - 0.6; wy += 1.1) {
+              const w = new THREE.Mesh(winGeo, winMat);
+              w.position.set(b.x + b.w * 0.51, wy, b.z);
+              w.rotation.y = Math.PI / 2;
+              scene.add(w);
+            }
+            const roof = new THREE.Mesh(
+              new THREE.BoxGeometry(b.w * 0.9, 0.12, b.d * 0.9),
+              new THREE.MeshStandardMaterial({ color: 0x3a2030, roughness: 0.7 })
+            );
+            roof.position.set(b.x, b.h + 0.08, b.z);
+            scene.add(roof);
+            return mesh;
+          });
+
+          const signMat = new THREE.MeshStandardMaterial({
+            color: 0xff8ab8, emissive: 0xff8ab8, emissiveIntensity: 0.8, roughness: 0.4, metalness: 0.2,
+          });
+          [[-5.4, 7.6, -6.2], [5.8, 9.4, -5.1], [3.6, 10.6, 8.2]].forEach((row) => {
+            const s = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.35, 0.12), signMat);
+            s.position.set(row[0], row[1], row[2]);
+            scene.add(s);
+          });
+
+          const crane = new THREE.Group();
+          const paperMat = new THREE.MeshStandardMaterial({
+            color: 0xffe4ec, roughness: 0.42, metalness: 0.08, emissive: 0xff8ab8, emissiveIntensity: 0.18, side: THREE.DoubleSide,
+          });
+          const body = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.7, 4), paperMat);
+          body.rotation.x = Math.PI / 2;
+          crane.add(body);
+          const head = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.28, 4), paperMat);
+          head.position.set(0, 0.08, -0.48);
+          head.rotation.x = -0.7;
+          crane.add(head);
+          const wingL = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.42), paperMat);
+          wingL.position.set(-0.42, 0.02, 0);
+          wingL.rotation.y = 0.2;
+          const wingR = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.42), paperMat);
+          wingR.position.set(0.42, 0.02, 0);
+          wingR.rotation.y = -0.2;
+          crane.add(wingL); crane.add(wingR);
+          const tail = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.5), paperMat);
+          tail.position.set(0, 0.12, 0.38);
+          tail.rotation.x = 0.5;
+          crane.add(tail);
+          scene.add(crane);
+
+          const thermalGeo = new THREE.CylinderGeometry(0.2, 1.4, 4.4, 10, 1, true);
+          const thermalMat = new THREE.MeshBasicMaterial({
+            color: 0xff8ab8, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+          });
+          const thermalMeshes = [];
+          for (let i = 0; i < GOAL; i += 1) {
+            const mesh = new THREE.Mesh(thermalGeo, thermalMat.clone());
+            scene.add(mesh);
+            const petal = new THREE.Mesh(
+              new THREE.SphereGeometry(0.22, 8, 8),
+              new THREE.MeshStandardMaterial({ color: 0xff8ab8, emissive: 0xff8ab8, emissiveIntensity: 0.7, roughness: 0.35 })
+            );
+            scene.add(petal);
+            thermalMeshes.push({ mesh, petal });
+          }
+
+          const moonBall = new THREE.Mesh(
+            new THREE.SphereGeometry(1.6, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xffe4f0 })
+          );
+          moonBall.position.set(-12, 16, -10);
+          scene.add(moonBall);
+
+          const starCount = reducedMotion ? 120 : 360;
+          const starPos = new Float32Array(starCount * 3);
+          for (let i = 0; i < starCount; i += 1) {
+            starPos[i * 3] = randRange(-30, 30);
+            starPos[i * 3 + 1] = randRange(8, 26);
+            starPos[i * 3 + 2] = randRange(-28, 20);
+          }
+          const starGeo = new THREE.BufferGeometry();
+          starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+          scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffeaf2, size: 0.16, transparent: true, opacity: 0.8 })));
+
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const petalGeo = new THREE.PlaneGeometry(0.16, 0.22);
+
+          return {
+            renderer, scene, camera, neon, crane, wingL, wingR, paperMat,
+            buildingMeshes, thermalMeshes, particleGeo, petalGeo,
+            paperPart: new THREE.MeshBasicMaterial({ color: 0xffe4ec, transparent: true, opacity: 0.9, depthWrite: false }),
+            petalPart: new THREE.MeshBasicMaterial({ color: 0xff8ab8, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide }),
+            particleMeshes: [], petalMeshes: [], look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const c = state.crane;
+          webgl.crane.position.set(c.x, c.y, c.z);
+          webgl.crane.rotation.y = state.yaw;
+          webgl.crane.rotation.z = -c.vx * 0.08;
+          webgl.crane.rotation.x = state.folded ? 0.45 : 0.08;
+          const span = 0.35 + state.unfold * 0.65;
+          webgl.wingL.scale.set(span, 1, 1);
+          webgl.wingR.scale.set(span, 1, 1);
+          webgl.wingL.rotation.z = (1 - state.unfold) * 0.9;
+          webgl.wingR.rotation.z = -(1 - state.unfold) * 0.9;
+          webgl.paperMat.emissiveIntensity = 0.12 + (state.inLift ? 0.45 : 0);
+          webgl.neon.position.set(c.x + 1.2, c.y + 1.4, c.z + 0.6);
+          state.thermals.forEach((thermal, index) => {
+            const g = webgl.thermalMeshes[index];
+            if (!g) return;
+            g.mesh.position.set(thermal.x, thermal.y + 1.2, thermal.z);
+            g.mesh.material.opacity = thermal.taken ? 0.05 : (state.inLift ? 0.28 : 0.16);
+            g.mesh.rotation.y = state.elapsed * 0.6 + thermal.phase;
+            const bob = reducedMotion ? 0 : Math.sin(state.elapsed * 2 + thermal.phase) * 0.25;
+            g.petal.position.set(thermal.x, thermal.y + 2.2 + bob, thermal.z);
+            g.petal.visible = !thermal.taken;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.paperPart.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "petal" ? 0xff8ab8 : 0xffe4ec);
+            mesh.material.opacity = clamp(p.life * 1.5, 0, 1);
+          });
+          while (webgl.petalMeshes.length < state.petals.length) {
+            const mesh = new THREE.Mesh(webgl.petalGeo, webgl.petalPart.clone());
+            webgl.scene.add(mesh);
+            webgl.petalMeshes.push(mesh);
+          }
+          webgl.petalMeshes.forEach((mesh, index) => {
+            const p = state.petals[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.rotation.z = p.spin;
+            mesh.material.opacity = clamp(p.life * 0.5, 0, 0.8);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const c = state.crane;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          webgl.camera.position.set(
+            c.x + 4.6 + shakeX,
+            c.y + 2.4 + shakeY,
+            c.z + 6.8
+          );
+          webgl.look.set(c.x, c.y + 0.2, c.z - 1.5);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const c = state.crane;
+          return {
+            x: VIEW_W * 0.5 + (x - c.x) * 36,
+            y: VIEW_H * 0.55 - (y - c.y) * 32 - (z - c.z) * 8,
+            visible: true,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#2a1420");
+          g.addColorStop(0.55, "#161018");
+          g.addColorStop(1, "#1a1014");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#120c10";
+          ctx.fillRect(0, VIEW_H * 0.78, VIEW_W, VIEW_H * 0.22);
+          BUILDINGS.forEach((b) => {
+            const p = projectToScreen(b.x, 0, b.z);
+            const top = projectToScreen(b.x, b.h, b.z);
+            ctx.fillStyle = "#2a1830";
+            ctx.fillRect(p.x - b.w * 10, top.y, b.w * 20, p.y - top.y);
+          });
+          state.thermals.forEach((thermal) => {
+            if (thermal.taken) return;
+            const a = projectToScreen(thermal.x, thermal.y, thermal.z);
+            const b = projectToScreen(thermal.x, thermal.y + 4, thermal.z);
+            ctx.strokeStyle = "rgba(255,138,184,0.55)";
+            ctx.lineWidth = 8;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          });
+          const c = projectToScreen(state.crane.x, state.crane.y, state.crane.z);
+          ctx.save();
+          ctx.translate(c.x, c.y);
+          ctx.rotate(-state.yaw * 0.2);
+          ctx.fillStyle = COLORS.paper;
+          ctx.beginPath();
+          ctx.moveTo(0, -8);
+          ctx.lineTo(-22 * state.unfold - 6, 8);
+          ctx.lineTo(0, 3);
+          ctx.lineTo(22 * state.unfold + 6, 8);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.4, 0, 1);
+            ctx.fillStyle = COLORS.pink;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,234,242,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.rides} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.rides / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const pose = state.folded ? "접힘" : "펼침";
+            sub.textContent = state.inLift ? `${pose} · 상승 중` : `${pose} · 날개 ${Math.round(state.wing)}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          hud.fillStyle = "rgba(22,16,24,0.35)";
+          hud.fillRect(VIEW_W / 2 - 70, 84, 140, 7);
+          hud.fillStyle = state.wing < 40 ? COLORS.danger : COLORS.pink;
+          hud.fillRect(VIEW_W / 2 - 70, 84, 140 * (state.wing / WING_MAX), 7);
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.pink;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 122);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,138,184,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            rides: state.rides,
+            wing: Number(state.wing.toFixed(1)),
+            folded: state.folded,
+            unfold: Number(state.unfold.toFixed(2)),
+            inLift: state.inLift,
+            crane: {
+              x: Number(state.crane.x.toFixed(2)),
+              y: Number(state.crane.y.toFixed(2)),
+              z: Number(state.crane.z.toFixed(2)),
+            },
+            difficulty: Number(params.difficulty.toFixed(3)),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          if (Math.hypot(dx, dy) > 8) input.moved = true;
+          state.yaw -= dx * 0.006;
+          if (dy < -10) input.up = true;
+          if (dy > 10) input.up = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.up = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.dragging && !input.moved) toggleWings();
+          input.dragging = false;
+          input.up = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          input.up = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            toggleWings();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.rides = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = false; input.right = false; input.up = false; input.down = false; input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>성에 창</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #071820; --accent: #b8f0ff; --accent-ink: #071820; --danger: #ff6b7a; --ink: #eefaff; --muted: rgba(238,250,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">성에 창. 성에를 손가락으로 닦아 문양을 드러내세요. 드래그로 성에 닦기. 문양 80%를 드러내면 클리어. 유리를 3번 깨면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 천천히 드래그해 성에를 닦습니다.</p>
+    <main class="stage" aria-label="성에 창 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="성에 창" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">문양</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">34.0</p>
+          <p class="hud-sub" id="hud-sub">균열 0 / 3</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Frost Pane</p>
+          <h1>성에 창</h1>
+          <p class="brief-lead">성에를 손가락으로 닦아 문양을 드러내세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 성에 닦기</span></li>
+            <li><strong>클리어</strong><span>문양 80%를 드러내면 클리어</span></li>
+            <li><strong>실패</strong><span>유리를 3번 깨면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">유리 파손</p>
+          <h2>창이 깨졌다</h2>
+          <p class="brief-lead" id="fail-detail">유리를 3번 깨면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">성에 너머</p>
+          <h2>문양이 드러났다</h2>
+          <p class="brief-lead">천천히 닦아 성에 문양의 여든 퍼센트를 드러냈습니다.</p>
+          <p class="hud-sub" id="clear-stat">문양 80%를 드러내면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 34;
+        const COLS = 14;
+        const ROWS = 9;
+        const MAX_CRACK = 3;
+        const NEED = 0.8;
+        const CELL_W = 0.42;
+        const CELL_H = 0.38;
+        const ORIGIN_X = -((COLS - 1) * CELL_W) / 2;
+        const ORIGIN_Y = -((ROWS - 1) * CELL_H) / 2 + 0.15;
+        const HARD_SPEED = 11.5;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "frost-pane",
+          title: "성에 창",
+          description: "성에를 손가락으로 닦아 문양을 드러내세요.",
+          creator: "collin",
+          genre: "3D frost drawing",
+          clearCondition: "문양 80%를 드러내면 클리어",
+          failCondition: "유리를 3번 깨면 실패",
+          controls: "드래그로 성에 닦기",
+        };
+        const COLORS = {
+          bg: "#071820",
+          ink: "#eefaff",
+          accent: "#b8f0ff",
+          wood: "#6a4a32",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          crack: "유리가 세 번 깨졌습니다",
+          time_limit: "제한 시간 34초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0.1, y: 0.2, z: 5.6 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 1, z: 0 },
+          fwd: { x: 0, y: 0, z: -1 },
+          focal: 490,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function cellPos(ix, iy) {
+          return { x: ORIGIN_X + ix * CELL_W, y: ORIGIN_Y + iy * CELL_H, z: 0.04 };
+        }
+        function isPattern(ix, iy) {
+          const cx = 6.5, cy = 4;
+          const dx = ix - cx;
+          const dy = iy - cy;
+          if (Math.abs(dx) <= 0.7 && Math.abs(dy) <= 3.6) return true;
+          if (Math.abs(dy) <= 0.7 && Math.abs(dx) <= 5.2) return true;
+          if (Math.abs(Math.abs(dx) - Math.abs(dy)) < 0.7 && Math.abs(dx) <= 3.4) return true;
+          if (Math.abs(dx) >= 2.2 && Math.abs(dx) <= 3.4 && Math.abs(dy) <= 2.2) return true;
+          if (Math.abs(dy) >= 2.2 && Math.abs(dy) <= 3.2 && Math.abs(dx) <= 2.2) return true;
+          return false;
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          revealed: 0,
+          patternCount: 0,
+          cracks: 0,
+          frost: [],
+          pattern: [],
+          particles: [],
+          finger: { x: 0, y: 0.2, active: false },
+          lastWipe: { x: 0, y: 0, t: 0 },
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = { dragging: false, pending: null };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            wipe: 1.15 - difficulty * 0.2,
+            hard: HARD_SPEED - difficulty * 1.8,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(5, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.5, 2.4),
+              vy: randRange(0.4, 2.6),
+              vz: Math.sin(a) * randRange(0.2, 1.2),
+              life: randRange(0.22, 0.6),
+              kind,
+              size: randRange(0.03, 0.08),
+            });
+          }
+          if (state.particles.length > 60) state.particles.splice(0, state.particles.length - 60);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "wipe") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.05);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+              osc.start(now); osc.stop(now + 0.07);
+            } else if (kind === "crack") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.14);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(32, now + 0.22);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function buildPattern() {
+          state.pattern = [];
+          state.frost = [];
+          state.patternCount = 0;
+          for (let iy = 0; iy < ROWS; iy += 1) {
+            for (let ix = 0; ix < COLS; ix += 1) {
+              const pattern = isPattern(ix, iy);
+              state.pattern.push(pattern);
+              state.frost.push(1);
+              if (pattern) state.patternCount += 1;
+            }
+          }
+        }
+
+        function revealedRatio() {
+          let n = 0;
+          for (let i = 0; i < state.pattern.length; i += 1) {
+            if (state.pattern[i] && state.frost[i] <= 0.18) n += 1;
+          }
+          state.revealed = n;
+          return state.patternCount ? n / state.patternCount : 0;
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.cracks = 0;
+          state.particles = [];
+          state.finger = { x: 0, y: 0.2, active: false };
+          state.lastWipe = { x: 0, y: 0, t: 0 };
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "문양을 따라 천천히 닦으세요";
+          state.messageTime = 1.4;
+          state.failReason = "";
+          input.dragging = false;
+          input.pending = null;
+          buildPattern();
+          revealedRatio();
+          reseed((Date.now() ^ 0x51ed) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.58;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function addCrack(x, y) {
+          state.cracks += 1;
+          state.flash = 0.55;
+          state.shake = reducedMotion ? 0.14 : 0.46;
+          burst(x, y, 0.08, 14, "crack");
+          playSfx("crack");
+          state.message = `균열 ${state.cracks}/${MAX_CRACK}`;
+          state.messageTime = 0.9;
+          if (state.cracks >= MAX_CRACK) failStage("crack");
+        }
+
+        function wipeAt(x, y, dt, params) {
+          const ix = clamp(Math.round((x - ORIGIN_X) / CELL_W), 0, COLS - 1);
+          const iy = clamp(Math.round((y - ORIGIN_Y) / CELL_H), 0, ROWS - 1);
+          const neighbors = [
+            [ix, iy], [ix - 1, iy], [ix + 1, iy], [ix, iy - 1], [ix, iy + 1],
+          ];
+          let wiped = false;
+          neighbors.forEach((pair) => {
+            const cx = pair[0], cy = pair[1];
+            if (cx < 0 || cy < 0 || cx >= COLS || cy >= ROWS) return;
+            const idx = cy * COLS + cx;
+            const before = state.frost[idx];
+            const falloff = pair[0] === ix && pair[1] === iy ? 1 : 0.45;
+            state.frost[idx] = Math.max(0, before - params.wipe * dt * 7.5 * falloff);
+            if (state.frost[idx] < before) wiped = true;
+          });
+          if (wiped && state.wipeSfxWait <= 0) {
+            playSfx("wipe");
+            state.wipeSfxWait = 0.08;
+          }
+          const ratio = revealedRatio();
+          if (ratio >= NEED) clearStage();
+        }
+
+        function updateFx(dt) {
+          state.wipeSfxWait = Math.max(0, (state.wipeSfxWait || 0) - dt);
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 2.2 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          if (input.pending) {
+            const p = input.pending;
+            const speed = state.finger.active
+              ? Math.hypot(p.x - state.lastWipe.x, p.y - state.lastWipe.y) / Math.max(dt, 0.008)
+              : 0;
+            state.finger.x = p.x;
+            state.finger.y = p.y;
+            state.finger.active = true;
+            if (speed > params.hard) addCrack(p.x, p.y);
+            else wipeAt(p.x, p.y, dt, params);
+            state.lastWipe = { x: p.x, y: p.y, t: state.elapsed };
+            input.pending = null;
+          }
+          if (!input.dragging) state.finger.active = false;
+          updateFx(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `문양 ${Math.round(revealedRatio() * 100)}% · 균열 ${state.cracks} / ${MAX_CRACK}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 균열 ${state.cracks}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x071820, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x071820);
+          scene.fog = new THREE.Fog(0x071820, 6, 18);
+
+          const camera = new THREE.PerspectiveCamera(42, VIEW_W / VIEW_H, 0.1, 40);
+          camera.position.set(0.12, 0.22, 5.75);
+
+          scene.add(new THREE.AmbientLight(0x163040, 0.5));
+          const hemi = new THREE.HemisphereLight(0xb8f0ff, 0x071820, 0.38);
+          scene.add(hemi);
+          const windowLight = new THREE.DirectionalLight(0xeefaff, 0.55);
+          windowLight.position.set(-3, 4, 6);
+          scene.add(windowLight);
+          const frostLight = new THREE.PointLight(0xb8f0ff, 0.95, 10);
+          frostLight.position.set(0, 0.4, 2.2);
+          scene.add(frostLight);
+
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x6a4a32, roughness: 0.72, metalness: 0.08 });
+          const glassMat = new THREE.MeshStandardMaterial({
+            color: 0x8ec8dc, roughness: 0.12, metalness: 0.18, transparent: true, opacity: 0.22,
+          });
+          const wallMat = new THREE.MeshStandardMaterial({ color: 0x123038, roughness: 0.9, metalness: 0.04 });
+          const frostMat = new THREE.MeshStandardMaterial({
+            color: 0xd8f4ff, roughness: 0.55, metalness: 0.08, transparent: true, opacity: 0.82,
+            emissive: 0x8ec8dc, emissiveIntensity: 0.12,
+          });
+          const ghostMat = new THREE.MeshBasicMaterial({
+            color: 0xb8f0ff, transparent: true, opacity: 0.22, depthWrite: false,
+          });
+
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(10, 7, 0.4), wallMat);
+          wall.position.set(0, 0.2, -0.55);
+          scene.add(wall);
+          const glass = new THREE.Mesh(new THREE.PlaneGeometry(COLS * CELL_W + 0.2, ROWS * CELL_H + 0.2), glassMat);
+          glass.position.z = -0.02;
+          scene.add(glass);
+          const frameH = new THREE.BoxGeometry(COLS * CELL_W + 0.7, 0.22, 0.28);
+          const frameV = new THREE.BoxGeometry(0.22, ROWS * CELL_H + 0.7, 0.28);
+          [
+            [0, ORIGIN_Y + (ROWS - 1) * CELL_H / 2 + 1.85, 0.08, frameH],
+            [0, ORIGIN_Y - 1.55, 0.08, frameH],
+            [ORIGIN_X - 0.45, 0.15, 0.08, frameV],
+            [ORIGIN_X + (COLS - 1) * CELL_W + 0.45, 0.15, 0.08, frameV],
+          ].forEach((row) => {
+            const mesh = new THREE.Mesh(row[3], woodMat);
+            mesh.position.set(row[0], row[1], row[2]);
+            scene.add(mesh);
+          });
+          const mullion = new THREE.Mesh(new THREE.BoxGeometry(0.1, ROWS * CELL_H + 0.3, 0.12), woodMat);
+          mullion.position.set(0, 0.15, 0.06);
+          scene.add(mullion);
+
+          const sill = new THREE.Mesh(new THREE.BoxGeometry(7.2, 0.18, 0.7), woodMat);
+          sill.position.set(0, ORIGIN_Y - 1.72, 0.25);
+          scene.add(sill);
+
+          const chair = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.7, 1.1), woodMat);
+          chair.position.set(-2.6, -1.9, -1.6);
+          scene.add(chair);
+          const table = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.6, 0.08, 10), woodMat);
+          table.position.set(2.4, -1.55, -1.5);
+          scene.add(table);
+          const lamp = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 10, 10),
+            new THREE.MeshStandardMaterial({
+              color: 0xffe0a8, roughness: 0.35, metalness: 0.1, emissive: 0xffc070, emissiveIntensity: 0.6,
+            })
+          );
+          lamp.position.set(2.4, -1.28, -1.5);
+          scene.add(lamp);
+          const curtainMat = new THREE.MeshStandardMaterial({
+            color: 0x3a5460, roughness: 0.8, metalness: 0.04, transparent: true, opacity: 0.55,
+          });
+          const curtainGeo = new THREE.PlaneGeometry(1.15, 3.4, 4, 8);
+          [-3.35, 3.35].forEach((x, idx) => {
+            const curtain = new THREE.Mesh(curtainGeo, curtainMat);
+            curtain.position.set(x, 0.35, 0.22);
+            curtain.rotation.y = idx === 0 ? 0.18 : -0.18;
+            scene.add(curtain);
+          });
+          const iceMat = new THREE.MeshStandardMaterial({
+            color: 0xb8f0ff, roughness: 0.22, metalness: 0.28, transparent: true, opacity: 0.7,
+          });
+          const icicleGeo = new THREE.ConeGeometry(0.07, 0.42, 6);
+          for (let i = 0; i < 9; i += 1) {
+            const spike = new THREE.Mesh(icicleGeo, iceMat);
+            spike.position.set(-2.4 + i * 0.6, ORIGIN_Y + (ROWS - 1) * CELL_H + 0.95, 0.16);
+            spike.rotation.x = Math.PI;
+            scene.add(spike);
+          }
+          const latch = new THREE.Mesh(
+            new THREE.BoxGeometry(0.18, 0.28, 0.08),
+            new THREE.MeshStandardMaterial({ color: 0xc0a060, roughness: 0.4, metalness: 0.55 })
+          );
+          latch.position.set(ORIGIN_X + (COLS - 1) * CELL_W + 0.28, 0.15, 0.18);
+          scene.add(latch);
+          const snowHill = new THREE.Mesh(
+            new THREE.SphereGeometry(2.4, 10, 8),
+            new THREE.MeshStandardMaterial({ color: 0xd8eef8, roughness: 0.9, metalness: 0.04 })
+          );
+          snowHill.position.set(0, -2.6, -3.4);
+          scene.add(snowHill);
+          const pineMat = new THREE.MeshStandardMaterial({ color: 0x1a4038, roughness: 0.85, metalness: 0.04 });
+          [-2.8, 1.6, 3.4].forEach((x, idx) => {
+            const pine = new THREE.Mesh(new THREE.ConeGeometry(0.55, 1.8, 7), pineMat);
+            pine.position.set(x, -0.7, -3.2 - idx * 0.2);
+            scene.add(pine);
+          });
+
+          const cellGeo = new THREE.PlaneGeometry(CELL_W * 0.92, CELL_H * 0.92);
+          const cells = [];
+          const ghosts = [];
+          for (let iy = 0; iy < ROWS; iy += 1) {
+            for (let ix = 0; ix < COLS; ix += 1) {
+              const p = cellPos(ix, iy);
+              const cell = new THREE.Mesh(cellGeo, frostMat.clone());
+              cell.position.set(p.x, p.y, p.z);
+              scene.add(cell);
+              cells.push(cell);
+              const ghost = new THREE.Mesh(cellGeo, ghostMat.clone());
+              ghost.position.set(p.x, p.y, p.z - 0.01);
+              ghost.visible = false;
+              scene.add(ghost);
+              ghosts.push(ghost);
+            }
+          }
+
+          const crackGeo = new THREE.BoxGeometry(0.04, 1.6, 0.02);
+          const cracks = [];
+          for (let i = 0; i < 6; i += 1) {
+            const mesh = new THREE.Mesh(
+              crackGeo,
+              new THREE.MeshBasicMaterial({ color: 0xeefaff, transparent: true, opacity: 0 })
+            );
+            mesh.position.set(-1.8 + i * 0.7, 0.1, 0.07);
+            mesh.rotation.z = (i - 2.5) * 0.22;
+            scene.add(mesh);
+            cracks.push(mesh);
+          }
+
+          const flakeCount = reducedMotion ? 40 : 120;
+          const flakePos = new Float32Array(flakeCount * 3);
+          for (let i = 0; i < flakeCount; i += 1) {
+            flakePos[i * 3] = randRange(-5, 5);
+            flakePos[i * 3 + 1] = randRange(-2, 3.5);
+            flakePos[i * 3 + 2] = randRange(-3, 2);
+          }
+          const flakeGeo = new THREE.BufferGeometry();
+          flakeGeo.setAttribute("position", new THREE.BufferAttribute(flakePos, 3));
+          const flakes = new THREE.Points(flakeGeo, new THREE.PointsMaterial({
+            color: 0xeefaff, size: 0.05, transparent: true, opacity: 0.35, depthWrite: false,
+          }));
+          scene.add(flakes);
+
+          const finger = new THREE.Mesh(
+            new THREE.SphereGeometry(0.12, 10, 10),
+            new THREE.MeshStandardMaterial({ color: 0xe8d0b8, roughness: 0.55, metalness: 0.05 })
+          );
+          finger.visible = false;
+          scene.add(finger);
+
+          const particleGeo = new THREE.SphereGeometry(0.04, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xb8f0ff, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, frostLight, cells, ghosts, cracks, flakes, finger,
+            particleGeo, particleMat, particleMeshes: [], proj: new THREE.Vector3(), flakePos,
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.cells.forEach((mesh, index) => {
+            const frost = state.frost[index];
+            mesh.material.opacity = 0.12 + frost * 0.78;
+            mesh.material.emissiveIntensity = state.pattern[index] ? 0.22 : 0.06;
+            mesh.visible = frost > 0.04;
+          });
+          webgl.ghosts.forEach((mesh, index) => {
+            mesh.visible = state.pattern[index] && state.frost[index] > 0.2;
+            mesh.material.opacity = 0.12 + Math.sin(state.elapsed * 3 + index * 0.05) * 0.06;
+          });
+          webgl.cracks.forEach((mesh, index) => {
+            mesh.material.opacity = state.cracks > index / 2 ? 0.7 : 0;
+          });
+          webgl.finger.visible = state.finger.active;
+          webgl.finger.position.set(state.finger.x, state.finger.y, 0.18);
+          webgl.frostLight.intensity = 0.75 + revealedRatio() * 0.6;
+          if (!reducedMotion && webgl.flakePos) {
+            for (let i = 0; i < webgl.flakePos.length; i += 3) {
+              webgl.flakePos[i + 1] -= 0.006;
+              if (webgl.flakePos[i + 1] < -2.2) webgl.flakePos[i + 1] = 3.4;
+            }
+            webgl.flakes.geometry.attributes.position.needsUpdate = true;
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "crack" ? 0xff6b7a : 0xb8f0ff);
+            mesh.material.opacity = clamp(p.life * 1.8, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.18 : 0;
+          webgl.camera.position.set(0.1 + shakeX, 0.2 + shakeY, 5.7);
+          webgl.camera.lookAt(0, 0.15, 0);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function pointerToPane(clientX, clientY) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = (clientX - rect.left) / Math.max(1, rect.width);
+          const ny = (clientY - rect.top) / Math.max(1, rect.height);
+          const x = clamp((nx - 0.5) * 6.4, ORIGIN_X - 0.2, ORIGIN_X + (COLS - 1) * CELL_W + 0.2);
+          const y = clamp((0.58 - ny) * 4.6, ORIGIN_Y - 0.2, ORIGIN_Y + (ROWS - 1) * CELL_H + 0.2);
+          return { x, y };
+        }
+
+        function drawWorld2D(ctx) {
+          ctx.fillStyle = "#071820";
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#6a4a32";
+          const a = projectToScreen(ORIGIN_X - 0.4, ORIGIN_Y + (ROWS - 1) * CELL_H + 0.4, 0);
+          const b = projectToScreen(ORIGIN_X + (COLS - 1) * CELL_W + 0.4, ORIGIN_Y - 0.4, 0);
+          ctx.fillRect(Math.min(a.x, b.x) - 12, Math.min(a.y, b.y) - 12, Math.abs(b.x - a.x) + 24, Math.abs(b.y - a.y) + 24);
+          for (let iy = 0; iy < ROWS; iy += 1) {
+            for (let ix = 0; ix < COLS; ix += 1) {
+              const idx = iy * COLS + ix;
+              const p = projectToScreen(cellPos(ix, iy).x, cellPos(ix, iy).y, 0.04);
+              const frost = state.frost[idx];
+              ctx.fillStyle = state.pattern[idx]
+                ? `rgba(184,240,255,${0.15 + frost * 0.7})`
+                : `rgba(200,230,240,${0.08 + frost * 0.55})`;
+              ctx.fillRect(p.x - 10, p.y - 8, 20, 16);
+            }
+          }
+          if (state.finger.active) {
+            const f = projectToScreen(state.finger.x, state.finger.y, 0.18);
+            ctx.fillStyle = "rgba(232,208,184,0.85)";
+            ctx.beginPath();
+            ctx.arc(f.x, f.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.fillStyle = "rgba(238,250,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const ratio = revealedRatio();
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(ratio * 100)}%`;
+          if (meter) meter.style.width = `${Math.min(100, (ratio / NEED) * 100)}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `균열 ${state.cracks} / ${MAX_CRACK}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.startsWith("균") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,107,122,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          hud.save();
+          hud.textAlign = "center";
+          hud.fillStyle = "rgba(238,250,255,0.7)";
+          hud.font = "700 12px Trebuchet MS, sans-serif";
+          hud.fillText("천천히 문양을 따라 닦으세요. 세게 누르면 금이 갑니다.", VIEW_W / 2, VIEW_H - 26);
+          hud.restore();
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const ratio = revealedRatio();
+          return JSON.stringify({
+            coordinate_system: "window xy; camera +z",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: Number((ratio * 100).toFixed(1)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            revealed: state.revealed,
+            patternCount: state.patternCount,
+            cracks: state.cracks,
+            ratio: Number(ratio.toFixed(3)),
+          });
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          const p = pointerToPane(event.clientX, event.clientY);
+          state.finger.active = false;
+          state.lastWipe = { x: p.x, y: p.y, t: state.elapsed };
+          input.pending = p;
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          input.pending = pointerToPane(event.clientX, event.clientY);
+        }
+        function onPointerUp() {
+          if (ignoreUp) ignoreUp = false;
+          input.dragging = false;
+          input.pending = null;
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          const step = 0.22;
+          const map = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] };
+          if (map[event.code] && state.mode === "running") {
+            event.preventDefault();
+            state.finger.x = clamp(state.finger.x + map[event.code][0], ORIGIN_X, ORIGIN_X + (COLS - 1) * CELL_W);
+            state.finger.y = clamp(state.finger.y + map[event.code][1], ORIGIN_Y, ORIGIN_Y + (ROWS - 1) * CELL_H);
+            input.pending = { x: state.finger.x, y: state.finger.y };
+            state.finger.active = true;
+          }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            for (let i = 0; i < state.frost.length; i += 1) {
+              if (state.pattern[i]) state.frost[i] = 0;
+            }
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

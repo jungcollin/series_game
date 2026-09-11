@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>연잎 도약</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #0c1810; --accent: #8dff6a; --accent-ink: #0c1810; --danger: #ff6b7a; --ink: #eaffdc; --muted: rgba(234,255,220,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">연잎 도약. 가라앉기 전에 연잎을 건너 연못 사당까지 가세요. 연잎을 탭해 점프. 사당에 도착하면 클리어. 물에 빠지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 다음 연잎을 탭해 점프합니다.</p>
+    <main class="stage" aria-label="연잎 도약 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="연잎 도약" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">거리</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">침하 —</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Lily Hop</p>
+          <h1>연잎 도약</h1>
+          <p class="brief-lead">가라앉기 전에 연잎을 건너 연못 사당까지 가세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>연잎을 탭해 점프</span></li>
+            <li><strong>클리어</strong><span>사당에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>물에 빠지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">연못 실족</p>
+          <h2>물에 빠졌다</h2>
+          <p class="brief-lead" id="fail-detail">물에 빠지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">사당 도착</p>
+          <h2>연못 사당</h2>
+          <p class="brief-lead">가라앉는 연잎을 건너 사당에 닿았습니다.</p>
+          <p class="hud-sub" id="clear-stat">사당에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const LAST = 8;
+        const JUMP_T = 0.46;
+        const GRACE = 5.1;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "lily-hop",
+          title: "연잎 도약",
+          description: "가라앉기 전에 연잎을 건너 연못 사당까지 가세요.",
+          creator: "collin",
+          genre: "3D sinking pads",
+          clearCondition: "사당에 도착하면 클리어",
+          failCondition: "물에 빠지면 실패",
+          controls: "연잎을 탭해 점프",
+        };
+        const COLORS = {
+          pond: "#0c1810",
+          ink: "#eaffdc",
+          leaf: "#8dff6a",
+          petal: "#f2a0c8",
+          stone: "#8a7a68",
+          danger: "#ff6b7a",
+        };
+        const CAM2D = {
+          eye: { x: 0, y: 6.4, z: 11.2 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.82, z: 0.57 },
+          fwd: { x: 0, y: -0.57, z: 0.82 },
+          focal: 430,
+        };
+        const FAIL_COPY = {
+          water: "연잎이 가라앉아 물에 빠졌습니다",
+          miss_jump: "연잎을 놓쳐 물에 빠졌습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const PAD_DEFS = [
+          { x: 0.0, z: 8.2, r: 1.15, kind: "bank" },
+          { x: -1.35, z: 5.6, r: 0.95, kind: "pad" },
+          { x: 1.25, z: 3.15, r: 0.92, kind: "pad" },
+          { x: -0.55, z: 0.7, r: 0.9, kind: "pad" },
+          { x: 1.55, z: -1.7, r: 0.88, kind: "pad" },
+          { x: -1.5, z: -3.9, r: 0.9, kind: "pad" },
+          { x: 0.35, z: -6.05, r: 0.86, kind: "pad" },
+          { x: 1.4, z: -8.15, r: 0.88, kind: "pad" },
+          { x: 0.0, z: -10.4, r: 1.35, kind: "shrine" },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist2(ax, az, bx, bz) { return Math.hypot(ax - bx, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          padIndex: 0,
+          pads: [],
+          frog: { x: 0, y: 0.42, z: 8.2, from: 0, to: 0, jump: 0, jumping: false },
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          hover: -1,
+          bob: 0,
+        };
+        const input = { pointerId: null };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            sink: 2.35 - difficulty * 0.7,
+          };
+        }
+
+        function makePads() {
+          return PAD_DEFS.map((def, i) => ({
+            ...def,
+            i,
+            sink: 0,
+            sinking: false,
+            alive: true,
+            wobble: randRange(0, Math.PI * 2),
+          }));
+        }
+
+        function padY(pad) {
+          if (pad.kind !== "pad") return pad.kind === "shrine" ? 0.22 : 0.18;
+          return 0.12 - pad.sink * 1.05;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.6, 2.8),
+              vy: randRange(0.8, 3.4),
+              vz: Math.sin(a) * randRange(0.6, 2.8),
+              life: randRange(0.28, 0.75),
+              size: randRange(0.05, 0.12),
+              kind,
+            });
+          }
+          if (state.particles.length > 64) state.particles.splice(0, state.particles.length - 64);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "jump") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(520, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "land") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.09);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+              osc.start(now); osc.stop(now + 0.12);
+            } else if (kind === "clear") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.16);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+              osc.start(now); osc.stop(now + 0.21);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.22);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.padIndex = 0;
+          state.pads = makePads();
+          state.frog = { x: 0, y: 0.42, z: 8.2, from: 0, to: 0, jump: 0, jumping: false };
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "다음 연잎을 탭하세요";
+          state.messageTime = 1.6;
+          state.failReason = "";
+          state.hover = -1;
+          state.bob = 0;
+          reseed((Date.now() ^ 0xc3a91e27) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          resumeAudio();
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          state.flash = 0.65;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          state.shake = reducedMotion ? 0.12 : 0.58;
+          state.flash = 0.7;
+          window.relayStageResult.status = "failed";
+          burst(state.frog.x, 0.2, state.frog.z, 18, "splash");
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function landOn(index) {
+          const pad = state.pads[index];
+          state.padIndex = index;
+          state.frog.x = pad.x;
+          state.frog.z = pad.z;
+          state.frog.y = padY(pad) + 0.32;
+          state.frog.jumping = false;
+          playSfx("land");
+          burst(pad.x, 0.2, pad.z, 8, "ripple");
+          if (pad.kind === "shrine") {
+            clearStage();
+            return;
+          }
+          if (pad.kind === "pad") {
+            pad.sinking = true;
+            pad.sink = 0;
+          }
+        }
+
+        function tryJump(index) {
+          if (state.mode !== "running" || state.frog.jumping) return;
+          if (index <= state.padIndex || index > state.padIndex + 1) return;
+          const pad = state.pads[index];
+          if (!pad || !pad.alive || pad.sink > 0.72) return;
+          state.frog.from = state.padIndex;
+          state.frog.to = index;
+          state.frog.jump = 0;
+          state.frog.jumping = true;
+          playSfx("jump");
+          burst(state.frog.x, state.frog.y, state.frog.z, 6, "leaf");
+        }
+
+        function jumpToNext() {
+          tryJump(state.padIndex + 1);
+        }
+
+        function pickPadAt(clientX, clientY) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const px = ((clientX - rect.left) / rect.width) * VIEW_W;
+          const py = ((clientY - rect.top) / rect.height) * VIEW_H;
+          let best = -1;
+          let bestD = 54;
+          state.pads.forEach((pad) => {
+            const s = projectToScreen(pad.x, padY(pad) + 0.1, pad.z);
+            const d = Math.hypot(s.x - px, s.y - py);
+            if (d < bestD) { bestD = d; best = pad.i; }
+          });
+          return best;
+        }
+
+        function updateJump(dt) {
+          if (!state.frog.jumping) return;
+          state.frog.jump += dt / JUMP_T;
+          const u = clamp(state.frog.jump, 0, 1);
+          const a = state.pads[state.frog.from];
+          const b = state.pads[state.frog.to];
+          state.frog.x = lerp(a.x, b.x, u);
+          state.frog.z = lerp(a.z, b.z, u);
+          const arch = Math.sin(u * Math.PI) * 1.35;
+          state.frog.y = lerp(padY(a), padY(b), u) + 0.32 + arch;
+          if (u >= 1) landOn(state.frog.to);
+        }
+
+        function updatePads(dt, params) {
+          state.pads.forEach((pad) => {
+            pad.wobble += dt * 1.6;
+            if (!pad.sinking || pad.kind !== "pad") return;
+            pad.sink += dt / params.sink;
+            if (pad.sink >= 1) {
+              pad.alive = false;
+              pad.sinking = false;
+              burst(pad.x, 0.05, pad.z, 10, "splash");
+              if (!state.frog.jumping && state.padIndex === pad.i) failStage("water");
+            }
+          });
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            p.vy -= 3.2 * dt;
+            p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.bob += dt;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateJump(dt);
+          if (state.mode !== "running") return;
+          if (state.elapsed >= GRACE || state.padIndex > 0) updatePads(dt, params);
+          updateParticles(dt);
+          if (!state.frog.jumping) {
+            const pad = state.pads[state.padIndex];
+            state.frog.y = padY(pad) + 0.32 + Math.sin(state.bob * 3.2) * 0.03;
+            state.frog.x = pad.x;
+            state.frog.z = pad.z;
+          }
+          if (state.mode === "running" && state.elapsed >= DURATION) failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `거리 ${Math.round((state.padIndex / LAST) * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x0c1810, 1);
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x0c1810);
+          scene.fog = new THREE.Fog(0x0c1810, 10, 36);
+          const camera = new THREE.PerspectiveCamera(54, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(0, 6.2, 11);
+          scene.add(new THREE.AmbientLight(0x244028, 0.62));
+          scene.add(new THREE.HemisphereLight(0xb8ffd0, 0x102010, 0.4));
+          const sun = new THREE.DirectionalLight(0xeaffdc, 0.55);
+          sun.position.set(6, 12, 8);
+          scene.add(sun);
+          const shrineLight = new THREE.PointLight(0xffd080, 1.1, 18);
+          shrineLight.position.set(0, 2.4, -10.4);
+          scene.add(shrineLight);
+
+          const water = new THREE.Mesh(
+            new THREE.CircleGeometry(22, 40),
+            new THREE.MeshStandardMaterial({ color: 0x143828, roughness: 0.28, metalness: 0.22 })
+          );
+          water.rotation.x = -Math.PI / 2;
+          water.position.y = -0.05;
+          scene.add(water);
+
+          const bankMat = new THREE.MeshStandardMaterial({ color: 0x3a4a28, roughness: 0.9 });
+          const bank = new THREE.Mesh(new THREE.BoxGeometry(6.5, 0.45, 2.4), bankMat);
+          bank.position.set(0, 0.05, 9.4);
+          scene.add(bank);
+
+          const reedGeo = new THREE.CylinderGeometry(0.03, 0.05, 1.4, 5);
+          const reedMat = new THREE.MeshStandardMaterial({ color: 0x6aad48, roughness: 0.8 });
+          for (let i = 0; i < 18; i += 1) {
+            const reed = new THREE.Mesh(reedGeo, reedMat);
+            const side = i < 9 ? -1 : 1;
+            reed.position.set(side * randRange(2.2, 4.8), 0.7, randRange(-9, 9));
+            reed.rotation.z = side * 0.12;
+            scene.add(reed);
+          }
+
+          const stoneMat = new THREE.MeshStandardMaterial({ color: 0x8a7a68, roughness: 0.72, metalness: 0.08 });
+          const shrineBase = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.35, 0.4, 8), stoneMat);
+          shrineBase.position.set(0, 0.2, -10.4);
+          scene.add(shrineBase);
+          const shrinePost = new THREE.Mesh(new THREE.BoxGeometry(0.28, 1.8, 0.28), stoneMat);
+          shrinePost.position.set(0, 1.15, -10.4);
+          scene.add(shrinePost);
+          const roof = new THREE.Mesh(
+            new THREE.ConeGeometry(0.95, 0.7, 4),
+            new THREE.MeshStandardMaterial({ color: 0x6a4030, roughness: 0.65 })
+          );
+          roof.position.set(0, 2.2, -10.4);
+          roof.rotation.y = Math.PI / 4;
+          scene.add(roof);
+          const lantern = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xffd080 })
+          );
+          lantern.position.set(0, 1.55, -10.15);
+          scene.add(lantern);
+
+          const padGeo = new THREE.CylinderGeometry(0.92, 0.98, 0.08, 10);
+          const padMat = new THREE.MeshStandardMaterial({
+            color: 0x4c9a3a, roughness: 0.7, metalness: 0.05, emissive: 0x143010, emissiveIntensity: 0.25,
+          });
+          const flowerGeo = new THREE.ConeGeometry(0.12, 0.18, 6);
+          const flowerMat = new THREE.MeshStandardMaterial({ color: 0xf2a0c8, roughness: 0.45, emissive: 0x6a2040, emissiveIntensity: 0.2 });
+          const padMeshes = [];
+          PAD_DEFS.forEach((def, i) => {
+            if (def.kind !== "pad") { padMeshes.push(null); return; }
+            const group = new THREE.Group();
+            const mesh = new THREE.Mesh(padGeo, padMat);
+            mesh.scale.setScalar(def.r / 0.92);
+            group.add(mesh);
+            const flower = new THREE.Mesh(flowerGeo, flowerMat);
+            flower.position.set(def.r * 0.35, 0.12, 0);
+            group.add(flower);
+            group.position.set(def.x, 0.12, def.z);
+            scene.add(group);
+            padMeshes.push(group);
+          });
+
+          const frog = new THREE.Group();
+          const skin = new THREE.MeshStandardMaterial({ color: 0x8dff6a, roughness: 0.45, metalness: 0.08, emissive: 0x1a4a10, emissiveIntensity: 0.2 });
+          const body = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 10), skin);
+          body.scale.set(1.15, 0.75, 1.3);
+          frog.add(body);
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 8), skin);
+          head.position.set(0, 0.12, -0.18);
+          frog.add(head);
+          frog.position.set(0, 0.42, 8.2);
+          scene.add(frog);
+
+          const koiGeo = new THREE.SphereGeometry(0.18, 8, 8);
+          const koiMat = new THREE.MeshStandardMaterial({ color: 0xff8a62, roughness: 0.4 });
+          const koi = [];
+          for (let i = 0; i < 4; i += 1) {
+            const fish = new THREE.Mesh(koiGeo, koiMat);
+            fish.scale.set(1.6, 0.5, 0.7);
+            scene.add(fish);
+            koi.push({ mesh: fish, t: i * 1.4, r: 3 + i * 0.6 });
+          }
+
+          const puffGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const particleMeshes = [];
+          for (let i = 0; i < 64; i += 1) {
+            const mesh = new THREE.Mesh(puffGeo, new THREE.MeshBasicMaterial({
+              color: 0xeaffdc, transparent: true, opacity: 0.8, depthWrite: false,
+            }));
+            mesh.visible = false;
+            scene.add(mesh);
+            particleMeshes.push(mesh);
+          }
+
+          const mist = new THREE.Mesh(
+            new THREE.PlaneGeometry(28, 10),
+            new THREE.MeshBasicMaterial({ color: 0xb8ffd0, transparent: true, opacity: 0.08, depthWrite: false })
+          );
+          mist.position.set(0, 1.6, -6);
+          scene.add(mist);
+          const rockGeo = new THREE.DodecahedronGeometry(0.45, 0);
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x6a7a68, roughness: 0.92, metalness: 0.04 });
+          [[-3.4, 0.1, 6.2], [3.6, 0.15, 4.1], [-3.8, 0.12, -2.4], [3.2, 0.1, -7.1], [-2.6, 0.18, -9.2]].forEach((row) => {
+            const rock = new THREE.Mesh(rockGeo, rockMat);
+            rock.position.set(row[0], row[1], row[2]);
+            rock.rotation.set(row[0] * 0.1, row[2] * 0.05, 0.2);
+            scene.add(rock);
+          });
+          const lampGeo = new THREE.CylinderGeometry(0.08, 0.1, 0.9, 6);
+          const lampMat = new THREE.MeshStandardMaterial({ color: 0x5a4030, roughness: 0.7, metalness: 0.1 });
+          const glowGeo = new THREE.SphereGeometry(0.12, 8, 8);
+          const glowMat = new THREE.MeshBasicMaterial({ color: 0xffe0a0, transparent: true, opacity: 0.85 });
+          [[-2.4, 0.55, 8.6], [2.4, 0.55, 8.6], [-1.6, 0.7, -10.1], [1.6, 0.7, -10.1]].forEach((row) => {
+            const pole = new THREE.Mesh(lampGeo, lampMat);
+            pole.position.set(row[0], row[1], row[2]);
+            scene.add(pole);
+            const glow = new THREE.Mesh(glowGeo, glowMat);
+            glow.position.set(row[0], row[1] + 0.55, row[2]);
+            scene.add(glow);
+          });
+
+          return {
+            renderer, scene, camera, shrineLight, padMeshes, frog, koi, particleMeshes, mist, water,
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          state.pads.forEach((pad, i) => {
+            const mesh = webgl.padMeshes[i];
+            if (!mesh) return;
+            mesh.visible = pad.alive || pad.sink < 1.2;
+            mesh.position.y = padY(pad);
+            const wob = Math.sin(pad.wobble) * 0.04;
+            mesh.rotation.z = wob;
+            mesh.rotation.x = Math.sin(pad.wobble * 0.7) * 0.03;
+            const s = pad.alive ? 1 : Math.max(0.2, 1 - (pad.sink - 1) * 2);
+            mesh.scale.setScalar(s);
+          });
+          webgl.frog.position.set(state.frog.x, state.frog.y, state.frog.z);
+          const next = state.pads[Math.min(state.padIndex + 1, LAST)];
+          webgl.frog.lookAt(next.x, state.frog.y, next.z);
+          webgl.koi.forEach((fish, i) => {
+            const t = state.bob * (0.35 + i * 0.05) + fish.t;
+            fish.mesh.position.set(Math.cos(t) * fish.r, -0.08, Math.sin(t * 0.8) * 6);
+            fish.mesh.rotation.y = t + Math.PI / 2;
+          });
+          webgl.shrineLight.intensity = 0.85 + Math.sin(state.bob * 2.4) * 0.25;
+          webgl.particleMeshes.forEach((mesh, i) => {
+            const p = state.particles[i];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.07);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+            mesh.material.color.setHex(p.kind === "splash" ? 0x9ad0ff : p.kind === "leaf" ? 0x8dff6a : 0xeaffdc);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const sx = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          const sy = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.25 : 0;
+          const camZ = state.frog.z + 8.2;
+          const camY = 5.6 + (8.2 - state.frog.z) * 0.04;
+          webgl.camera.position.set(state.frog.x * 0.35 + sx, camY + sy, camZ);
+          webgl.camera.lookAt(state.frog.x, 0.6, state.frog.z - 3.5);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return { x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W, y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H, visible: webgl.proj.z < 1 };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.6 };
+        }
+
+        function roundRect(x, y, width, height, radius) {
+          hud.beginPath();
+          hud.roundRect(x, y, width, height, radius);
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#163820");
+          sky.addColorStop(0.5, "#0c1810");
+          sky.addColorStop(1, "#08140c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#143828";
+          ctx.fillRect(0, VIEW_H * 0.42, VIEW_W, VIEW_H);
+          state.pads.forEach((pad) => {
+            if (!pad.alive && pad.kind === "pad") return;
+            const s = projectToScreen(pad.x, padY(pad), pad.z);
+            ctx.fillStyle = pad.kind === "shrine" ? COLORS.stone : pad.kind === "bank" ? "#3a4a28" : COLORS.leaf;
+            ctx.globalAlpha = pad.kind === "pad" ? clamp(1 - pad.sink, 0.2, 1) : 1;
+            ctx.beginPath();
+            ctx.ellipse(s.x, s.y, pad.r * 28, pad.r * 14, 0, 0, Math.PI * 2);
+            ctx.fill();
+            if (pad.i === state.padIndex + 1) {
+              ctx.strokeStyle = "rgba(234,255,220,0.85)";
+              ctx.lineWidth = 2;
+              ctx.stroke();
+            }
+          });
+          ctx.globalAlpha = 1;
+          const frog = projectToScreen(state.frog.x, state.frog.y, state.frog.z);
+          ctx.fillStyle = COLORS.leaf;
+          ctx.beginPath();
+          ctx.arc(frog.x, frog.y, 9, 0, Math.PI * 2);
+          ctx.fill();
+          state.particles.forEach((p) => {
+            const s = projectToScreen(p.x, p.y, p.z);
+            ctx.globalAlpha = clamp(p.life, 0, 1);
+            ctx.fillStyle = COLORS.ink;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(234,255,220,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const dist = state.padIndex / LAST;
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(dist * 100)}%`;
+          if (meter) meter.style.width = `${dist * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          const pad = state.pads[state.padIndex];
+          const sink = pad && pad.kind === "pad" ? `${Math.round(pad.sink * 100)}%` : "안정";
+          if (sub) sub.textContent = `침하 ${sink}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const next = state.pads[state.padIndex + 1];
+          if (next) {
+            const s = projectToScreen(next.x, padY(next) + 0.2, next.z);
+            hud.save();
+            hud.strokeStyle = "rgba(141,255,106,0.85)";
+            hud.lineWidth = 2;
+            hud.setLineDash([5, 5]);
+            hud.beginPath();
+            hud.arc(s.x, s.y, 22, 0, Math.PI * 2);
+            hud.stroke();
+            hud.setLineDash([]);
+            hud.fillStyle = COLORS.leaf;
+            hud.font = "700 11px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("탭", s.x, s.y - 28);
+            hud.restore();
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.leaf;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(141,255,106,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function drawCard(kind) {
+          hud.fillStyle = "rgba(12,24,16,0.9)";
+          hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          roundRect(128, 84, 704, 372, 22);
+          hud.fillStyle = "rgba(16,36,22,0.96)"; hud.fill();
+          hud.strokeStyle = kind === "failed" ? COLORS.danger : COLORS.leaf;
+          hud.lineWidth = 2.5; hud.stroke();
+          hud.textAlign = "center";
+          hud.fillStyle = kind === "failed" ? COLORS.danger : COLORS.leaf;
+          hud.font = "800 13px Trebuchet MS, sans-serif";
+          hud.fillText("LILY HOP · 연못 사당", VIEW_W / 2, 122);
+          hud.fillStyle = COLORS.ink;
+          hud.font = "900 44px Trebuchet MS, sans-serif";
+          hud.fillText(kind === "menu" ? META.title : kind === "failed" ? "물에 빠졌다" : "연못 사당", VIEW_W / 2, 176);
+          hud.font = "600 19px Trebuchet MS, sans-serif";
+          hud.fillStyle = "rgba(234,255,220,0.82)";
+          if (kind === "menu") {
+            hud.fillText(META.description, VIEW_W / 2, 216);
+            hud.fillStyle = COLORS.leaf;
+            hud.font = "700 17px Trebuchet MS, sans-serif";
+            hud.fillText(`조작 · ${META.controls}`, VIEW_W / 2, 258);
+            hud.fillStyle = "rgba(234,255,220,0.74)";
+            hud.font = "600 16px Trebuchet MS, sans-serif";
+            hud.fillText(`클리어 · ${META.clearCondition}`, VIEW_W / 2, 296);
+            hud.fillText(`실패 · ${META.failCondition}`, VIEW_W / 2, 324);
+            hud.fillText("착지한 연잎은 가라앉으니 바로 다음으로 뛰세요", VIEW_W / 2, 352);
+            hud.fillStyle = COLORS.petal;
+            hud.font = "800 18px Trebuchet MS, sans-serif";
+            hud.fillText("화면 터치 또는 Enter로 시작", VIEW_W / 2, 410);
+          } else if (kind === "failed") {
+            hud.fillText(FAIL_COPY[state.failReason] || META.failCondition, VIEW_W / 2, 232);
+            hud.fillStyle = COLORS.petal;
+            hud.font = "800 23px Trebuchet MS, sans-serif";
+            hud.fillText(`거리 ${Math.round((state.padIndex / LAST) * 100)}%`, VIEW_W / 2, 286);
+            hud.fillStyle = "rgba(234,255,220,0.62)";
+            hud.font = "600 16px Trebuchet MS, sans-serif";
+            hud.fillText("화면 터치 또는 Enter로 시작", VIEW_W / 2, 340);
+          } else {
+            hud.fillText("가라앉는 연잎을 건너 사당에 닿았습니다.", VIEW_W / 2, 232);
+            hud.fillStyle = COLORS.petal;
+            hud.font = "800 25px Trebuchet MS, sans-serif";
+            hud.fillText(`${state.lastRunTime.toFixed(1)}초`, VIEW_W / 2, 288);
+            hud.fillStyle = "rgba(234,255,220,0.62)";
+            hud.font = "600 16px Trebuchet MS, sans-serif";
+            hud.fillText(META.clearCondition, VIEW_W / 2, 340);
+          }
+          hud.textAlign = "left";
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) { game2d.clearRect(0, 0, VIEW_W, VIEW_H); drawWorld2D(game2d); }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const pad = state.pads[state.padIndex];
+          return JSON.stringify({
+            coordinate_system: "world units; pond xz; +y up; pads sink on land",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            padIndex: state.padIndex,
+            sink: Number((pad?.sink || 0).toFixed(3)),
+            jumping: state.frog.jumping,
+            player: { x: Number(state.frog.x.toFixed(2)), y: Number(state.frog.y.toFixed(2)), z: Number(state.frog.z.toFixed(2)) },
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+          });
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          const index = pickPadAt(event.clientX, event.clientY);
+          if (index >= 0) tryJump(index);
+          else jumpToNext();
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault(); startStage(); return;
+          }
+          if (event.code === "Space" || event.code === "ArrowUp" || event.code === "KeyW") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            if (event.repeat) return;
+            jumpToNext();
+          }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.padIndex = LAST;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>잉어 물길</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #07161a; --accent: #ff7a62; --accent-ink: #07161a; --danger: #ff6b7a; --ink: #ffe8e2; --muted: rgba(255,232,226,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">잉어 물길. 물길을 열어 잉어를 연못 문으로 이끄세요. 수문을 탭해 개폐. 잉어 5마리를 집으로 보내면 클리어. 잉어 3마리가 급류에 쓸리면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 수문을 탭해 열고 닫습니다.</p>
+    <main class="stage" aria-label="잉어 물길 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="잉어 물길" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">귀소</p>
+          <p class="hud-value" id="hud-objective">0 / 5</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">40.0</p>
+          <p class="hud-sub" id="hud-sub">유실 0 / 3</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Koi Gate</p>
+          <h1>잉어 물길</h1>
+          <p class="brief-lead">물길을 열어 잉어를 연못 문으로 이끄세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>수문을 탭해 개폐</span></li>
+            <li><strong>클리어</strong><span>잉어 5마리를 집으로 보내면 클리어</span></li>
+            <li><strong>실패</strong><span>잉어 3마리가 급류에 쓸리면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">물길 붕괴</p>
+          <h2>잉어가 쓸려갔다</h2>
+          <p class="brief-lead" id="fail-detail">잉어 3마리가 급류에 쓸리면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">귀소 완료</p>
+          <h2>연못 문이 열렸다</h2>
+          <p class="brief-lead">잉어를 집으로 모두 안내했습니다.</p>
+          <p class="hud-sub" id="clear-stat">잉어 5마리를 집으로 보내면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 40;
+        const GOAL = 5;
+        const MAX_LOST = 3;
+        const HOME = { x: 0, z: 5.35 };
+        const DRAINS = [{ x: -5.35, z: 4.85 }, { x: 5.35, z: 4.85 }];
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "koi-gate",
+          title: "잉어 물길",
+          description: "물길을 열어 잉어를 연못 문으로 이끄세요.",
+          creator: "collin",
+          genre: "3D current herding",
+          clearCondition: "잉어 5마리를 집으로 보내면 클리어",
+          failCondition: "잉어 3마리가 급류에 쓸리면 실패",
+          controls: "수문을 탭해 개폐",
+        };
+        const COLORS = {
+          night: "#07161a",
+          ink: "#ffe8e2",
+          coral: "#ff7a62",
+          teal: "#3ad0c8",
+          wood: "#8a5a32",
+          danger: "#ff6b7a",
+        };
+        const CAM2D = {
+          eye: { x: 0, y: 15.4, z: 9.2 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.74, z: 0.67 },
+          fwd: { x: 0, y: -0.67, z: 0.74 },
+          focal: 420,
+        };
+        const FAIL_COPY = {
+          swept: "잉어 3마리가 급류에 쓸렸습니다",
+          time_limit: "제한 시간 40초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const GATE_DEFS = [
+          { id: "north", x: 0, z: -2.55, dirx: 0, dirz: 1, open: true, label: "북" },
+          { id: "west", x: -2.85, z: 0.35, dirx: 0.55, dirz: 0.84, open: false, label: "서" },
+          { id: "east", x: 2.85, z: 0.35, dirx: -0.55, dirz: 0.84, open: false, label: "동" },
+          { id: "home", x: 0, z: 2.55, dirx: 0, dirz: 1, open: true, label: "문" },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          home: 0,
+          lost: 0,
+          gates: [],
+          koi: [],
+          particles: [],
+          spawnWait: 1.35,
+          surgeWait: 6.8,
+          surgeTele: 0,
+          surgeTarget: -1,
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          koiSeq: 0,
+        };
+        const input = { pointerId: null, downX: 0, downY: 0 };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            drainPull: 0.35 + difficulty * 1.55,
+            swim: 1.35 + difficulty * 0.55,
+            spawnEvery: 4.6 - difficulty * 1.15,
+            surgeEvery: 8.2 - difficulty * 2.2,
+          };
+        }
+
+        function spawnKoi() {
+          state.koi.push({
+            id: (state.koiSeq += 1),
+            x: randRange(-0.55, 0.55),
+            y: 0.18,
+            z: randRange(-6.1, -5.35),
+            vx: 0,
+            vz: 0.4,
+            yaw: 0,
+            pattern: random() < 0.45 ? "white" : "coral",
+            age: 0,
+          });
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const ang = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(ang) * randRange(0.8, 3.2),
+              vy: randRange(0.8, 2.8),
+              vz: Math.sin(ang) * randRange(0.8, 3.2),
+              life: randRange(0.3, 0.7),
+              size: randRange(0.05, 0.12),
+              kind,
+            });
+          }
+          if (state.particles.length > 52) state.particles.splice(0, state.particles.length - 52);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "gate") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "home") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.12);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "lost") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.16);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.19);
+            } else {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(160, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.28);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.31);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.home = 0;
+          state.lost = 0;
+          state.gates = GATE_DEFS.map((gate) => ({ ...gate, pulse: 0 }));
+          state.koi = [];
+          state.particles = [];
+          state.spawnWait = 1.35;
+          state.surgeWait = 6.8;
+          state.surgeTele = 0;
+          state.surgeTarget = -1;
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.koiSeq = 0;
+          reseed((Date.now() ^ 0xa5a5a5a5) >>> 0);
+          spawnKoi();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("home");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.6;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function toggleGate(index) {
+          const gate = state.gates[index];
+          if (!gate) return;
+          gate.open = !gate.open;
+          gate.pulse = 0.35;
+          playSfx("gate");
+          state.message = `${gate.label} 수문 ${gate.open ? "열림" : "닫힘"}`;
+          state.messageTime = 0.65;
+        }
+
+        function flowAt(x, z, params) {
+          let vx = 0;
+          let vz = 0.22;
+          const toHome = Math.hypot(HOME.x - x, HOME.z - z) + 0.001;
+          vx += ((HOME.x - x) / toHome) * 0.18;
+          vz += ((HOME.z - z) / toHome) * 0.18;
+          state.gates.forEach((gate) => {
+            const d = Math.hypot(x - gate.x, z - gate.z);
+            const range = 2.35;
+            if (d >= range) return;
+            const w = 1 - d / range;
+            if (gate.open) {
+              vx += gate.dirx * w * 2.15;
+              vz += gate.dirz * w * 2.15;
+            } else {
+              vx += -gate.dirz * w * 0.7;
+              vz += gate.dirx * w * 0.7;
+            }
+          });
+          DRAINS.forEach((drain) => {
+            const d = Math.hypot(x - drain.x, z - drain.z);
+            if (d >= 3.4) return;
+            const w = (1 - d / 3.4) * params.drainPull;
+            vx += ((drain.x - x) / (d + 0.02)) * w;
+            vz += ((drain.z - z) / (d + 0.02)) * w;
+          });
+          if (z < -3.4) {
+            vz += 0.85;
+            vx += -x * 0.35;
+          }
+          return { vx, vz };
+        }
+
+        function sendHome(koi) {
+          state.home += 1;
+          state.flash = 0.4;
+          state.message = `귀소 ${state.home}/${GOAL}`;
+          state.messageTime = 0.7;
+          burst(koi.x, 0.4, koi.z, 14, "home");
+          playSfx("home");
+          state.koi = state.koi.filter((entry) => entry.id !== koi.id);
+          if (state.home >= GOAL) clearStage();
+        }
+        function sweepKoi(koi) {
+          state.lost += 1;
+          state.flash = 0.35;
+          state.shake = reducedMotion ? 0.1 : 0.32;
+          state.message = `유실 ${state.lost}/${MAX_LOST}`;
+          state.messageTime = 0.8;
+          burst(koi.x, 0.3, koi.z, 12, "lost");
+          playSfx("lost");
+          state.koi = state.koi.filter((entry) => entry.id !== koi.id);
+          if (state.lost >= MAX_LOST) failStage("swept");
+        }
+
+        function updateKoi(dt, params) {
+          state.koi.forEach((koi) => {
+            koi.age += dt;
+            const flow = flowAt(koi.x, koi.z, params);
+            koi.vx = lerp(koi.vx, flow.vx * params.swim, clamp(dt * 3.2, 0, 1));
+            koi.vz = lerp(koi.vz, flow.vz * params.swim, clamp(dt * 3.2, 0, 1));
+            koi.x += koi.vx * dt;
+            koi.z += koi.vz * dt;
+            koi.y = 0.16 + Math.sin(state.elapsed * 3 + koi.id) * 0.04;
+            koi.yaw = Math.atan2(koi.vx, koi.vz);
+            koi.x = clamp(koi.x, -6.6, 6.6);
+            koi.z = clamp(koi.z, -6.6, 6.6);
+            if (Math.hypot(koi.x - HOME.x, koi.z - HOME.z) < 1.15) sendHome(koi);
+            else {
+              for (let index = 0; index < DRAINS.length; index += 1) {
+                if (Math.hypot(koi.x - DRAINS[index].x, koi.z - DRAINS[index].z) < 1.05) {
+                  sweepKoi(koi);
+                  break;
+                }
+              }
+            }
+          });
+        }
+
+        function updateSurge(dt, params) {
+          state.gates.forEach((gate) => { gate.pulse = Math.max(0, gate.pulse - dt); });
+          if (state.elapsed < 6.4) return;
+          if (state.surgeTele > 0) {
+            state.surgeTele = Math.max(0, state.surgeTele - dt);
+            if (state.surgeTele === 0 && state.surgeTarget >= 0) {
+              const gate = state.gates[state.surgeTarget];
+              if (gate && gate.open) {
+                gate.open = false;
+                gate.pulse = 0.4;
+                playSfx("gate");
+                state.message = `${gate.label} 수문이 닫혔다`;
+                state.messageTime = 0.8;
+                state.shake = reducedMotion ? 0.08 : 0.22;
+              }
+            }
+            return;
+          }
+          state.surgeWait -= dt;
+          if (state.surgeWait <= 0) {
+            const openOnes = state.gates.map((gate, index) => (gate.open ? index : -1)).filter((index) => index >= 0);
+            state.surgeTarget = openOnes.length ? openOnes[Math.floor(random() * openOnes.length)] : 3;
+            state.surgeTele = 0.75;
+            state.surgeWait = params.surgeEvery;
+            state.message = "수문 충격!";
+            state.messageTime = 0.7;
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 2.8 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.5);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateKoi(dt, params);
+          if (state.mode !== "running") return;
+          updateSurge(dt, params);
+          state.spawnWait -= dt;
+          if (state.spawnWait <= 0 && state.koi.length < 4 && state.home + state.lost < GOAL + MAX_LOST) {
+            spawnKoi();
+            state.spawnWait = params.spawnEvery;
+          }
+          updateParticles(dt);
+          if (state.elapsed >= DURATION) failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `귀소 ${state.home} / ${GOAL} · 유실 ${state.lost} / ${MAX_LOST}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 유실 ${state.lost}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x07161a, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x07161a);
+          scene.fog = new THREE.Fog(0x07161a, 14, 36);
+
+          const camera = new THREE.PerspectiveCamera(48, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(0, 15.4, 9.2);
+
+          scene.add(new THREE.AmbientLight(0x1a3a44, 0.52));
+          scene.add(new THREE.HemisphereLight(0x7ad0c8, 0x081018, 0.38));
+          const sun = new THREE.DirectionalLight(0xffe0c8, 0.62);
+          sun.position.set(-6, 14, 8);
+          scene.add(sun);
+          const homeLight = new THREE.PointLight(0xff7a62, 1.15, 10);
+          homeLight.position.set(0, 1.4, 5.2);
+          scene.add(homeLight);
+          const westGlow = new THREE.PointLight(0x3ad0c8, 0.7, 8);
+          westGlow.position.set(-5.2, 1.1, 4.6);
+          scene.add(westGlow);
+
+          const bankMat = new THREE.MeshStandardMaterial({ color: 0x1a3a32, roughness: 0.9, metalness: 0.04 });
+          const bank = new THREE.Mesh(new THREE.CircleGeometry(13, 36), bankMat);
+          bank.rotation.x = -Math.PI / 2;
+          bank.position.y = -0.08;
+          scene.add(bank);
+
+          const waterMat = new THREE.MeshStandardMaterial({
+            color: 0x0c3a44, roughness: 0.22, metalness: 0.28, transparent: true, opacity: 0.86,
+            emissive: 0x062028, emissiveIntensity: 0.35,
+          });
+          const water = new THREE.Mesh(new THREE.PlaneGeometry(12.4, 12.4, 12, 12), waterMat);
+          water.rotation.x = -Math.PI / 2;
+          water.position.y = 0.02;
+          scene.add(water);
+
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x8a5a32, roughness: 0.7, metalness: 0.08 });
+          const plankGeo = new THREE.BoxGeometry(1.6, 0.12, 0.42);
+          [[-4.4, -2.2], [4.4, -2.2], [-4.4, 1.6], [4.4, 1.6], [0, -4.6], [0, 3.8]].forEach((pos, index) => {
+            const plank = new THREE.Mesh(plankGeo, woodMat);
+            plank.position.set(pos[0], 0.28, pos[1]);
+            plank.rotation.y = index % 2 ? 0.2 : -0.15;
+            scene.add(plank);
+          });
+
+          const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6a7a78, roughness: 0.82 });
+          const lanternGeo = new THREE.CylinderGeometry(0.16, 0.2, 0.7, 8);
+          const capGeo = new THREE.ConeGeometry(0.22, 0.18, 6);
+          [[-5.8, -4.4], [5.8, -4.4], [-6.1, 1.2], [6.1, 1.2], [-1.6, 6.4], [1.6, 6.4]].forEach((pos) => {
+            const body = new THREE.Mesh(lanternGeo, stoneMat);
+            body.position.set(pos[0], 0.42, pos[1]);
+            scene.add(body);
+            const cap = new THREE.Mesh(capGeo, woodMat);
+            cap.position.set(pos[0], 0.86, pos[1]);
+            scene.add(cap);
+          });
+
+          const mapleMat = new THREE.MeshStandardMaterial({ color: 0xc45a3a, roughness: 0.62 });
+          const canopyGeo = new THREE.SphereGeometry(0.85, 8, 8);
+          const trunkGeo = new THREE.CylinderGeometry(0.08, 0.12, 1.4, 6);
+          [[-7.2, -1.5], [7.2, -0.8], [-6.8, 3.4], [6.6, 3.8]].forEach((pos) => {
+            const trunk = new THREE.Mesh(trunkGeo, woodMat);
+            trunk.position.set(pos[0], 0.7, pos[1]);
+            scene.add(trunk);
+            const canopy = new THREE.Mesh(canopyGeo, mapleMat);
+            canopy.position.set(pos[0], 1.55, pos[1]);
+            scene.add(canopy);
+          });
+
+          const shrineMat = new THREE.MeshStandardMaterial({ color: 0xff7a62, roughness: 0.45, metalness: 0.18, emissive: 0x401810, emissiveIntensity: 0.4 });
+          const shrine = new THREE.Mesh(new THREE.TorusGeometry(1.15, 0.08, 8, 18), shrineMat);
+          shrine.rotation.x = Math.PI / 2;
+          shrine.position.set(0, 0.35, 5.35);
+          scene.add(shrine);
+          const pillarGeo = new THREE.BoxGeometry(0.18, 1.1, 0.18);
+          [-0.7, 0.7].forEach((x) => {
+            const pillar = new THREE.Mesh(pillarGeo, woodMat);
+            pillar.position.set(x, 0.6, 5.7);
+            scene.add(pillar);
+          });
+          const lintel = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.14, 0.22), shrineMat);
+          lintel.position.set(0, 1.18, 5.7);
+          scene.add(lintel);
+
+          const whirlMat = new THREE.MeshBasicMaterial({
+            color: 0x3ad0c8, transparent: true, opacity: 0.28, depthWrite: false,
+          });
+          const whirls = DRAINS.map((drain) => {
+            const mesh = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.08, 8, 16), whirlMat);
+            mesh.rotation.x = Math.PI / 2;
+            mesh.position.set(drain.x, 0.12, drain.z);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const gateGeo = new THREE.BoxGeometry(1.35, 0.72, 0.12);
+          const gateMat = new THREE.MeshStandardMaterial({ color: 0x6a3a1c, roughness: 0.6, metalness: 0.12 });
+          const gateMeshes = state.gates.length ? state.gates : GATE_DEFS;
+          const gates = gateMeshes.map((def) => {
+            const mesh = new THREE.Mesh(gateGeo, gateMat.clone());
+            mesh.position.set(def.x, 0.42, def.z);
+            scene.add(mesh);
+            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.9, 6), woodMat);
+            post.position.set(def.x + 0.72, 0.48, def.z);
+            scene.add(post);
+            return mesh;
+          });
+
+          const koiGeo = new THREE.SphereGeometry(0.22, 8, 8);
+          koiGeo.scale(1.7, 0.55, 1);
+          const coralMat = new THREE.MeshStandardMaterial({ color: 0xff7a62, roughness: 0.45, metalness: 0.08, emissive: 0x401008, emissiveIntensity: 0.25 });
+          const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffe8e2, roughness: 0.4, metalness: 0.06 });
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({ color: 0xff7a62, transparent: true, opacity: 0.9, depthWrite: false });
+
+          const lotusGeo = new THREE.CircleGeometry(0.38, 10);
+          const lotusMat = new THREE.MeshStandardMaterial({ color: 0x2a6a48, roughness: 0.7 });
+          [[-1.8, -4.2], [1.6, -3.6], [-2.2, 2.2], [2.4, 1.8], [0.6, -0.4]].forEach((pos) => {
+            const pad = new THREE.Mesh(lotusGeo, lotusMat);
+            pad.rotation.x = -Math.PI / 2;
+            pad.position.set(pos[0], 0.06, pos[1]);
+            scene.add(pad);
+          });
+
+          return {
+            renderer, scene, camera, water, whirls, gates, shrine, homeLight,
+            koiGeo, coralMat, whiteMat, particleGeo, particleMat,
+            koiMeshes: new Map(), particleMeshes: [],
+            proj: new THREE.Vector3(), ndc: new THREE.Vector2(),
+            raycaster: new THREE.Raycaster(),
+            plane: new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.12),
+            hit: new THREE.Vector3(),
+          };
+        }
+
+        function screenToWorld(clientX, clientY) {
+          const rect = glCanvas.getBoundingClientRect();
+          const nx = ((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+          const ny = -(((clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1);
+          if (webgl) {
+            webgl.ndc.set(nx, ny);
+            webgl.raycaster.setFromCamera(webgl.ndc, webgl.camera);
+            if (webgl.raycaster.ray.intersectPlane(webgl.plane, webgl.hit)) {
+              return { x: webgl.hit.x, z: webgl.hit.z };
+            }
+          }
+          return { x: nx * 7.2, z: -ny * 6.4 };
+        }
+
+        function nearestGate(x, z) {
+          let best = -1;
+          let bestD = 1.85;
+          state.gates.forEach((gate, index) => {
+            const d = Math.hypot(gate.x - x, gate.z - z);
+            if (d < bestD) { bestD = d; best = index; }
+          });
+          return best;
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.homeLight.intensity = 0.85 + Math.sin(state.elapsed * 3.2) * 0.2;
+          if (!reducedMotion) {
+            webgl.whirls.forEach((mesh, index) => {
+              mesh.rotation.z = state.elapsed * (1.6 + index);
+              mesh.scale.setScalar(0.9 + Math.sin(state.elapsed * 2 + index) * 0.08);
+            });
+            webgl.shrine.rotation.z = state.elapsed * 0.4;
+          }
+          state.gates.forEach((gate, index) => {
+            const mesh = webgl.gates[index];
+            if (!mesh) return;
+            const openYaw = Math.PI * 0.42;
+            mesh.rotation.y = lerp(mesh.rotation.y, gate.open ? openYaw : 0, 0.18);
+            mesh.position.y = 0.42 + (gate.pulse > 0 ? 0.08 : 0);
+            mesh.material.emissive = mesh.material.emissive || new THREE.Color(0x000000);
+            mesh.material.emissive.setHex(gate.open ? 0x3a2010 : 0x100808);
+            mesh.material.emissiveIntensity = gate.pulse > 0 ? 0.6 : 0.15;
+          });
+          const seen = new Set();
+          state.koi.forEach((koi) => {
+            seen.add(koi.id);
+            let mesh = webgl.koiMeshes.get(koi.id);
+            if (!mesh) {
+              mesh = new THREE.Mesh(webgl.koiGeo, koi.pattern === "white" ? webgl.whiteMat : webgl.coralMat);
+              webgl.scene.add(mesh);
+              webgl.koiMeshes.set(koi.id, mesh);
+            }
+            mesh.position.set(koi.x, koi.y, koi.z);
+            mesh.rotation.y = koi.yaw;
+          });
+          webgl.koiMeshes.forEach((mesh, id) => {
+            if (seen.has(id)) return;
+            webgl.scene.remove(mesh);
+            webgl.koiMeshes.delete(id);
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.material.color.setHex(particle.kind === "lost" ? 0x3ad0c8 : 0xff7a62);
+            mesh.material.opacity = clamp(particle.life * 1.7, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.25 : 0;
+          webgl.camera.position.set(shakeX, 15.4 + shakeY, 9.2);
+          webgl.camera.lookAt(0, 0.1, 0.4);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return { x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W, y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.4, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#123038");
+          sky.addColorStop(1, "#07161a");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          const pond = projectToScreen(0, 0, 0);
+          ctx.fillStyle = "#0c3a44";
+          ctx.beginPath();
+          ctx.ellipse(pond.x, pond.y + 8, 210, 150, 0, 0, Math.PI * 2);
+          ctx.fill();
+          const home = projectToScreen(HOME.x, 0.2, HOME.z);
+          ctx.strokeStyle = COLORS.coral;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(home.x, home.y, 22, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = COLORS.coral;
+          ctx.font = "700 11px Trebuchet MS, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("집", home.x, home.y + 4);
+          DRAINS.forEach((drain) => {
+            const p = projectToScreen(drain.x, 0.1, drain.z);
+            ctx.strokeStyle = COLORS.teal;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 18, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = COLORS.teal;
+            ctx.fillText("급류", p.x, p.y + 4);
+          });
+          state.gates.forEach((gate) => {
+            const p = projectToScreen(gate.x, 0.4, gate.z);
+            ctx.fillStyle = gate.open ? "rgba(255,122,98,0.9)" : "rgba(58,80,84,0.9)";
+            ctx.fillRect(p.x - 16, p.y - 8, 32, 16);
+            ctx.fillStyle = COLORS.ink;
+            ctx.font = "700 10px Trebuchet MS, sans-serif";
+            ctx.fillText(gate.label, p.x, p.y + 4);
+          });
+          state.koi.forEach((koi) => {
+            const p = projectToScreen(koi.x, koi.y, koi.z);
+            ctx.fillStyle = koi.pattern === "white" ? COLORS.ink : COLORS.coral;
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, 10, 5, koi.yaw, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.6, 0, 1);
+            ctx.fillStyle = COLORS.coral;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,232,226,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.home} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.home / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = state.surgeTele > 0 ? "수문 충격 예고" : `유실 ${state.lost} / ${MAX_LOST}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (webgl) {
+            hud.save();
+            hud.font = "700 11px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            state.gates.forEach((gate) => {
+              const p = projectToScreen(gate.x, 0.9, gate.z);
+              hud.fillStyle = gate.open ? COLORS.coral : "rgba(255,232,226,0.55)";
+              hud.fillText(gate.open ? `${gate.label} 열림` : `${gate.label} 닫힘`, p.x, p.y);
+            });
+            hud.restore();
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.includes("유실") ? COLORS.danger : COLORS.coral;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,122,98,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world xz garden; +z south home; +y up",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.home,
+            lost: state.lost,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            gates: state.gates.map((gate) => ({ id: gate.id, open: gate.open })),
+            koi: state.koi.map((koi) => ({ x: Number(koi.x.toFixed(2)), z: Number(koi.z.toFixed(2)) })),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.pointerId = event.pointerId;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running") {
+            const moved = Math.hypot(event.clientX - input.downX, event.clientY - input.downY);
+            if (moved < 14) {
+              const world = screenToWorld(event.clientX, event.clientY);
+              const index = nearestGate(world.x, world.z);
+              if (index >= 0) toggleGate(index);
+            }
+          }
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (state.mode !== "running") return;
+          const map = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, KeyQ: 0, KeyW: 1, KeyE: 2, KeyR: 3 };
+          if (map[event.code] !== undefined) {
+            event.preventDefault();
+            toggleGate(map[event.code]);
+          }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.home = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>비단 다리</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #161018; --accent: #ff9ad2; --accent-ink: #161018; --danger: #ff6b7a; --ink: #ffeaf6; --muted: rgba(255,234,246,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">비단 다리. 바람에 버티며 협곡에 비단 다리를 잇으세요. 드래그로 비단 끝 고정. 다리를 완성하면 클리어. 비단이 끊어지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 드래그해 비단 끝을 다음 고정점에 잇습니다.</p>
+    <main class="stage" aria-label="비단 다리 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="비단 다리" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">잇기</p>
+          <p class="hud-value" id="hud-objective">1 / 6</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">38.0</p>
+          <p class="hud-sub" id="hud-sub">장력 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Silk Span</p>
+          <h1>비단 다리</h1>
+          <p class="brief-lead">바람에 버티며 협곡에 비단 다리를 잇으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 비단 끝 고정</span></li>
+            <li><strong>클리어</strong><span>다리를 완성하면 클리어</span></li>
+            <li><strong>실패</strong><span>비단이 끊어지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">비단 파열</p>
+          <h2>다리가 끊겼다</h2>
+          <p class="brief-lead" id="fail-detail">비단이 끊어지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">협곡 연결</p>
+          <h2>비단 다리 완성</h2>
+          <p class="brief-lead">돌풍을 견디고 협곡을 이었습니다.</p>
+          <p class="hud-sub" id="clear-stat">다리를 완성하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 38;
+        const GOAL = 6;
+        const SNAP_R = 0.85;
+        const SEGMENTS = 18;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "silk-span",
+          title: "비단 다리",
+          description: "바람에 버티며 협곡에 비단 다리를 잇으세요.",
+          creator: "collin",
+          genre: "3D wind weaving",
+          clearCondition: "다리를 완성하면 클리어",
+          failCondition: "비단이 끊어지면 실패",
+          controls: "드래그로 비단 끝 고정",
+        };
+        const COLORS = {
+          bg: "#161018",
+          ink: "#ffeaf6",
+          silk: "#ff9ad2",
+          dusk: "#6a3a58",
+          stone: "#3a2a38",
+          danger: "#ff6b7a",
+          gold: "#ffd08a",
+        };
+        const FAIL_COPY = {
+          snap: "장력이 한계를 넘어 비단이 끊어졌습니다",
+          slack: "비단이 늘어져 다리 형태를 잃었습니다",
+          time_limit: "제한 시간 38초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const ANCHORS = [
+          { x: -4.15, y: 2.15, z: 0.2 },
+          { x: 4.25, y: 2.55, z: -2.4 },
+          { x: -4.05, y: 3.05, z: -5.1 },
+          { x: 4.45, y: 2.35, z: -7.8 },
+          { x: -4.28, y: 3.35, z: -10.6 },
+          { x: 4.18, y: 2.75, z: -13.5 },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          linked: 1,
+          free: { x: -2.2, y: 2.2, z: -0.6 },
+          tension: 0,
+          slack: 0,
+          gust: 0,
+          gustAge: 0,
+          gustWait: 5.6,
+          particles: [],
+          strand: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            gustEvery: 6.4 - difficulty * 1.6,
+            gustForce: 0.22 + difficulty * 0.28,
+            sag: 0.55 + difficulty * 0.2,
+          };
+        }
+
+        function lastAnchor() {
+          return ANCHORS[state.linked - 1];
+        }
+        function nextAnchor() {
+          return ANCHORS[state.linked] || null;
+        }
+
+        function rebuildStrand() {
+          const from = lastAnchor();
+          const to = state.free;
+          const gust = state.gust;
+          const points = [];
+          for (let i = 0; i <= SEGMENTS; i += 1) {
+            const t = i / SEGMENTS;
+            const x = lerp(from.x, to.x, t);
+            const y = lerp(from.y, to.y, t) - Math.sin(t * Math.PI) * (0.55 + (1 - clamp(state.tension, 0, 1)) * 0.7);
+            const z = lerp(from.z, to.z, t);
+            const wind = Math.sin(t * 6 + state.elapsed * 3.2) * gust * 0.9;
+            points.push({ x: x + wind, y, z });
+          }
+          state.strand = points;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(1.4, 5.5);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.8, 4.4),
+              vz: Math.sin(angle) * lift,
+              life: randRange(0.3, 0.8),
+              kind,
+              size: randRange(0.05, 0.13),
+            });
+          }
+          if (state.particles.length > 80) state.particles.splice(0, state.particles.length - 80);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "snap") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.16);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.19);
+            } else if (kind === "anchor") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(760, now + 0.1);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "gust") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.2);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.23);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.22);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.linked = 1;
+          state.free = { x: -2.15, y: 2.2, z: -0.55 };
+          state.tension = 0.18;
+          state.slack = 0;
+          state.gust = 0;
+          state.gustAge = 0;
+          state.gustWait = 5.6;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          input.dragging = false;
+          rebuildStrand();
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          state.flash = 0.7;
+          const last = ANCHORS[GOAL - 1];
+          burst(last.x, last.y, last.z, 28, "silk");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.72;
+          playSfx("snap");
+          burst(state.free.x, state.free.y, state.free.z, 20, "silk");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function pointerToWorld(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const px = (event.clientX - rect.left) / Math.max(1, rect.width);
+          const py = (event.clientY - rect.top) / Math.max(1, rect.height);
+          const next = nextAnchor() || lastAnchor();
+          const from = lastAnchor();
+          return {
+            x: clamp((px - 0.5) * 10.4, -4.8, 4.8),
+            y: clamp(2.8 - (py - 0.42) * 4.6, 0.8, 4.6),
+            z: lerp(from.z, next.z, clamp(1 - py, 0, 1)),
+          };
+        }
+
+        function anchorFree() {
+          const next = nextAnchor();
+          if (!next) return;
+          if (dist3(state.free.x, state.free.y, state.free.z, next.x, next.y, next.z) > SNAP_R) return;
+          state.linked += 1;
+          state.free = { x: next.x, y: next.y, z: next.z };
+          state.slack = 0;
+          state.tension = 0.2;
+          playSfx("anchor");
+          burst(next.x, next.y, next.z, 14, "silk");
+          state.message = `고정 ${state.linked}/${GOAL}`;
+          state.messageTime = 0.7;
+          state.flash = 0.4;
+          if (state.linked >= GOAL) {
+            clearStage();
+            return;
+          }
+          const follow = nextAnchor();
+          if (follow) {
+            state.free = {
+              x: lerp(next.x, follow.x, 0.18),
+              y: lerp(next.y, follow.y, 0.18),
+              z: lerp(next.z, follow.z, 0.18),
+            };
+          }
+        }
+
+        function updateGusts(dt, params) {
+          if (state.gust > 0) {
+            state.gustAge += dt;
+            state.gust = Math.max(0, state.gust - dt * 0.55);
+            if (state.gustAge > 1.35) state.gust = 0;
+            return;
+          }
+          state.gustWait -= dt;
+          if (state.elapsed < 5.2) return;
+          if (state.gustWait > 0) return;
+          state.gust = params.gustForce + 0.35;
+          state.gustAge = 0;
+          state.gustWait = params.gustEvery;
+          playSfx("gust");
+          state.message = "돌풍!";
+          state.messageTime = 0.7;
+          burst(0, 2.4, lastAnchor().z - 1.5, 12, "petal");
+        }
+
+        function updateSilk(dt, params) {
+          let ax = 0;
+          let ay = 0;
+          let az = 0;
+          if (input.left) ax -= 1;
+          if (input.right) ax += 1;
+          if (input.up) { ay += 0.4; az -= 1; }
+          if (input.down) { ay -= 0.4; az += 1; }
+          if (ax || ay || az) {
+            state.free.x += ax * 4.8 * dt;
+            state.free.y += ay * 3.2 * dt;
+            state.free.z += az * 4.2 * dt;
+          }
+          state.free.x += state.gust * dt * 2.8;
+          state.free.x = clamp(state.free.x, -4.9, 4.9);
+          state.free.y = clamp(state.free.y, 0.7, 4.8);
+          const from = lastAnchor();
+          const next = nextAnchor();
+          const rest = next ? dist3(from.x, from.y, from.z, next.x, next.y, next.z) * 0.92 : 4.2;
+          const len = dist3(from.x, from.y, from.z, state.free.x, state.free.y, state.free.z);
+          const stretch = len / Math.max(0.4, rest);
+          const tensionTarget = clamp((stretch - 0.72) * 0.85 + state.gust * 0.85, 0, 1.35);
+          state.tension = lerp(state.tension, tensionTarget, 1 - Math.pow(0.12, dt * 60));
+          if (state.elapsed > 5 && stretch < 0.42) {
+            state.slack = clamp(state.slack + dt * 0.55, 0, 1.2);
+          } else {
+            state.slack = Math.max(0, state.slack - dt * 0.35);
+          }
+          rebuildStrand();
+          if (input.dragging || ax || ay || az) anchorFree();
+          if (state.tension >= 1) failStage("snap");
+          else if (state.slack >= 1) failStage("slack");
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 3.8 * dt;
+            particle.vx += state.gust * 4 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") {
+            rebuildStrand();
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateGusts(dt, params);
+          updateSilk(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `잇기 ${state.linked} / ${GOAL} · 장력 ${Math.round(state.tension * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 고정 ${GOAL}곳`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x161018, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x161018);
+          scene.fog = new THREE.Fog(0x161018, 10, 36);
+
+          const camera = new THREE.PerspectiveCamera(50, VIEW_W / VIEW_H, 0.1, 90);
+          camera.position.set(0.6, 4.6, 9.4);
+          camera.lookAt(0, 2.2, -6);
+
+          scene.add(new THREE.AmbientLight(0x3a2030, 0.5));
+          scene.add(new THREE.HemisphereLight(0xffc8e4, 0x201018, 0.42));
+          const sun = new THREE.DirectionalLight(0xffd0aa, 0.7);
+          sun.position.set(-6, 10, 8);
+          scene.add(sun);
+          const silkLamp = new THREE.PointLight(0xff9ad2, 1.2, 16);
+          silkLamp.position.set(0, 3.4, -4);
+          scene.add(silkLamp);
+          const duskLamp = new THREE.PointLight(0x8860ff, 0.7, 14);
+          duskLamp.position.set(4, 5, -10);
+          scene.add(duskLamp);
+
+          const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+          const sphGeo = new THREE.SphereGeometry(1, 14, 12);
+          const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 10);
+          const coneGeo = new THREE.ConeGeometry(1, 1, 8);
+          const stoneMat = new THREE.MeshStandardMaterial({ color: 0x3a2a38, roughness: 0.86, metalness: 0.08 });
+          const silkMat = new THREE.MeshStandardMaterial({
+            color: 0xff9ad2, roughness: 0.35, metalness: 0.18, emissive: 0x4a1838, emissiveIntensity: 0.45,
+          });
+          const goldMat = new THREE.MeshStandardMaterial({
+            color: 0xffd08a, roughness: 0.4, metalness: 0.55, emissive: 0x3a2810, emissiveIntensity: 0.3,
+          });
+          const mistMat = new THREE.MeshStandardMaterial({ color: 0x2a1824, roughness: 0.95, metalness: 0.04 });
+
+          const mist = new THREE.Mesh(new THREE.PlaneGeometry(40, 18), mistMat);
+          mist.rotation.x = -Math.PI / 2;
+          mist.position.set(0, -1.6, -6);
+          scene.add(mist);
+
+          const leftCliff = new THREE.Mesh(boxGeo, stoneMat);
+          leftCliff.scale.set(3.6, 14, 22);
+          leftCliff.position.set(-6.4, 3.2, -6);
+          scene.add(leftCliff);
+          const rightCliff = leftCliff.clone();
+          rightCliff.position.x = 6.5;
+          scene.add(rightCliff);
+
+          for (let i = 0; i < 8; i += 1) {
+            const ledge = new THREE.Mesh(boxGeo, stoneMat);
+            ledge.scale.set(1.6, 0.35, 1.8);
+            ledge.position.set(i % 2 === 0 ? -4.4 : 4.5, 1.4 + (i % 3) * 0.7, -1.4 - i * 1.7);
+            scene.add(ledge);
+          }
+
+          const pines = [];
+          for (let i = 0; i < 10; i += 1) {
+            const tree = new THREE.Mesh(coneGeo, new THREE.MeshStandardMaterial({
+              color: 0x3a2840, roughness: 0.8, metalness: 0.05,
+            }));
+            tree.scale.set(0.45, 1.6 + (i % 3) * 0.3, 0.45);
+            tree.position.set((i % 2 === 0 ? -5.2 : 5.3), 6.4, -i * 1.5);
+            scene.add(tree);
+            pines.push(tree);
+          }
+
+          const lanterns = [];
+          ANCHORS.forEach((anchor, index) => {
+            const post = new THREE.Mesh(cylGeo, goldMat);
+            post.scale.set(0.08, 0.9, 0.08);
+            post.position.set(anchor.x, anchor.y - 0.3, anchor.z);
+            scene.add(post);
+            const lamp = new THREE.Mesh(sphGeo, silkMat);
+            lamp.scale.setScalar(0.16);
+            lamp.position.set(anchor.x, anchor.y + 0.22, anchor.z);
+            scene.add(lamp);
+            lanterns.push(lamp);
+            const shrine = new THREE.Mesh(boxGeo, stoneMat);
+            shrine.scale.set(0.7, 0.45, 0.7);
+            shrine.position.set(anchor.x, anchor.y - 0.7, anchor.z);
+            scene.add(shrine);
+            if (index % 2 === 0) {
+              const banner = new THREE.Mesh(boxGeo, silkMat);
+              banner.scale.set(0.08, 1.1, 0.35);
+              banner.position.set(anchor.x - 0.35, anchor.y + 0.2, anchor.z);
+              scene.add(banner);
+            }
+          });
+
+          const moon = new THREE.Mesh(sphGeo, new THREE.MeshBasicMaterial({ color: 0xffeaf6 }));
+          moon.scale.setScalar(1.3);
+          moon.position.set(-7, 9.5, -16);
+          scene.add(moon);
+
+          const petalCount = reducedMotion ? 40 : 130;
+          const petalPos = new Float32Array(petalCount * 3);
+          for (let i = 0; i < petalCount; i += 1) {
+            petalPos[i * 3] = (Math.random() - 0.5) * 12;
+            petalPos[i * 3 + 1] = Math.random() * 7;
+            petalPos[i * 3 + 2] = -Math.random() * 16;
+          }
+          const petalGeo = new THREE.BufferGeometry();
+          petalGeo.setAttribute("position", new THREE.BufferAttribute(petalPos, 3));
+          const petals = new THREE.Points(petalGeo, new THREE.PointsMaterial({
+            color: 0xff9ad2, size: 0.1, transparent: true, opacity: 0.7,
+          }));
+          scene.add(petals);
+
+          const silkSpheres = [];
+          const beadGeo = new THREE.SphereGeometry(0.09, 8, 8);
+          for (let i = 0; i <= SEGMENTS; i += 1) {
+            const bead = new THREE.Mesh(beadGeo, silkMat);
+            scene.add(bead);
+            silkSpheres.push(bead);
+          }
+          const strandPos = new Float32Array((SEGMENTS + 1) * 3);
+          const strandGeo = new THREE.BufferGeometry();
+          strandGeo.setAttribute("position", new THREE.BufferAttribute(strandPos, 3));
+          const strandLine = new THREE.Line(strandGeo, new THREE.LineBasicMaterial({
+            color: 0xff9ad2, transparent: true, opacity: 0.85,
+          }));
+          scene.add(strandLine);
+
+          const targetRing = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.045, 8, 16), goldMat);
+          scene.add(targetRing);
+          const freeTip = new THREE.Mesh(sphGeo, goldMat);
+          freeTip.scale.setScalar(0.16);
+          scene.add(freeTip);
+
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const pMat = new THREE.MeshBasicMaterial({
+            color: 0xff9ad2, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          return {
+            renderer, scene, camera, boxGeo, sphGeo, cylGeo, coneGeo,
+            stoneMat, silkMat, goldMat, mistMat,
+            lanterns, petals, silkSpheres, strandLine, strandPos, targetRing, freeTip, silkLamp,
+            particleGeo, pMat, particleMeshes: [], pines,
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          state.strand.forEach((point, index) => {
+            const bead = webgl.silkSpheres[index];
+            if (bead) {
+              bead.position.set(point.x, point.y, point.z);
+              bead.visible = true;
+              bead.scale.setScalar(index === state.strand.length - 1 ? 0.18 : 0.09);
+            }
+            webgl.strandPos[index * 3] = point.x;
+            webgl.strandPos[index * 3 + 1] = point.y;
+            webgl.strandPos[index * 3 + 2] = point.z;
+          });
+          webgl.strandLine.geometry.attributes.position.needsUpdate = true;
+          webgl.strandLine.material.color.setHex(state.tension > 0.72 ? 0xff6b7a : 0xff9ad2);
+          webgl.freeTip.position.set(state.free.x, state.free.y, state.free.z);
+          const next = nextAnchor();
+          webgl.targetRing.visible = Boolean(next);
+          if (next) {
+            webgl.targetRing.position.set(next.x, next.y, next.z);
+            const spin = reducedMotion ? 0 : state.elapsed * 1.6;
+            webgl.targetRing.rotation.y = spin;
+            webgl.targetRing.rotation.x = Math.PI / 2 + Math.sin(state.elapsed) * 0.2;
+          }
+          webgl.lanterns.forEach((lamp, index) => {
+            const on = index < state.linked;
+            lamp.scale.setScalar(on ? 0.18 + Math.sin(state.elapsed * 5 + index) * 0.03 : 0.1);
+            lamp.material = on ? webgl.silkMat : webgl.stoneMat;
+          });
+          webgl.silkLamp.intensity = 0.9 + state.tension * 0.7;
+          if (!reducedMotion) {
+            webgl.petals.position.x = Math.sin(state.elapsed * 0.4) * 0.6 + state.gust * 1.4;
+            webgl.petals.position.y = (state.elapsed * 0.35) % 2;
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.pMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.06);
+            mesh.material.color.setHex(particle.kind === "petal" ? 0xffd08a : 0xff9ad2);
+            mesh.material.opacity = clamp(particle.life * 1.6, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const focus = nextAnchor() || lastAnchor();
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.28 : 0;
+          webgl.camera.position.set(0.8 + shakeX, 4.4 + shakeY, lastAnchor().z + 9.2);
+          webgl.look.set(focus.x * 0.2, 2.3, focus.z);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project2d(x, y, z) {
+          const camZ = lastAnchor().z + 9.2;
+          const dz = z - camZ;
+          const w = 38 / Math.max(4, 8 - dz);
+          return {
+            x: VIEW_W * 0.5 + x * w * 9,
+            y: VIEW_H * 0.55 - y * w * 8 - z * 1.6,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#2a1424");
+          sky.addColorStop(1, "#161018");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#2a1824";
+          ctx.fillRect(0, 0, VIEW_W * 0.18, VIEW_H);
+          ctx.fillRect(VIEW_W * 0.82, 0, VIEW_W * 0.18, VIEW_H);
+          ctx.strokeStyle = COLORS.silk;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          state.strand.forEach((point, index) => {
+            const p = project2d(point.x, point.y, point.z);
+            if (index === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+          });
+          ctx.stroke();
+          ANCHORS.forEach((anchor, index) => {
+            const p = project2d(anchor.x, anchor.y, anchor.z);
+            ctx.fillStyle = index < state.linked ? COLORS.silk : COLORS.gold;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, index === state.linked ? 9 : 6, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          const tip = project2d(state.free.x, state.free.y, state.free.z);
+          ctx.fillStyle = COLORS.gold;
+          ctx.beginPath();
+          ctx.arc(tip.x, tip.y, 7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(255,234,246,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.linked} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.linked / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `장력 ${Math.round(clamp(state.tension, 0, 1) * 100)}%`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message === "돌풍!" ? COLORS.danger : COLORS.silk;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 110);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,154,210,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const next = nextAnchor();
+          return JSON.stringify({
+            coordinate_system: "world units; canyon +z into mist; x across cliffs",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            linked: state.linked,
+            tension: Number(state.tension.toFixed(3)),
+            slack: Number(state.slack.toFixed(3)),
+            gust: Number(state.gust.toFixed(3)),
+            free: {
+              x: Number(state.free.x.toFixed(2)),
+              y: Number(state.free.y.toFixed(2)),
+              z: Number(state.free.z.toFixed(2)),
+            },
+            next: next ? { x: next.x, y: next.y, z: next.z } : null,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          const world = pointerToWorld(event);
+          state.free.x = world.x;
+          state.free.y = world.y;
+          state.free.z = world.z;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const world = pointerToWorld(event);
+          state.free.x = lerp(state.free.x, world.x, 0.55);
+          state.free.y = lerp(state.free.y, world.y, 0.55);
+          state.free.z = lerp(state.free.z, world.z, 0.55);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running") anchorFree();
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.linked = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          Object.keys(input).forEach((key) => { if (typeof input[key] === "boolean") input[key] = false; });
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>빙핵 시추</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #071820; --accent: #b8f0ff; --accent-ink: #071820; --danger: #ff6b7a; --ink: #eefaff; --muted: rgba(238,250,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">빙핵 시추. 회전하는 빙핵을 깨지 않게 수직으로 시추하세요. 좌우로 드릴 정렬, 홀드로 시추. 빙핵을 추출하면 클리어. 빙핵이 갈라지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 좌우로 정렬한 채 화면을 누르고 있으면 시추합니다.</p>
+    <main class="stage" aria-label="빙핵 시추 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="빙핵 시추" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">깊이</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">균열 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Ice Core Drill</p>
+          <h1>빙핵 시추</h1>
+          <p class="brief-lead">회전하는 빙핵을 깨지 않게 수직으로 시추하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>좌우로 드릴 정렬, 홀드로 시추</span></li>
+            <li><strong>클리어</strong><span>빙핵을 추출하면 클리어</span></li>
+            <li><strong>실패</strong><span>빙핵이 갈라지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">시추 실패</p>
+          <h2>빙핵이 갈라졌다</h2>
+          <p class="brief-lead" id="fail-detail">빙핵이 갈라지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">코어 확보</p>
+          <h2>빙핵 추출</h2>
+          <p class="brief-lead">균열 없이 빙핵을 뽑아냈습니다.</p>
+          <p class="hud-sub" id="clear-stat">빙핵을 추출하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const ALIGN_MAX = 0.58;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "ice-core-drill",
+          title: "빙핵 시추",
+          description: "회전하는 빙핵을 깨지 않게 수직으로 시추하세요.",
+          creator: "collin",
+          genre: "3D ice drilling",
+          clearCondition: "빙핵을 추출하면 클리어",
+          failCondition: "빙핵이 갈라지면 실패",
+          controls: "좌우로 드릴 정렬, 홀드로 시추",
+        };
+        const COLORS = {
+          bg: "#071820",
+          ink: "#eefaff",
+          ice: "#b8f0ff",
+          deep: "#1c6a88",
+          steel: "#8aa4b4",
+          danger: "#ff6b7a",
+          glow: "#7ee8ff",
+        };
+        const FAIL_COPY = {
+          crack: "빙핵이 균열을 이기지 못하고 갈라졌습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          drillX: 0,
+          coreX: 0,
+          coreSpin: 0,
+          depth: 0,
+          crack: 0,
+          drilling: false,
+          alignment: 1,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          chips: 0,
+        };
+        const input = {
+          left: false, right: false,
+          holding: false, dragging: false, downX: 0, originX: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            driftAmp: 0.42 + difficulty * 0.72,
+            driftFreq: 0.55 + difficulty * 0.85,
+            spin: 1.15 + difficulty * 1.4,
+            drillRate: 0.048 + difficulty * 0.008,
+            crackOff: 0.11 + difficulty * 0.08,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.25, 0.25);
+            const lift = randRange(1.2, 4.8);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.6, 4.2),
+              vz: Math.sin(angle) * lift * 0.4,
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.04, 0.12),
+            });
+          }
+          if (state.particles.length > 72) state.particles.splice(0, state.particles.length - 72);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "drill") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90 + state.alignment * 80, now);
+              osc.frequency.exponentialRampToValueAtTime(50, now + 0.06);
+              gain.gain.setValueAtTime(0.025, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+              osc.start(now); osc.stop(now + 0.08);
+            } else if (kind === "crack") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(80, now + 0.12);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "extract") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(920, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else if (kind === "boom") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.24);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.drillX = 0;
+          state.coreX = 0;
+          state.coreSpin = 0;
+          state.depth = 0;
+          state.crack = 0;
+          state.drilling = false;
+          state.alignment = 1;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.chips = 0;
+          input.holding = false;
+          input.dragging = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("extract");
+          state.flash = 0.75;
+          burst(state.coreX, 1.2, 0, 28, "ice");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.18 : 0.78;
+          playSfx("boom");
+          burst(state.coreX, 0.4, 0, 24, "crack");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function pointerToDrill(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const px = (event.clientX - rect.left) / Math.max(1, rect.width);
+          return clamp((px - 0.5) * 3.4, -1.55, 1.55);
+        }
+
+        function updateDrill(dt, params) {
+          let steer = 0;
+          if (input.left) steer -= 1;
+          if (input.right) steer += 1;
+          if (steer) state.drillX += steer * 2.6 * dt;
+          state.drillX = clamp(state.drillX, -1.55, 1.55);
+          const wobble = Math.sin(state.elapsed * params.driftFreq * 2.15) * params.driftAmp * 0.35;
+          const wander = Math.sin(state.elapsed * params.driftFreq + 1.2) * params.driftAmp;
+          state.coreX = wander + wobble * 0.45;
+          state.coreSpin += params.spin * dt;
+          const offset = Math.abs(state.drillX - state.coreX);
+          state.alignment = clamp(1 - offset / ALIGN_MAX, 0, 1);
+          state.drilling = input.holding;
+          if (!state.drilling) return;
+          const depthGain = params.drillRate * (0.28 + state.alignment * 0.95);
+          state.depth = clamp(state.depth + depthGain * dt, 0, 1);
+          const offCrack = (1 - state.alignment) * params.crackOff;
+          const baseCrack = state.alignment > 0.82 ? 0.006 : 0.018;
+          state.crack = clamp(state.crack + (offCrack + baseCrack) * dt, 0, 1);
+          state.chips += dt;
+          if (state.chips > 0.09) {
+            state.chips = 0;
+            burst(state.drillX, 2.05 - state.depth * 1.6, 0.2, state.alignment > 0.7 ? 3 : 6, "ice");
+            playSfx(state.alignment > 0.55 ? "drill" : "crack");
+          }
+          if (state.alignment < 0.35 && Math.floor(state.elapsed * 3) !== Math.floor((state.elapsed - dt) * 3)) {
+            state.message = "중심에서 벗어남";
+            state.messageTime = 0.45;
+            state.shake = Math.max(state.shake, 0.18);
+          }
+          if (state.crack >= 1) failStage("crack");
+          else if (state.depth >= 1) clearStage();
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 5.5 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.8);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateDrill(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `깊이 ${Math.round(state.depth * 100)}% · 균열 ${Math.round(state.crack * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 균열 ${Math.round(state.crack * 100)}%`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x071820, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x071820);
+          scene.fog = new THREE.Fog(0x071820, 8, 22);
+
+          const camera = new THREE.PerspectiveCamera(42, VIEW_W / VIEW_H, 0.08, 80);
+          camera.position.set(0, 2.35, 7.4);
+          camera.lookAt(0, 0.7, 0);
+
+          scene.add(new THREE.AmbientLight(0x1a4050, 0.5));
+          scene.add(new THREE.HemisphereLight(0xb8f0ff, 0x0a2030, 0.46));
+          const key = new THREE.DirectionalLight(0xeefaff, 0.72);
+          key.position.set(4, 8, 6);
+          scene.add(key);
+          const iceLamp = new THREE.PointLight(0x7ee8ff, 1.2, 14);
+          iceLamp.position.set(0, 3.2, 2.4);
+          scene.add(iceLamp);
+          const caveLamp = new THREE.PointLight(0x3a88aa, 0.7, 12);
+          caveLamp.position.set(-3.4, 1.2, -2);
+          scene.add(caveLamp);
+
+          const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+          const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 24);
+          const sphGeo = new THREE.SphereGeometry(1, 16, 12);
+          const coneGeo = new THREE.ConeGeometry(1, 1, 10);
+          const iceMat = new THREE.MeshStandardMaterial({
+            color: 0x9ad8ee, roughness: 0.22, metalness: 0.18, transparent: true, opacity: 0.88,
+          });
+          const deepIce = new THREE.MeshStandardMaterial({
+            color: 0x2a6a88, roughness: 0.35, metalness: 0.12, emissive: 0x102838, emissiveIntensity: 0.4,
+          });
+          const steelMat = new THREE.MeshStandardMaterial({ color: 0x8aa4b4, roughness: 0.32, metalness: 0.78 });
+          const darkMat = new THREE.MeshStandardMaterial({ color: 0x1a2c34, roughness: 0.7, metalness: 0.2 });
+          const glowMat = new THREE.MeshStandardMaterial({
+            color: 0xb8f0ff, roughness: 0.25, metalness: 0.3, emissive: 0x4ad0ee, emissiveIntensity: 0.7,
+          });
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x24343c, roughness: 0.9, metalness: 0.06 });
+
+          const cavern = new THREE.Mesh(new THREE.CylinderGeometry(8.5, 8.5, 16, 20, 1, true), rockMat);
+          cavern.position.y = 2;
+          scene.add(cavern);
+          const floor = new THREE.Mesh(new THREE.CircleGeometry(8.4, 28), deepIce);
+          floor.rotation.x = -Math.PI / 2;
+          floor.position.y = -2.4;
+          scene.add(floor);
+
+          for (let i = 0; i < 12; i += 1) {
+            const spike = new THREE.Mesh(coneGeo, iceMat);
+            const ang = (i / 12) * Math.PI * 2;
+            spike.scale.set(0.28, 1.4 + (i % 4) * 0.35, 0.28);
+            spike.position.set(Math.cos(ang) * 3.8, 3.4, Math.sin(ang) * 2.4 - 0.6);
+            spike.rotation.z = Math.PI;
+            scene.add(spike);
+          }
+          for (let i = 0; i < 8; i += 1) {
+            const rib = new THREE.Mesh(boxGeo, rockMat);
+            rib.scale.set(0.35, 5.5, 0.7);
+            rib.position.set(-4.6 + (i % 2) * 9.2, 1.2, -3 + Math.floor(i / 2) * 1.8);
+            rib.rotation.z = (i % 2 ? -1 : 1) * 0.18;
+            scene.add(rib);
+          }
+          for (let i = 0; i < 6; i += 1) {
+            const shelf = new THREE.Mesh(boxGeo, iceMat);
+            shelf.scale.set(1.15, 0.12, 0.55);
+            shelf.position.set((i % 2 === 0 ? -2.8 : 2.9), -1.6 + i * 0.55, -1.8);
+            scene.add(shelf);
+            const sample = new THREE.Mesh(cylGeo, glowMat);
+            sample.scale.set(0.08, 0.42, 0.08);
+            sample.position.set(shelf.position.x + 0.35, shelf.position.y + 0.28, shelf.position.z);
+            scene.add(sample);
+          }
+          const crateA = new THREE.Mesh(boxGeo, darkMat);
+          crateA.scale.set(0.9, 0.55, 0.7);
+          crateA.position.set(-2.6, -2.05, 2.4);
+          scene.add(crateA);
+          const crateB = crateA.clone();
+          crateB.position.set(2.5, -2.05, 2.2);
+          scene.add(crateB);
+
+          const coreGroup = new THREE.Group();
+          const core = new THREE.Mesh(cylGeo, iceMat);
+          core.scale.set(1.05, 3.6, 1.05);
+          coreGroup.add(core);
+          const inner = new THREE.Mesh(cylGeo, deepIce);
+          inner.scale.set(0.72, 3.55, 0.72);
+          coreGroup.add(inner);
+          const rings = [];
+          for (let i = 0; i < 7; i += 1) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(1.06, 0.03, 6, 20), glowMat);
+            ring.rotation.x = Math.PI / 2;
+            ring.position.y = -1.5 + i * 0.5;
+            coreGroup.add(ring);
+            rings.push(ring);
+          }
+          const crackLines = [];
+          for (let i = 0; i < 4; i += 1) {
+            const line = new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial({
+              color: 0xff6b7a, transparent: true, opacity: 0, depthWrite: false,
+            }));
+            line.scale.set(0.04, 3.2, 0.04);
+            line.position.set(Math.cos(i) * 1.02, 0, Math.sin(i) * 1.02);
+            coreGroup.add(line);
+            crackLines.push(line);
+          }
+          coreGroup.position.set(0, -0.15, 0);
+          scene.add(coreGroup);
+
+          const rig = new THREE.Group();
+          const gantry = new THREE.Mesh(boxGeo, steelMat);
+          gantry.scale.set(4.4, 0.18, 0.7);
+          gantry.position.set(0, 3.15, 1.15);
+          rig.add(gantry);
+          const mastL = new THREE.Mesh(boxGeo, darkMat);
+          mastL.scale.set(0.18, 4.4, 0.18);
+          mastL.position.set(-2.1, 1.1, 1.15);
+          rig.add(mastL);
+          const mastR = mastL.clone();
+          mastR.position.x = 2.1;
+          rig.add(mastR);
+          scene.add(rig);
+
+          const bit = new THREE.Group();
+          const shaft = new THREE.Mesh(cylGeo, steelMat);
+          shaft.scale.set(0.08, 2.2, 0.08);
+          shaft.position.y = 2.4;
+          bit.add(shaft);
+          const head = new THREE.Mesh(coneGeo, glowMat);
+          head.scale.set(0.16, 0.42, 0.16);
+          head.rotation.x = Math.PI;
+          head.position.y = 1.22;
+          bit.add(head);
+          const collar = new THREE.Mesh(cylGeo, darkMat);
+          collar.scale.set(0.14, 0.18, 0.14);
+          collar.position.y = 1.48;
+          bit.add(collar);
+          scene.add(bit);
+
+          const consoleBox = new THREE.Mesh(boxGeo, darkMat);
+          consoleBox.scale.set(1.6, 0.7, 0.7);
+          consoleBox.position.set(0, -0.2, 3.3);
+          scene.add(consoleBox);
+          const dial = new THREE.Mesh(cylGeo, glowMat);
+          dial.scale.set(0.18, 0.08, 0.18);
+          dial.rotation.x = Math.PI / 2;
+          dial.position.set(-0.4, 0.22, 3.55);
+          scene.add(dial);
+
+          const flakeCount = reducedMotion ? 50 : 160;
+          const flakePos = new Float32Array(flakeCount * 3);
+          for (let i = 0; i < flakeCount; i += 1) {
+            flakePos[i * 3] = (Math.random() - 0.5) * 10;
+            flakePos[i * 3 + 1] = Math.random() * 6;
+            flakePos[i * 3 + 2] = (Math.random() - 0.5) * 8;
+          }
+          const flakeGeo = new THREE.BufferGeometry();
+          flakeGeo.setAttribute("position", new THREE.BufferAttribute(flakePos, 3));
+          const flakes = new THREE.Points(flakeGeo, new THREE.PointsMaterial({
+            color: 0xb8f0ff, size: 0.07, transparent: true, opacity: 0.65,
+          }));
+          scene.add(flakes);
+
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const iceP = new THREE.MeshBasicMaterial({
+            color: 0xb8f0ff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          return {
+            renderer, scene, camera, boxGeo, cylGeo, sphGeo, coneGeo,
+            iceMat, deepIce, steelMat, darkMat, glowMat, rockMat,
+            coreGroup, core, rings, crackLines, bit, head, iceLamp, flakes,
+            particleGeo, iceP, particleMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.coreGroup.position.x = state.coreX;
+          webgl.coreGroup.rotation.y = state.coreSpin;
+          const sunk = state.depth * 1.55;
+          webgl.bit.position.set(state.drillX, -sunk * 0.15, 0.15);
+          webgl.head.rotation.y = state.drilling ? state.elapsed * 18 : state.elapsed * 2;
+          const pulse = reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 9) * 0.08;
+          webgl.head.scale.set(0.16 * pulse, 0.42, 0.16 * pulse);
+          webgl.iceLamp.position.set(state.coreX, 3.1 - sunk * 0.4, 2.2);
+          webgl.iceLamp.intensity = 0.9 + state.alignment * 0.5;
+          webgl.crackLines.forEach((line, index) => {
+            line.material.opacity = clamp(state.crack * 1.4 - index * 0.12, 0, 0.9);
+            line.scale.y = 1.2 + state.crack * 2.2;
+          });
+          webgl.rings.forEach((ring, index) => {
+            const lit = state.depth > index / 7;
+            ring.material = lit ? webgl.glowMat : webgl.deepIce;
+          });
+          if (!reducedMotion) webgl.flakes.position.y = (state.elapsed * 0.4) % 1.5;
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.iceP.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.06);
+            mesh.material.color.setHex(particle.kind === "crack" ? 0xff6b7a : 0xb8f0ff);
+            mesh.material.opacity = clamp(particle.life * 1.7, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const drillNudge = state.drilling && !reducedMotion ? Math.sin(state.elapsed * 40) * 0.02 : 0;
+          webgl.camera.position.set(0.15 + shakeX, 2.35 + shakeY, 7.4);
+          webgl.look.set(state.coreX * 0.25, 0.55 - state.depth * 0.35 + drillNudge, 0);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project2d(x, y) {
+          return {
+            x: VIEW_W * 0.5 + x * 150,
+            y: VIEW_H * 0.62 - y * 70,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#0c2a38");
+          sky.addColorStop(1, "#071820");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#163848";
+          ctx.fillRect(0, VIEW_H * 0.72, VIEW_W, VIEW_H);
+          const core = project2d(state.coreX, 0.2);
+          const g = ctx.createLinearGradient(core.x - 50, 0, core.x + 50, 0);
+          g.addColorStop(0, "#1c6a88");
+          g.addColorStop(0.5, "#b8f0ff");
+          g.addColorStop(1, "#1c6a88");
+          ctx.fillStyle = g;
+          ctx.fillRect(core.x - 46, 70, 92, VIEW_H * 0.62);
+          ctx.strokeStyle = `rgba(255,107,122,${state.crack})`;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(core.x - 10, 90);
+          ctx.lineTo(core.x + 8, 90 + VIEW_H * 0.5 * state.crack);
+          ctx.stroke();
+          const bit = project2d(state.drillX, 2.1 - state.depth * 1.6);
+          ctx.fillStyle = COLORS.steel;
+          ctx.fillRect(bit.x - 5, 40, 10, bit.y - 40);
+          ctx.fillStyle = COLORS.ice;
+          ctx.beginPath();
+          ctx.moveTo(bit.x - 10, bit.y);
+          ctx.lineTo(bit.x + 10, bit.y);
+          ctx.lineTo(bit.x, bit.y + 18);
+          ctx.fill();
+          ctx.strokeStyle = state.alignment > 0.6 ? COLORS.ice : COLORS.danger;
+          ctx.setLineDash([6, 6]);
+          ctx.beginPath();
+          ctx.moveTo(core.x, 60);
+          ctx.lineTo(core.x, VIEW_H - 80);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          for (let band = 0; band < 7; band += 1) {
+            const by = 90 + band * 42;
+            ctx.strokeStyle = state.depth > band / 7 ? COLORS.glow : "rgba(28,106,136,0.45)";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(core.x - 46, by);
+            ctx.lineTo(core.x + 46, by);
+            ctx.stroke();
+          }
+          ctx.fillStyle = "rgba(238,250,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+          ctx.fillText(state.drilling ? "시추 중" : "정렬 대기", 22, VIEW_H - 36);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(state.depth * 100)}%`;
+          if (meter) meter.style.width = `${state.depth * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `균열 ${Math.round(state.crack * 100)}%`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const cx = VIEW_W * 0.5;
+          const cy = VIEW_H - 58;
+          hud.strokeStyle = "rgba(184,240,255,0.35)";
+          hud.lineWidth = 2;
+          hud.strokeRect(cx - 70, cy - 10, 140, 16);
+          hud.fillStyle = COLORS.ice;
+          hud.fillRect(cx - 70 + 70 + state.coreX * 42 - 4, cy - 14, 8, 24);
+          hud.fillStyle = state.alignment > 0.55 ? COLORS.ice : COLORS.danger;
+          hud.fillRect(cx - 70 + 70 + state.drillX * 42 - 3, cy - 12, 6, 20);
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.danger;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(184,240,255,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; core on x; drill x alignment; depth 0-1",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            depth: Number(state.depth.toFixed(3)),
+            crack: Number(state.crack.toFixed(3)),
+            alignment: Number(state.alignment.toFixed(3)),
+            drillX: Number(state.drillX.toFixed(3)),
+            coreX: Number(state.coreX.toFixed(3)),
+            drilling: state.drilling,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.dragging = true;
+          input.downX = event.clientX;
+          input.originX = state.drillX;
+          input.pointerId = event.pointerId;
+          state.drillX = pointerToDrill(event);
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          state.drillX = pointerToDrill(event);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          input.holding = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right" };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            input.holding = true;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.holding = false;
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.depth = 1;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = false;
+          input.right = false;
+          input.holding = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

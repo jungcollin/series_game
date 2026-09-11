@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>봉인 돌</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #120e18; --accent: #c9a6ff; --accent-ink: #120e18; --danger: #ff6b7a; --ink: #f3eaff; --muted: rgba(243,234,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">봉인 돌. 회전하는 석판을 맞춰 무덤 문을 봉인하세요. 석판을 드래그해 회전. 봉인 3겹을 맞추면 클리어. 과부하되면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면 터치로 석판을 드래그해 회전합니다.</p>
+    <main class="stage" aria-label="봉인 돌 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="봉인 돌" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">겹</p>
+          <p class="hud-value" id="hud-objective">0 / 3</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">과부하 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Tomb Seal</p>
+          <h1>봉인 돌</h1>
+          <p class="brief-lead">회전하는 석판을 맞춰 무덤 문을 봉인하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>석판을 드래그해 회전</span></li>
+            <li><strong>클리어</strong><span>봉인 3겹을 맞추면 클리어</span></li>
+            <li><strong>실패</strong><span>과부하되면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">봉인 붕괴</p>
+          <h2>석판이 과열됐다</h2>
+          <p class="brief-lead" id="fail-detail">과부하되면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">삼중 봉인</p>
+          <h2>무덤 문이 닫혔다</h2>
+          <p class="brief-lead">세 겹 석판의 상형문자가 하나로 맞았습니다.</p>
+          <p class="hud-sub" id="clear-stat">봉인 3겹을 맞추면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const GOAL = 3;
+        const GRACE = 5.2;
+        const LOCK_HOLD = 0.48;
+        const GLYPH_N = 6;
+        const STEP = (Math.PI * 2) / GLYPH_N;
+        const RING_R = [0.92, 1.58, 2.28];
+        const GLYPH_MARK = ["눈", "앵크", "스캐럽", "뱀", "태양", "자칼"];
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "tomb-seal",
+          title: "봉인 돌",
+          description: "회전하는 석판을 맞춰 무덤 문을 봉인하세요.",
+          creator: "collin",
+          genre: "3D seal alignment",
+          clearCondition: "봉인 3겹을 맞추면 클리어",
+          failCondition: "과부하되면 실패",
+          controls: "석판을 드래그해 회전",
+        };
+        const COLORS = {
+          night: "#120e18",
+          ink: "#f3eaff",
+          accent: "#c9a6ff",
+          sand: "#8a6a48",
+          brass: "#c4a056",
+          ember: "#ff8a4a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          overload: "봉인 석판이 과부하되어 금이 갔습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0.15, y: 1.35, z: 7.4 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 1, z: 0 },
+          fwd: { x: 0, y: 0, z: -1 },
+          focal: 520,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function wrapPi(a) {
+          let v = a;
+          while (v > Math.PI) v -= Math.PI * 2;
+          while (v < -Math.PI) v += Math.PI * 2;
+          return v;
+        }
+        function angAbs(a, b) { return Math.abs(wrapPi(a - b)); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          locked: 0,
+          rings: [0.62, -0.84, 0.48],
+          targetGlyph: 0,
+          hold: 0,
+          overload: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          pulse: 0,
+          braziers: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, ring: 2, lastAng: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            tol: 0.18 - difficulty * 0.04,
+            leak: 10.5 + difficulty * 7.2,
+          };
+        }
+
+        function glyphWorldAng(ringIndex, glyphIndex) {
+          return wrapPi(state.rings[ringIndex] + glyphIndex * STEP);
+        }
+
+        function ringError(index) {
+          return angAbs(glyphWorldAng(index, state.targetGlyph), 0);
+        }
+
+        function stackError() {
+          return Math.max(ringError(0), ringError(1), ringError(2));
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const angle = (Math.PI * 2 * i) / amount + randRange(-0.25, 0.25);
+            const lift = randRange(1.2, 4.4);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.6, 3.4),
+              vz: Math.sin(angle) * lift * 0.35,
+              life: randRange(0.28, 0.78),
+              kind,
+              size: randRange(0.05, 0.13),
+            });
+          }
+          if (state.particles.length > 72) state.particles.splice(0, state.particles.length - 72);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "lock") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(310, now);
+              osc.frequency.exponentialRampToValueAtTime(740, now + 0.16);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.24);
+            } else if (kind === "align") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(240 + state.targetGlyph * 40, now);
+              gain.gain.setValueAtTime(0.018, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+              osc.start(now); osc.stop(now + 0.08);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.26);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(96, now);
+              osc.frequency.exponentialRampToValueAtTime(34, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.26);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function scrambleRings() {
+          state.rings = [
+            wrapPi(randRange(0.35, 1.15) * (random() < 0.5 ? 1 : -1)),
+            wrapPi(randRange(0.4, 1.25) * (random() < 0.5 ? 1 : -1)),
+            wrapPi(randRange(0.45, 1.3) * (random() < 0.5 ? 1 : -1)),
+          ];
+          const used = state.locked;
+          state.targetGlyph = (used * 2 + 1) % GLYPH_N;
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.locked = 0;
+          state.hold = 0;
+          state.overload = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.pulse = 0;
+          state.braziers = 0;
+          input.dragging = false;
+          input.ring = 2;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          scrambleRings();
+          state.targetGlyph = 0;
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          state.flash = 0.8;
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("fail");
+          burst(0, 1.6, 0.4, 24, "spark");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function lockSeal() {
+          state.locked += 1;
+          state.hold = 0;
+          state.flash = 0.58;
+          state.message = `봉인 ${state.locked}/${GOAL} · ${GLYPH_MARK[state.targetGlyph]}`;
+          state.messageTime = 1;
+          burst(0, 1.7, 0.35, 20, "seal");
+          playSfx("lock");
+          if (state.locked >= GOAL) {
+            clearStage();
+            return;
+          }
+          scrambleRings();
+        }
+
+        function applyKeyboard(dt) {
+          const turn = 1.62 * dt;
+          const delta = (input.left ? -turn : 0) + (input.right ? turn : 0);
+          if (delta) state.rings[input.ring] = wrapPi(state.rings[input.ring] + delta);
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            p.vy -= 2.4 * dt;
+            p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.pulse += dt;
+          state.braziers += dt;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          applyKeyboard(dt);
+          const err = stackError();
+          if (err <= params.tol) {
+            state.hold += dt;
+            state.overload = Math.max(0, state.overload - dt * 16);
+            if (state.hold > 0.1 && Math.random() < dt * 7) burst(0, 2.4, 0.2, 2, "seal");
+            if (state.hold >= LOCK_HOLD) lockSeal();
+          } else {
+            if (state.hold > 0.1) playSfx("align");
+            state.hold = 0;
+            if (state.elapsed > GRACE) {
+              const leak = params.leak * clamp((err - params.tol) / 1.15, 0.16, 1);
+              state.overload = Math.min(100, state.overload + dt * leak);
+            }
+          }
+          updateParticles(dt);
+          if (state.mode !== "running") return;
+          if (state.elapsed > GRACE && state.overload >= 100) failStage("overload");
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `겹 ${state.locked} / ${GOAL} · 과부하 ${Math.round(state.overload)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 봉인 ${GOAL}겹`;
+          }
+        }
+
+        function makeGlyphMesh(kind, mat, geos) {
+          const g = new THREE.Group();
+          if (kind === 0) {
+            const rim = new THREE.Mesh(geos.torus, mat);
+            rim.scale.set(0.16, 0.16, 0.16);
+            const pupil = new THREE.Mesh(geos.sph, mat);
+            pupil.scale.setScalar(0.06);
+            g.add(rim); g.add(pupil);
+          } else if (kind === 1) {
+            const stem = new THREE.Mesh(geos.box, mat);
+            stem.scale.set(0.05, 0.28, 0.05);
+            const loop = new THREE.Mesh(geos.torus, mat);
+            loop.scale.set(0.1, 0.1, 0.1);
+            loop.position.y = 0.18;
+            const bar = new THREE.Mesh(geos.box, mat);
+            bar.scale.set(0.18, 0.04, 0.04);
+            bar.position.y = 0.05;
+            g.add(stem); g.add(loop); g.add(bar);
+          } else if (kind === 2) {
+            const body = new THREE.Mesh(geos.sph, mat);
+            body.scale.set(0.14, 0.08, 0.1);
+            const shell = new THREE.Mesh(geos.box, mat);
+            shell.scale.set(0.16, 0.05, 0.12);
+            g.add(body); g.add(shell);
+          } else if (kind === 3) {
+            const body = new THREE.Mesh(geos.cyl, mat);
+            body.scale.set(0.035, 0.22, 0.035);
+            body.rotation.z = 0.6;
+            const head = new THREE.Mesh(geos.cone, mat);
+            head.scale.set(0.07, 0.12, 0.07);
+            head.position.set(0.1, 0.12, 0);
+            g.add(body); g.add(head);
+          } else if (kind === 4) {
+            const core = new THREE.Mesh(geos.sph, mat);
+            core.scale.setScalar(0.08);
+            g.add(core);
+            for (let i = 0; i < 6; i += 1) {
+              const ray = new THREE.Mesh(geos.box, mat);
+              ray.scale.set(0.03, 0.16, 0.03);
+              const a = (i / 6) * Math.PI * 2;
+              ray.position.set(Math.cos(a) * 0.12, Math.sin(a) * 0.12, 0);
+              ray.rotation.z = a;
+              g.add(ray);
+            }
+          } else {
+            const body = new THREE.Mesh(geos.box, mat);
+            body.scale.set(0.1, 0.12, 0.08);
+            const earL = new THREE.Mesh(geos.cone, mat);
+            earL.scale.set(0.04, 0.12, 0.04);
+            earL.position.set(-0.05, 0.12, 0);
+            const earR = earL.clone();
+            earR.position.x = 0.05;
+            g.add(body); g.add(earL); g.add(earR);
+          }
+          return g;
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x120e18, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x120e18);
+          scene.fog = new THREE.Fog(0x120e18, 8, 28);
+
+          const camera = new THREE.PerspectiveCamera(42, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(0.2, 1.4, 7.5);
+          camera.lookAt(0, 1.55, 0);
+
+          scene.add(new THREE.AmbientLight(0x2a1838, 0.5));
+          scene.add(new THREE.HemisphereLight(0xc9a6ff, 0x1a1020, 0.38));
+          const moon = new THREE.DirectionalLight(0xf3eaff, 0.55);
+          moon.position.set(-6, 10, 8);
+          scene.add(moon);
+          const doorGlow = new THREE.PointLight(0xc9a6ff, 1.15, 14);
+          doorGlow.position.set(0, 1.7, 1.2);
+          scene.add(doorGlow);
+          const brazierL = new THREE.PointLight(0xff8a4a, 0.9, 10);
+          brazierL.position.set(-3.4, 1.1, 2.2);
+          scene.add(brazierL);
+          const brazierR = new THREE.PointLight(0xff8a4a, 0.9, 10);
+          brazierR.position.set(3.4, 1.1, 2.2);
+          scene.add(brazierR);
+
+          const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+          const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 16);
+          const sphGeo = new THREE.SphereGeometry(1, 12, 10);
+          const coneGeo = new THREE.ConeGeometry(1, 1, 8);
+          const torusGeo = new THREE.TorusGeometry(1, 0.18, 10, 28);
+          const sandMat = new THREE.MeshStandardMaterial({ color: 0x3a2a20, roughness: 0.92, metalness: 0.04 });
+          const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6a5a48, roughness: 0.78, metalness: 0.08 });
+          const discMat = new THREE.MeshStandardMaterial({ color: 0x8a7460, roughness: 0.55, metalness: 0.18 });
+          const discMat2 = new THREE.MeshStandardMaterial({ color: 0x7a6454, roughness: 0.5, metalness: 0.22 });
+          const discMat3 = new THREE.MeshStandardMaterial({ color: 0x9a8068, roughness: 0.48, metalness: 0.2 });
+          const brassMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a056, roughness: 0.35, metalness: 0.7, emissive: 0x3a2a10, emissiveIntensity: 0.25,
+          });
+          const glyphMat = new THREE.MeshStandardMaterial({
+            color: 0xc9a6ff, roughness: 0.32, metalness: 0.45, emissive: 0x4a2a78, emissiveIntensity: 0.55,
+          });
+          const emberMat = new THREE.MeshStandardMaterial({
+            color: 0xff8a4a, roughness: 0.4, metalness: 0.1, emissive: 0xff4a20, emissiveIntensity: 0.8,
+          });
+          const nightMat = new THREE.MeshStandardMaterial({ color: 0x1a1424, roughness: 0.9, metalness: 0.05 });
+
+          const floor = new THREE.Mesh(cylGeo, sandMat);
+          floor.scale.set(18, 0.18, 18);
+          floor.position.y = -0.4;
+          scene.add(floor);
+
+          const facade = new THREE.Mesh(boxGeo, stoneMat);
+          facade.scale.set(9.4, 7.2, 0.7);
+          facade.position.set(0, 2.6, -0.55);
+          scene.add(facade);
+          const lintel = new THREE.Mesh(boxGeo, brassMat);
+          lintel.scale.set(6.4, 0.28, 0.9);
+          lintel.position.set(0, 5.5, 0.05);
+          scene.add(lintel);
+          const recess = new THREE.Mesh(cylGeo, nightMat);
+          recess.rotation.x = Math.PI / 2;
+          recess.scale.set(2.55, 0.35, 2.55);
+          recess.position.set(0, 1.7, -0.15);
+          scene.add(recess);
+
+          const steps = [];
+          for (let i = 0; i < 4; i += 1) {
+            const step = new THREE.Mesh(boxGeo, stoneMat);
+            step.scale.set(5.4 - i * 0.35, 0.16, 0.7);
+            step.position.set(0, -0.18 + i * 0.16, 1.8 - i * 0.42);
+            scene.add(step);
+            steps.push(step);
+          }
+
+          [[-4.6, 0], [4.6, 0]].forEach((pos, idx) => {
+            const obelisk = new THREE.Mesh(boxGeo, stoneMat);
+            obelisk.scale.set(0.55, 4.8, 0.55);
+            obelisk.position.set(pos[0], 2.0, 1.1);
+            scene.add(obelisk);
+            const cap = new THREE.Mesh(coneGeo, brassMat);
+            cap.scale.set(0.42, 0.7, 0.42);
+            cap.position.set(pos[0], 4.7, 1.1);
+            scene.add(cap);
+            const band = new THREE.Mesh(boxGeo, brassMat);
+            band.scale.set(0.62, 0.12, 0.62);
+            band.position.set(pos[0], 3.2 + idx * 0.2, 1.1);
+            scene.add(band);
+          });
+
+          const brazierMeshes = [];
+          [[-3.3, 2.15], [3.3, 2.15]].forEach((pos) => {
+            const bowl = new THREE.Mesh(cylGeo, brassMat);
+            bowl.scale.set(0.32, 0.18, 0.32);
+            bowl.position.set(pos[0], 0.55, pos[1]);
+            scene.add(bowl);
+            const stand = new THREE.Mesh(cylGeo, stoneMat);
+            stand.scale.set(0.1, 0.55, 0.1);
+            stand.position.set(pos[0], 0.18, pos[1]);
+            scene.add(stand);
+            const flame = new THREE.Mesh(coneGeo, emberMat);
+            flame.scale.set(0.16, 0.42, 0.16);
+            flame.position.set(pos[0], 0.9, pos[1]);
+            scene.add(flame);
+            brazierMeshes.push(flame);
+          });
+
+          for (let c = 0; c < 12; c += 1) {
+            const cartouche = new THREE.Mesh(boxGeo, discMat);
+            cartouche.scale.set(0.28, 0.7, 0.08);
+            cartouche.position.set(-3.6 + (c % 6) * 1.45, 4.55 - Math.floor(c / 6) * 0.9, -0.12);
+            scene.add(cartouche);
+          }
+
+          const pillarL = new THREE.Mesh(cylGeo, stoneMat);
+          pillarL.scale.set(0.38, 5.4, 0.38);
+          pillarL.position.set(-3.15, 2.4, 0.15);
+          scene.add(pillarL);
+          const pillarR = pillarL.clone();
+          pillarR.position.x = 3.15;
+          scene.add(pillarR);
+
+          const geos = { box: boxGeo, cyl: cylGeo, sph: sphGeo, cone: coneGeo, torus: torusGeo };
+          const discMats = [discMat, discMat2, discMat3];
+          const discs = RING_R.map((radius, index) => {
+            const group = new THREE.Group();
+            const plate = new THREE.Mesh(torusGeo, discMats[index]);
+            plate.scale.set(radius, radius, radius);
+            group.add(plate);
+            const glyphs = [];
+            for (let g = 0; g < GLYPH_N; g += 1) {
+              const glyph = makeGlyphMesh(g, glyphMat.clone(), geos);
+              const ang = g * STEP;
+              glyph.position.set(Math.sin(ang) * radius, Math.cos(ang) * radius, 0.12);
+              group.add(glyph);
+              glyphs.push(glyph);
+            }
+            group.position.set(0, 1.7, 0.22 + index * 0.08);
+            scene.add(group);
+            return { group, glyphs, plate };
+          });
+
+          const lockMarker = new THREE.Mesh(coneGeo, glyphMat);
+          lockMarker.scale.set(0.12, 0.22, 0.12);
+          lockMarker.rotation.x = Math.PI;
+          lockMarker.position.set(0, 4.15, 0.55);
+          scene.add(lockMarker);
+
+          const innerEye = new THREE.Mesh(sphGeo, glyphMat);
+          innerEye.scale.setScalar(0.28);
+          innerEye.position.set(0, 1.7, 0.18);
+          scene.add(innerEye);
+
+          const sandCount = reducedMotion ? 40 : 120;
+          const sandPos = new Float32Array(sandCount * 3);
+          for (let i = 0; i < sandCount; i += 1) {
+            sandPos[i * 3] = (Math.random() - 0.5) * 16;
+            sandPos[i * 3 + 1] = Math.random() * 6;
+            sandPos[i * 3 + 2] = Math.random() * 8 - 1;
+          }
+          const sandGeo = new THREE.BufferGeometry();
+          sandGeo.setAttribute("position", new THREE.BufferAttribute(sandPos, 3));
+          const motes = new THREE.Points(sandGeo, new THREE.PointsMaterial({
+            color: 0xc9a6ff, size: 0.07, transparent: true, opacity: 0.45,
+          }));
+          scene.add(motes);
+
+          const particleGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const sparkMat = new THREE.MeshBasicMaterial({
+            color: 0xc9a6ff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          return {
+            renderer, scene, camera, discs, innerEye, lockMarker, brazierMeshes,
+            doorGlow, brazierL, brazierR, glyphMat, motes, emberMat,
+            particleGeo, sparkMat, particleMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.discs.forEach((disc, index) => {
+            disc.group.rotation.z = -state.rings[index];
+            disc.glyphs.forEach((glyph, g) => {
+              const aligned = g === state.targetGlyph && ringError(index) < 0.22;
+              const pulse = aligned ? (reducedMotion ? 1.15 : 1.15 + Math.sin(state.elapsed * 8) * 0.12) : 1;
+              glyph.scale.setScalar(pulse);
+              if (glyph.children[0] && glyph.children[0].material) {
+                glyph.children[0].material.emissiveIntensity = aligned ? 1.1 : 0.35;
+              }
+            });
+          });
+          const lockedGlow = 0.7 + state.locked * 0.35;
+          webgl.innerEye.scale.setScalar(0.22 + state.hold * 0.18 + (reducedMotion ? 0 : Math.sin(state.elapsed * 5) * 0.02));
+          webgl.doorGlow.intensity = lerp(0.7, 1.8, state.locked / GOAL) + state.hold;
+          webgl.lockMarker.material.emissiveIntensity = stackError() < 0.2 ? 1.2 : 0.4;
+          const flicker = reducedMotion ? 1 : 0.85 + Math.sin(state.braziers * 9.5) * 0.15;
+          webgl.brazierMeshes.forEach((flame, i) => {
+            flame.scale.set(0.16 * flicker, 0.38 + (i + 1) * 0.04 * flicker, 0.16 * flicker);
+          });
+          webgl.brazierL.intensity = 0.7 * flicker;
+          webgl.brazierR.intensity = 0.7 * flicker;
+          if (!reducedMotion) webgl.motes.position.y = (state.elapsed * 0.12) % 1.4;
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.sparkMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.07);
+            mesh.material.color.setHex(particle.kind === "spark" ? 0xff6b7a : particle.kind === "seal" ? 0xc9a6ff : 0xffc46b);
+            mesh.material.opacity = clamp(particle.life * 1.7, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.28 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.35) * 0.08;
+          webgl.camera.position.set(0.18 + sway + shakeX, 1.42 + shakeY, 7.45);
+          webgl.look.set(0, 1.62, 0);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(1.6, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w };
+        }
+
+        function pointerPolar(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const cx = rect.left + rect.width * 0.5;
+          const cy = rect.top + rect.height * 0.52;
+          const px = event.clientX - cx;
+          const py = event.clientY - cy;
+          const ang = Math.atan2(px, -py);
+          const r = Math.hypot(px, py) / Math.max(1, rect.height * 0.22);
+          let ring = 2;
+          if (r < 0.58) ring = 0;
+          else if (r < 0.88) ring = 1;
+          return { ang, ring, r };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#1c1428");
+          sky.addColorStop(1, "#120e18");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#2a2018";
+          ctx.fillRect(VIEW_W * 0.18, VIEW_H * 0.08, VIEW_W * 0.64, VIEW_H * 0.78);
+          const c = projectToScreen(0, 1.7, 0.3);
+          RING_R.forEach((radius, index) => {
+            ctx.strokeStyle = index === input.ring ? COLORS.accent : "rgba(201,166,255,0.45)";
+            ctx.lineWidth = 8 - index * 1.4;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, radius * 58, 0, Math.PI * 2);
+            ctx.stroke();
+            for (let g = 0; g < GLYPH_N; g += 1) {
+              const a = glyphWorldAng(index, g);
+              const gx = c.x + Math.sin(a) * radius * 58;
+              const gy = c.y - Math.cos(a) * radius * 58;
+              ctx.fillStyle = g === state.targetGlyph ? COLORS.accent : COLORS.ink;
+              ctx.font = "700 11px Trebuchet MS, sans-serif";
+              ctx.textAlign = "center";
+              ctx.fillText(GLYPH_MARK[g][0], gx, gy + 4);
+            }
+          });
+          ctx.fillStyle = COLORS.accent;
+          ctx.beginPath();
+          ctx.moveTo(c.x, c.y - RING_R[2] * 58 - 16);
+          ctx.lineTo(c.x - 7, c.y - RING_R[2] * 58 - 4);
+          ctx.lineTo(c.x + 7, c.y - RING_R[2] * 58 - 4);
+          ctx.fill();
+          ctx.fillStyle = "rgba(243,234,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.locked} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.locked / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `과부하 ${Math.round(state.overload)}% · ${GLYPH_MARK[state.targetGlyph]}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(201,166,255,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "door plane; +y up; 0 rad = 12 o'clock glyph lock",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            locked: state.locked,
+            targetGlyph: state.targetGlyph,
+            overload: Number(state.overload.toFixed(1)),
+            rings: state.rings.map((v) => Number(v.toFixed(3))),
+            hold: Number(state.hold.toFixed(2)),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          const polar = pointerPolar(event);
+          input.dragging = true;
+          input.ring = polar.ring;
+          input.lastAng = polar.ang;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const polar = pointerPolar(event);
+          const delta = wrapPi(polar.ang - input.lastAng);
+          state.rings[input.ring] = wrapPi(state.rings[input.ring] + delta);
+          input.lastAng = polar.ang;
+        }
+        function onPointerUp(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") startStage();
+            return;
+          }
+          if (event.code === "ArrowUp" || event.code === "KeyW") {
+            event.preventDefault();
+            if (!event.repeat) input.ring = clamp(input.ring + 1, 0, 2);
+            return;
+          }
+          if (event.code === "ArrowDown" || event.code === "KeyS") {
+            event.preventDefault();
+            if (!event.repeat) input.ring = clamp(input.ring - 1, 0, 2);
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.locked = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          Object.keys(input).forEach((key) => { if (typeof input[key] === "boolean") input[key] = false; });
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

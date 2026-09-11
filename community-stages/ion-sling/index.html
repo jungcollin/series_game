@@ -1,0 +1,1300 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>이온 슬링</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #05060f; --accent: #5ce1ff; --accent-ink: #041018; --danger: #ff6b7a; --ink: #e7f7ff; --muted: rgba(231,247,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">이온 슬링. 행성 중력으로 궤도를 꺾어 중계 부표를 꿰뚫는 이온 탐사선. 드래그로 조준 발사, 탭으로 궤도 수정. 중계 부표 4개를 통과하면 클리어. 행성에 충돌하거나 계 밖으로 나가면 실패. 화면 터치 또는 Enter로 시작. 비행 중 화면을 탭하면 RCS로 궤도를 수정합니다.</p>
+    <main class="stage" aria-label="이온 슬링 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="이온 슬링" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">중계 부표</p>
+          <p class="hud-value" id="hud-objective">0 / 4</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">34.0</p>
+          <p class="hud-sub" id="hud-sub">연료 3</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Ion Sling</p>
+          <h1>이온 슬링</h1>
+          <p class="brief-lead">행성 중력으로 궤도를 꺾어 중계 부표를 꿰뚫는 이온 탐사선.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 조준 발사, 탭으로 궤도 수정</span></li>
+            <li><strong>클리어</strong><span>중계 부표 4개를 통과하면 클리어</span></li>
+            <li><strong>실패</strong><span>행성에 충돌하거나 계 밖으로 나가면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">궤도 이탈</p>
+          <h2>탐사 실패</h2>
+          <p class="brief-lead" id="fail-detail">행성에 충돌하거나 계 밖으로 나가면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">중계 완료</p>
+          <h2>슬링샷 성공</h2>
+          <p class="brief-lead">네 개의 중계 부표를 모두 꿰뚫었습니다.</p>
+          <p class="hud-sub" id="clear-stat">중계 부표 4개를 통과하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 34;
+        const GOAL = 4;
+        const BOUNDS = 16;
+        const SCALE = 25;
+        const G = 8;
+        const SOFT = 0.36;
+        const COLLECT_R = 0.85;
+        const LAUNCH_MIN = 4;
+        const LAUNCH_MAX = 11;
+        const RCS_IMPULSE = 2.2;
+        const FUEL_MAX = 3;
+        const PRED_TIME = 2.2;
+        const PRED_MAX = 140;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "ion-sling",
+          title: "이온 슬링",
+          creator: "collin",
+          genre: "3D gravity slingshot",
+          clearCondition: "중계 부표 4개를 통과하면 클리어",
+          failCondition: "행성에 충돌하거나 계 밖으로 나가면 실패",
+          controls: "드래그로 조준 발사, 탭으로 궤도 수정",
+          description: "행성 중력으로 궤도를 꺾어 중계 부표를 꿰뚫는 이온 탐사선.",
+        };
+        const COLORS = {
+          void: "#05060f",
+          ink: "#e7f6ff",
+          ion: "#5ce1ff",
+          gold: "#ffc14a",
+          rust: "#c45c32",
+          ice: "#4fd0d8",
+          danger: "#ff6b6b",
+          dim: "rgba(231,246,255,0.62)",
+        };
+        const PLANETS = [
+          { id: "sol", x: 0, y: 0, z: 0, r: 0.68, vis: 1.18, m: 18, color: 0xffc14a, glow: 0xffe08a, kind: "sun" },
+          { id: "glacia", x: 5.4, y: 4.5, z: 0, r: 1.00, vis: 1.10, m: 24, color: 0x3ec8d0, glow: 0x7af0ff, kind: "ice" },
+          { id: "rust", x: 5.8, y: -5.4, z: 0, r: 0.56, vis: 0.66, m: 9, color: 0xc45c32, glow: 0xff8a5b, kind: "rock" },
+        ];
+        const BUOY_BASE = [
+          { x: -1.15, y: 6.55 },
+          { x: 7.55, y: 2.20 },
+          { x: 7.20, y: -1.55 },
+          { x: 4.35, y: -7.55 },
+        ];
+        const START = { x: -10.6, y: 2.2, z: 0 };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function hypot2(x, y) { return Math.hypot(x, y); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          launched: false,
+          fuel: FUEL_MAX,
+          score: 0,
+          probe: { x: START.x, y: START.y, z: 0, vx: 0, vy: 0, vz: 0 },
+          buoys: [],
+          particles: [],
+          trail: [],
+          aimDir: { x: Math.cos(Math.PI / 6), y: Math.sin(Math.PI / 6) },
+          aimPower: 7.6,
+          flash: 0,
+          shake: 0,
+          stretch: 1,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          pred: [],
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, ignoreUp: false,
+          dragStart: { x: 0, y: 0 }, dragNow: { x: 0, y: 0 },
+        };
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            solarWind: difficulty * 0.42,
+          };
+        }
+
+        function gravityAt(x, y, z) {
+          let ax = 0;
+          let ay = 0;
+          let az = 0;
+          for (let index = 0; index < PLANETS.length; index += 1) {
+            const planet = PLANETS[index];
+            const dx = planet.x - x;
+            const dy = planet.y - y;
+            const dz = planet.z - z;
+            const r2 = dx * dx + dy * dy + dz * dz + SOFT * SOFT;
+            const inv = (G * planet.m) / Math.pow(r2, 1.5);
+            ax += dx * inv;
+            ay += dy * inv;
+            az += dz * inv;
+          }
+          return { ax, ay, az };
+        }
+
+        function accelProbe(probe, wind) {
+          const g = gravityAt(probe.x, probe.y, probe.z);
+          g.az += -6.4 * probe.z - 2.6 * probe.vz;
+          if (wind) {
+            const radial = hypot2(probe.x, probe.y) || 1;
+            g.ax += (probe.x / radial) * wind;
+            g.ay += (probe.y / radial) * wind;
+          }
+          return g;
+        }
+
+        function hitPlanet(x, y, z) {
+          for (let index = 0; index < PLANETS.length; index += 1) {
+            const planet = PLANETS[index];
+            if (Math.hypot(x - planet.x, y - planet.y, z - planet.z) < planet.r * 0.92) {
+              return planet;
+            }
+          }
+          return null;
+        }
+
+        function placeBuoy(base) {
+          for (let attempt = 0; attempt < 10; attempt += 1) {
+            const x = base.x + randRange(-0.4, 0.4);
+            const y = base.y + randRange(-0.4, 0.4);
+            const safe = PLANETS.every((planet) => (
+              Math.hypot(x - planet.x, y - planet.y) > planet.r * 0.92 + COLLECT_R + 0.2
+            ));
+            if (safe) return { x, y, z: 0, collected: false };
+          }
+          return { x: base.x, y: base.y, z: 0, collected: false };
+        }
+
+        function predictPath(seconds) {
+          const points = [];
+          const probe = {
+            x: state.probe.x, y: state.probe.y, z: state.probe.z,
+            vx: 0, vy: 0, vz: 0,
+          };
+          const len = hypot2(state.aimDir.x, state.aimDir.y) || 1;
+          const speed = clamp(state.aimPower, LAUNCH_MIN, LAUNCH_MAX);
+          probe.vx = (state.aimDir.x / len) * speed;
+          probe.vy = (state.aimDir.y / len) * speed;
+          const steps = Math.max(2, Math.round(seconds / FIXED_DT));
+          for (let step = 0; step < steps; step += 1) {
+            const g = accelProbe(probe, 0);
+            probe.vx += g.ax * FIXED_DT;
+            probe.vy += g.ay * FIXED_DT;
+            probe.vz += g.az * FIXED_DT;
+            probe.x += probe.vx * FIXED_DT;
+            probe.y += probe.vy * FIXED_DT;
+            probe.z += probe.vz * FIXED_DT;
+            points.push({ x: probe.x, y: probe.y, z: probe.z });
+            if (hitPlanet(probe.x, probe.y, probe.z) || hypot2(probe.x, probe.y) > BOUNDS) break;
+          }
+          return points;
+        }
+
+        function burst(x, y, z, count, color) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            const speed = randRange(1.6, 5.4);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed,
+              vz: randRange(-1.4, 2.2),
+              life: randRange(0.28, 0.7),
+              maxLife: 0.7,
+              color: color || COLORS.ion,
+            });
+          }
+        }
+
+        let audioCtx = null;
+        function ensureAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            if (!audioCtx) audioCtx = new Ctor();
+            if (audioCtx.state === "suspended") {
+              audioCtx.resume().catch(() => {});
+            }
+            return audioCtx;
+          } catch (_error) {
+            audioCtx = null;
+            return null;
+          }
+        }
+        function tone(freq, duration, type, volume) {
+          const ctx = audioCtx;
+          if (!ctx) return;
+          try {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = type || "sine";
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(volume || 0.05, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + duration);
+          } catch (_error) { /* ignore */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.launched = false;
+          state.fuel = FUEL_MAX;
+          state.score = 0;
+          state.probe = { x: START.x, y: START.y, z: 0, vx: 0, vy: 0, vz: 0 };
+          state.particles = [];
+          state.trail = [];
+          state.aimDir = { x: Math.cos(Math.PI / 6), y: Math.sin(Math.PI / 6) };
+          state.aimPower = 7.6;
+          state.flash = 0;
+          state.shake = 0;
+          state.stretch = 1;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          state.buoys = BUOY_BASE.map((base) => placeBuoy(base));
+          state.pred = predictPath(PRED_TIME);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          state.score = GOAL;
+          window.relayStageResult.status = "cleared";
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function launchProbe() {
+          if (state.mode !== "running" || state.launched) return;
+          const len = hypot2(state.aimDir.x, state.aimDir.y) || 1;
+          const speed = clamp(state.aimPower, LAUNCH_MIN, LAUNCH_MAX);
+          state.probe.vx = (state.aimDir.x / len) * speed;
+          state.probe.vy = (state.aimDir.y / len) * speed;
+          state.probe.vz = 0;
+          state.launched = true;
+          state.flash = reducedMotion ? 0.18 : 0.72;
+          state.shake = reducedMotion ? 0.04 : 0.2;
+          burst(state.probe.x, state.probe.y, 0.1, 18, COLORS.ion);
+          tone(420, 0.16, "sawtooth", 0.045);
+          tone(880, 0.12, "sine", 0.03);
+        }
+
+        function rcsToward(tx, ty) {
+          if (state.mode !== "running" || !state.launched || state.fuel <= 0) return;
+          const dx = tx - state.probe.x;
+          const dy = ty - state.probe.y;
+          const len = hypot2(dx, dy);
+          if (len < 0.04) return;
+          state.probe.vx += (dx / len) * RCS_IMPULSE;
+          state.probe.vy += (dy / len) * RCS_IMPULSE;
+          state.fuel -= 1;
+          state.flash = Math.max(state.flash, 0.22);
+          burst(state.probe.x, state.probe.y, 0.08, 8, COLORS.ion);
+          tone(240, 0.07, "square", 0.03);
+        }
+
+        function rcsVector(ux, uy) {
+          if (state.mode !== "running" || !state.launched || state.fuel <= 0) return;
+          const len = hypot2(ux, uy);
+          if (len < 0.04) return;
+          rcsToward(state.probe.x + ux, state.probe.y + uy);
+        }
+
+        function updateAimFromDrag() {
+          const dx = input.dragNow.x - input.dragStart.x;
+          const dy = input.dragNow.y - input.dragStart.y;
+          const dragLen = hypot2(dx, dy);
+          if (dragLen > 0.12) {
+            state.aimDir.x = dx;
+            state.aimDir.y = dy;
+            state.aimPower = clamp(LAUNCH_MIN + dragLen * 2.15, LAUNCH_MIN, LAUNCH_MAX);
+            return;
+          }
+          const px = input.dragNow.x - state.probe.x;
+          const py = input.dragNow.y - state.probe.y;
+          if (hypot2(px, py) > 0.35) {
+            state.aimDir.x = px;
+            state.aimDir.y = py;
+          }
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 3.4);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+
+          if (state.mode !== "running") return;
+
+          if (!state.launched) {
+            let yaw = 0;
+            let powerDelta = 0;
+            if (input.left) yaw += 1.7 * dt;
+            if (input.right) yaw -= 1.7 * dt;
+            if (input.up) powerDelta += 5.5 * dt;
+            if (input.down) powerDelta -= 5.5 * dt;
+            if (yaw) {
+              const angle = Math.atan2(state.aimDir.y, state.aimDir.x) + yaw;
+              state.aimDir.x = Math.cos(angle);
+              state.aimDir.y = Math.sin(angle);
+            }
+            if (powerDelta) state.aimPower = clamp(state.aimPower + powerDelta, LAUNCH_MIN, LAUNCH_MAX);
+            if (input.dragging) updateAimFromDrag();
+            state.pred = predictPath(PRED_TIME);
+          } else {
+            state.pred = [];
+          }
+
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          const wind = state.launched ? params.solarWind : 0;
+          const probe = state.probe;
+
+          if (state.launched) {
+            const g = accelProbe(probe, wind);
+            probe.vx += g.ax * dt;
+            probe.vy += g.ay * dt;
+            probe.vz += g.az * dt;
+            probe.x += probe.vx * dt;
+            probe.y += probe.vy * dt;
+            probe.z += probe.vz * dt;
+            const speed = Math.hypot(probe.vx, probe.vy, probe.vz);
+            state.stretch = reducedMotion ? 1 : 1 + Math.min(0.8, speed * 0.055);
+            state.trail.push({ x: probe.x, y: probe.y, z: probe.z, life: 0.45 });
+            if (state.trail.length > (reducedMotion ? 10 : 36)) state.trail.shift();
+            state.trail.forEach((dot) => { dot.life -= dt; });
+            state.trail = state.trail.filter((dot) => dot.life > 0);
+
+            const crashed = hitPlanet(probe.x, probe.y, probe.z);
+            if (crashed) {
+              burst(probe.x, probe.y, probe.z, 28, COLORS.gold);
+              state.shake = reducedMotion ? 0.1 : 0.55;
+              tone(90, 0.28, "sawtooth", 0.06);
+              failStage("planet_collision");
+              return;
+            }
+            if (hypot2(probe.x, probe.y) > BOUNDS) {
+              failStage("left_system");
+              return;
+            }
+
+            state.buoys.forEach((buoy) => {
+              if (buoy.collected) return;
+              if (Math.hypot(probe.x - buoy.x, probe.y - buoy.y, probe.z - buoy.z) < COLLECT_R) {
+                buoy.collected = true;
+                state.score += 1;
+                state.flash = 0.55;
+                state.message = `BUOYS ${state.score}/${GOAL}`;
+                state.messageTime = 0.85;
+                burst(buoy.x, buoy.y, 0.1, 20, COLORS.gold);
+                tone(660 + state.score * 80, 0.14, "sine", 0.045);
+                if (state.score >= GOAL) {
+                  clearStage();
+                  return;
+                }
+              }
+            });
+          }
+
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        const FAIL_COPY = {
+          planet_collision: "행성에 충돌했습니다",
+          left_system: "계 밖으로 나갔습니다",
+          time_limit: "제한 시간 34초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `부표 ${state.score} / ${GOAL} · 연료 ${state.fuel}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 연료 ${state.fuel}`;
+          }
+        }
+
+        function makeGlowTexture(inner, outer) {
+          const canvas = document.createElement("canvas");
+          canvas.width = 64;
+          canvas.height = 64;
+          const ctx = canvas.getContext("2d");
+          const gradient = ctx.createRadialGradient(32, 32, 2, 32, 32, 30);
+          gradient.addColorStop(0, inner);
+          gradient.addColorStop(0.45, outer);
+          gradient.addColorStop(1, "rgba(0,0,0,0)");
+          ctx.fillStyle = gradient;
+          ctx.fillRect(0, 0, 64, 64);
+          const texture = new THREE.CanvasTexture(canvas);
+          texture.needsUpdate = true;
+          return texture;
+        }
+
+        function circleGeometry(radius, segments) {
+          const positions = new Float32Array((segments + 1) * 3);
+          for (let index = 0; index <= segments; index += 1) {
+            const angle = (index / segments) * Math.PI * 2;
+            positions[index * 3] = Math.cos(angle) * radius;
+            positions[index * 3 + 1] = Math.sin(angle) * radius;
+            positions[index * 3 + 2] = 0;
+          }
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          return geometry;
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          try {
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.shadowMap.enabled = false;
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x05060f);
+
+          const camera = new THREE.PerspectiveCamera(52, VIEW_W / VIEW_H, 0.1, 90);
+          camera.up.set(0, 0, 1);
+
+          scene.add(new THREE.AmbientLight(0x2a3358, 0.55));
+          const sunDir = new THREE.DirectionalLight(0xffe6b0, 0.95);
+          sunDir.position.set(2.4, -3.2, 8.5);
+          scene.add(sunDir);
+
+          const starCount = reducedMotion ? 220 : 520;
+          const starPositions = new Float32Array(starCount * 3);
+          for (let index = 0; index < starCount; index += 1) {
+            starPositions[index * 3] = (Math.random() - 0.5) * 70;
+            starPositions[index * 3 + 1] = (Math.random() - 0.5) * 70;
+            starPositions[index * 3 + 2] = (Math.random() - 0.35) * 24 - 6;
+          }
+          const starGeometry = new THREE.BufferGeometry();
+          starGeometry.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
+          const stars = new THREE.Points(
+            starGeometry,
+            new THREE.PointsMaterial({ color: 0xcfe7ff, size: 0.22, sizeAttenuation: true })
+          );
+          scene.add(stars);
+
+          const sphereGeo = new THREE.SphereGeometry(1, 28, 20);
+          const icoGeo = new THREE.IcosahedronGeometry(1, 1);
+          const torusGeo = new THREE.TorusGeometry(0.72, 0.07, 10, 28);
+          const iceRingGeo = new THREE.TorusGeometry(1.28, 0.035, 8, 36);
+          const particleGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const coneGeo = new THREE.ConeGeometry(0.16, 0.52, 10);
+          const wingGeo = new THREE.BoxGeometry(0.42, 0.06, 0.16);
+
+          const planetMeshes = PLANETS.map((planet) => {
+            const isSun = planet.kind === "sun";
+            const isIce = planet.kind === "ice";
+            const material = new THREE.MeshStandardMaterial({
+              color: planet.color,
+              emissive: isSun ? 0xffb347 : planet.kind === "ice" ? 0x12333a : 0x2a120c,
+              emissiveIntensity: isSun ? 1.15 : 0.28,
+              metalness: isSun ? 0.2 : planet.kind === "rock" ? 0.35 : 0.08,
+              roughness: isSun ? 0.35 : planet.kind === "rock" ? 0.88 : 0.48,
+            });
+            const mesh = new THREE.Mesh(planet.kind === "rock" ? icoGeo : sphereGeo, material);
+            mesh.position.set(planet.x, planet.y, planet.z);
+            mesh.scale.setScalar(planet.vis);
+            scene.add(mesh);
+            const light = new THREE.PointLight(planet.glow, isSun ? 1.7 : 0.85, isSun ? 22 : 10);
+            light.position.set(planet.x, planet.y, 0.4);
+            scene.add(light);
+            if (isSun) {
+              const corona = new THREE.Mesh(
+                sphereGeo,
+                new THREE.MeshBasicMaterial({
+                  color: 0xffc14a,
+                  transparent: true,
+                  opacity: 0.28,
+                  depthWrite: false,
+                  blending: THREE.AdditiveBlending,
+                })
+              );
+              corona.position.copy(mesh.position);
+              corona.scale.setScalar(planet.vis * 1.55);
+              scene.add(corona);
+              const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+                map: makeGlowTexture("rgba(255,230,150,1)", "rgba(255,170,60,0.35)"),
+                color: 0xffe08a,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+              }));
+              sprite.position.copy(mesh.position);
+              sprite.scale.set(4.4, 4.4, 1);
+              scene.add(sprite);
+              return { mesh, corona, sprite, light, planet };
+            }
+            if (isIce) {
+              const ring = new THREE.Mesh(
+                iceRingGeo,
+                new THREE.MeshStandardMaterial({
+                  color: 0x9cefff, emissive: 0x2a88aa, emissiveIntensity: 0.6,
+                  metalness: 0.2, roughness: 0.4, transparent: true, opacity: 0.8,
+                })
+              );
+              ring.position.copy(mesh.position);
+              ring.rotation.x = 0.18;
+              scene.add(ring);
+              return { mesh, ring, light, planet };
+            }
+            return { mesh, light, planet };
+          });
+
+          const orbitMat = new THREE.LineBasicMaterial({ color: 0x5ce1ff, transparent: true, opacity: 0.16 });
+          PLANETS.filter((planet) => planet.kind !== "sun").forEach((planet) => {
+            const radius = hypot2(planet.x, planet.y);
+            const loop = new THREE.LineLoop(circleGeometry(radius, 72), orbitMat);
+            scene.add(loop);
+          });
+          const bound = new THREE.LineLoop(
+            circleGeometry(BOUNDS, 80),
+            new THREE.LineBasicMaterial({ color: 0x5ce1ff, transparent: true, opacity: 0.12 })
+          );
+          scene.add(bound);
+
+          const probe = new THREE.Group();
+          const hull = new THREE.Mesh(
+            coneGeo,
+            new THREE.MeshStandardMaterial({ color: 0xd5e4f2, metalness: 0.82, roughness: 0.28 })
+          );
+          probe.add(hull);
+          [-1, 1].forEach((side) => {
+            const wing = new THREE.Mesh(
+              wingGeo,
+              new THREE.MeshStandardMaterial({ color: 0x2c4a66, metalness: 0.55, roughness: 0.4 })
+            );
+            wing.position.set(side * 0.22, 0.02, 0);
+            probe.add(wing);
+          });
+          const ionGlow = new THREE.Mesh(
+            new THREE.SphereGeometry(0.09, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0x5ce1ff, transparent: true, opacity: 0.95 })
+          );
+          ionGlow.position.y = -0.28;
+          probe.add(ionGlow);
+          probe.scale.setScalar(1.85);
+          scene.add(probe);
+
+          const buoyMeshes = [];
+          const buoyLit = new THREE.MeshStandardMaterial({
+            color: 0x12333f, emissive: 0x5ce1ff, emissiveIntensity: 1.55, metalness: 0.35, roughness: 0.32,
+          });
+          const buoyGot = new THREE.MeshStandardMaterial({
+            color: 0x3a2a10, emissive: 0xffc14a, emissiveIntensity: 1.1, metalness: 0.3, roughness: 0.4,
+          });
+          for (let index = 0; index < GOAL; index += 1) {
+            const mesh = new THREE.Mesh(torusGeo, buoyLit);
+            scene.add(mesh);
+            buoyMeshes.push(mesh);
+          }
+
+          const predPositions = new Float32Array(PRED_MAX * 3);
+          const predGeo = new THREE.BufferGeometry();
+          predGeo.setAttribute("position", new THREE.BufferAttribute(predPositions, 3));
+          const predLine = new THREE.Line(
+            predGeo,
+            new THREE.LineDashedMaterial({
+              color: 0x5ce1ff, dashSize: 0.28, gapSize: 0.18, transparent: true, opacity: 0.9,
+            })
+          );
+          scene.add(predLine);
+
+          const scratch = new THREE.Vector3();
+          return {
+            renderer, scene, camera, sphereGeo, icoGeo, torusGeo, particleGeo, coneGeo, wingGeo,
+            planetMeshes, probe, ionGlow, buoyMeshes, buoyLit, buoyGot,
+            predLine, predPositions, scratch, stars,
+            particleMeshes: [],
+          };
+          } catch (_error) {
+            return null;
+          }
+        }
+
+        function worldToScreen(x, y) {
+          return {
+            x: VIEW_W / 2 + x * SCALE,
+            y: VIEW_H / 2 - y * SCALE,
+          };
+        }
+
+        function projectPoint(x, y, z) {
+          if (!webgl) return worldToScreen(x, y);
+          webgl.scratch.set(x, y, z);
+          webgl.scratch.project(webgl.camera);
+          return {
+            x: (webgl.scratch.x * 0.5 + 0.5) * VIEW_W,
+            y: (-webgl.scratch.y * 0.5 + 0.5) * VIEW_H,
+          };
+        }
+
+        function pointerToWorld(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const scale = Math.min(rect.width / VIEW_W, rect.height / VIEW_H);
+          const contentWidth = VIEW_W * scale;
+          const contentHeight = VIEW_H * scale;
+          const left = rect.left + (rect.width - contentWidth) / 2;
+          const top = rect.top + (rect.height - contentHeight) / 2;
+          const px = (event.clientX - left) / scale;
+          const py = (event.clientY - top) / scale;
+          return {
+            x: (px - VIEW_W / 2) / SCALE,
+            y: -(py - VIEW_H / 2) / SCALE,
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = reducedMotion ? 0 : state.elapsed;
+          webgl.planetMeshes.forEach((entry) => {
+            entry.mesh.rotation.z = t * (entry.planet.kind === "sun" ? 0.18 : 0.35);
+            if (entry.corona) entry.corona.rotation.z = -t * 0.08;
+            if (entry.ring) entry.ring.rotation.z = t * 0.22;
+          });
+          webgl.buoyMeshes.forEach((mesh, index) => {
+            const buoy = state.buoys[index];
+            if (!buoy) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(buoy.x, buoy.y, 0.04);
+            mesh.material = buoy.collected ? webgl.buoyGot : webgl.buoyLit;
+            mesh.rotation.x = Math.PI / 2.4;
+            mesh.rotation.z = reducedMotion ? 0 : t * 1.6 + index;
+            const pulse = buoy.collected ? 0.72 : 1 + Math.sin(t * 4 + index) * 0.06;
+            mesh.scale.setScalar(pulse);
+          });
+
+          const probe = state.probe;
+          webgl.probe.position.set(probe.x, probe.y, probe.z + 0.08);
+          const heading = state.launched
+            ? Math.atan2(probe.vy, probe.vx)
+            : Math.atan2(state.aimDir.y, state.aimDir.x);
+          webgl.probe.rotation.set(0, 0, heading - Math.PI / 2);
+          const stretch = state.launched ? state.stretch : 1;
+          const base = 1.85;
+          webgl.probe.scale.set(base / Math.sqrt(stretch), base * stretch, base);
+          webgl.ionGlow.scale.setScalar(state.launched ? 1.2 + Math.min(1, hypot2(probe.vx, probe.vy) / 10) : 0.85);
+
+          const pred = (!state.launched && state.mode === "running") ? state.pred : [];
+          const attr = webgl.predLine.geometry.attributes.position;
+          for (let index = 0; index < PRED_MAX; index += 1) {
+            const point = pred[index];
+            attr.setXYZ(index, point ? point.x : probe.x, point ? point.y : probe.y, point ? point.z : 0);
+          }
+          attr.needsUpdate = true;
+          webgl.predLine.geometry.setDrawRange(0, Math.max(2, pred.length));
+          webgl.predLine.visible = pred.length > 2;
+          if (webgl.predLine.visible && webgl.predLine.computeLineDistances) {
+            webgl.predLine.computeLineDistances();
+          }
+
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(
+              webgl.particleGeo,
+              new THREE.MeshBasicMaterial({ color: 0x5ce1ff, transparent: true })
+            );
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.material.color.set(particle.color);
+            mesh.material.opacity = clamp(particle.life / 0.55, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const probe = state.probe;
+          const follow = 0.22;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.55 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.55 : 0;
+          webgl.camera.up.set(0, 0, 1);
+          webgl.camera.position.set(
+            probe.x * follow + shakeX,
+            probe.y * follow - 13.6 + shakeY,
+            12.3
+          );
+          webgl.camera.lookAt(probe.x * 0.4, probe.y * 0.4, 0);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function drawWell(x, y, radius, color) {
+          const p = worldToScreen(x, y);
+          const gradient = hud.createRadialGradient(p.x, p.y, 4, p.x, p.y, radius * SCALE);
+          gradient.addColorStop(0, color);
+          gradient.addColorStop(1, "rgba(5,6,15,0)");
+          hud.fillStyle = gradient;
+          hud.beginPath();
+          hud.arc(p.x, p.y, radius * SCALE, 0, Math.PI * 2);
+          hud.fill();
+        }
+
+        function draw2DWorld() {
+          hud.fillStyle = COLORS.void;
+          hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          hud.strokeStyle = "rgba(92,225,255,0.14)";
+          hud.lineWidth = 1.5;
+          const origin = worldToScreen(0, 0);
+          hud.beginPath();
+          hud.arc(origin.x, origin.y, BOUNDS * SCALE, 0, Math.PI * 2);
+          hud.stroke();
+          PLANETS.forEach((planet) => {
+            const wellColor = planet.kind === "sun"
+              ? "rgba(255,193,74,0.28)"
+              : planet.kind === "ice"
+                ? "rgba(79,208,216,0.22)"
+                : "rgba(196,92,50,0.22)";
+            drawWell(planet.x, planet.y, planet.vis * 2.4, wellColor);
+            const p = worldToScreen(planet.x, planet.y);
+            hud.fillStyle = planet.kind === "sun" ? COLORS.gold : planet.kind === "ice" ? COLORS.ice : COLORS.rust;
+            hud.beginPath();
+            hud.arc(p.x, p.y, planet.vis * SCALE, 0, Math.PI * 2);
+            hud.fill();
+            if (planet.kind === "sun") {
+              hud.strokeStyle = "rgba(255,193,74,0.55)";
+              hud.lineWidth = 3;
+              hud.beginPath();
+              hud.arc(p.x, p.y, planet.vis * SCALE * 1.35, 0, Math.PI * 2);
+              hud.stroke();
+            }
+          });
+          state.buoys.forEach((buoy) => {
+            const p = worldToScreen(buoy.x, buoy.y);
+            hud.strokeStyle = buoy.collected ? COLORS.gold : COLORS.ion;
+            hud.lineWidth = 3;
+            hud.beginPath();
+            hud.arc(p.x, p.y, COLLECT_R * SCALE, 0, Math.PI * 2);
+            hud.stroke();
+          });
+          state.trail.forEach((dot) => {
+            const p = worldToScreen(dot.x, dot.y);
+            hud.fillStyle = `rgba(92,225,255,${clamp(dot.life, 0, 0.5)})`;
+            hud.beginPath();
+            hud.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+            hud.fill();
+          });
+          if (state.mode === "running" && !state.launched && state.pred.length > 1) {
+            hud.save();
+            hud.strokeStyle = "rgba(92,225,255,0.85)";
+            hud.lineWidth = 2;
+            hud.setLineDash([5, 6]);
+            hud.beginPath();
+            state.pred.forEach((point, index) => {
+              const p = worldToScreen(point.x, point.y);
+              if (index === 0) hud.moveTo(p.x, p.y);
+              else hud.lineTo(p.x, p.y);
+            });
+            hud.stroke();
+            hud.restore();
+          }
+          const probe = worldToScreen(state.probe.x, state.probe.y);
+          const heading = state.launched
+            ? Math.atan2(state.probe.vy, state.probe.vx)
+            : Math.atan2(state.aimDir.y, state.aimDir.x);
+          hud.save();
+          hud.translate(probe.x, probe.y);
+          hud.rotate(-heading);
+          hud.fillStyle = "#d5e4f2";
+          hud.beginPath();
+          hud.moveTo(12, 0);
+          hud.lineTo(-9, 7);
+          hud.lineTo(-5, 0);
+          hud.lineTo(-9, -7);
+          hud.closePath();
+          hud.fill();
+          hud.fillStyle = COLORS.ion;
+          hud.beginPath();
+          hud.arc(-8, 0, 3, 0, Math.PI * 2);
+          hud.fill();
+          hud.restore();
+          state.particles.forEach((particle) => {
+            const p = worldToScreen(particle.x, particle.y);
+            hud.fillStyle = particle.color;
+            hud.globalAlpha = clamp(particle.life / 0.5, 0, 1);
+            hud.beginPath();
+            hud.arc(p.x, p.y, 2.4, 0, Math.PI * 2);
+            hud.fill();
+            hud.globalAlpha = 1;
+          });
+          hud.fillStyle = COLORS.ion;
+          hud.font = "800 13px Trebuchet MS, sans-serif";
+          hud.textAlign = "right";
+          hud.fillText("2D 대체 화면", VIEW_W - 22, VIEW_H - 18);
+          hud.textAlign = "left";
+        }
+
+        function roundRect(x, y, width, height, radius) {
+          hud.beginPath();
+          hud.roundRect(x, y, width, height, radius);
+        }
+
+        function drawPredictedHud() {
+          if (state.mode !== "running" || state.launched || state.pred.length < 2) return;
+          hud.save();
+          hud.strokeStyle = "rgba(92,225,255,0.55)";
+          hud.lineWidth = 2;
+          hud.setLineDash([4, 7]);
+          hud.beginPath();
+          state.pred.forEach((point, index) => {
+            const p = projectPoint(point.x, point.y, point.z);
+            if (index === 0) hud.moveTo(p.x, p.y);
+            else hud.lineTo(p.x, p.y);
+          });
+          hud.stroke();
+          hud.restore();
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.score} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.score / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            sub.textContent = state.launched
+              ? `연료 ${state.fuel}`
+              : `조준 ${state.aimPower.toFixed(1)} · 드래그로 발사`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.gold;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(92,225,255,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (webgl) drawPredictedHud();
+        }
+
+        function drawCard(kind) {
+          hud.fillStyle = "rgba(5,6,15,0.9)";
+          hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          roundRect(128, 84, 704, 372, 22);
+          hud.fillStyle = "rgba(10,14,32,0.96)"; hud.fill();
+          hud.strokeStyle = kind === "failed" ? COLORS.danger : kind === "cleared" ? COLORS.gold : COLORS.ion;
+          hud.lineWidth = 2.5; hud.stroke();
+          hud.textAlign = "center";
+          hud.fillStyle = kind === "failed" ? COLORS.danger : COLORS.ion;
+          hud.font = "800 13px Trebuchet MS, sans-serif";
+          hud.fillText("ION SLING  ·  MINIATURE SYSTEM", VIEW_W / 2, 122);
+          hud.fillStyle = COLORS.ink;
+          hud.font = "900 42px Trebuchet MS, sans-serif";
+          hud.fillText(kind === "menu" ? META.title : kind === "failed" ? "탐사 중단" : "중계 완료", VIEW_W / 2, 176);
+          hud.font = "600 18px Trebuchet MS, sans-serif";
+          hud.fillStyle = "rgba(231,246,255,0.82)";
+          if (kind === "menu") {
+            hud.fillText(META.description, VIEW_W / 2, 216);
+            hud.fillStyle = COLORS.ion;
+            hud.font = "700 17px Trebuchet MS, sans-serif";
+            hud.fillText(`조작 · ${META.controls}`, VIEW_W / 2, 258);
+            hud.fillStyle = "rgba(231,246,255,0.74)";
+            hud.font = "600 16px Trebuchet MS, sans-serif";
+            hud.fillText(`클리어 · ${META.clearCondition}`, VIEW_W / 2, 296);
+            hud.fillText(`실패 · ${META.failCondition}`, VIEW_W / 2, 324);
+            hud.fillText("비행 중 탭은 RCS 3회, 목숨은 탐사선 한 대뿐입니다", VIEW_W / 2, 352);
+            hud.fillStyle = COLORS.gold;
+            hud.font = "800 18px Trebuchet MS, sans-serif";
+            hud.fillText("화면 터치 또는 Enter로 시작", VIEW_W / 2, 410);
+            if (!webgl) {
+              hud.fillStyle = COLORS.ion;
+              hud.font = "700 13px Trebuchet MS, sans-serif";
+              hud.fillText("2D 대체 화면", VIEW_W / 2, 432);
+            }
+          } else if (kind === "failed") {
+            const reasons = {
+              planet_collision: "행성에 충돌했습니다",
+              left_system: "계 밖으로 나갔습니다",
+              time_limit: "제한 시간 34초 초과",
+              debug_force_fail: "디버그 강제 실패",
+            };
+            hud.fillText(reasons[state.failReason] || META.failCondition, VIEW_W / 2, 232);
+            hud.fillStyle = COLORS.gold;
+            hud.font = "800 23px Trebuchet MS, sans-serif";
+            hud.fillText(`BUOYS ${state.score}/${GOAL}  ·  FUEL ${state.fuel}`, VIEW_W / 2, 286);
+            hud.fillStyle = "rgba(231,246,255,0.62)";
+            hud.font = "600 16px Trebuchet MS, sans-serif";
+            hud.fillText("공유 목숨이 소진되었습니다.", VIEW_W / 2, 340);
+            hud.fillText(META.failCondition, VIEW_W / 2, 368);
+          } else {
+            hud.fillText("네 중계 부표를 이온 궤도로 꿰뚫었습니다.", VIEW_W / 2, 232);
+            hud.fillStyle = COLORS.gold;
+            hud.font = "800 25px Trebuchet MS, sans-serif";
+            hud.fillText(`${state.lastRunTime.toFixed(1)}초  ·  FUEL ${state.fuel}`, VIEW_W / 2, 288);
+            hud.fillStyle = "rgba(231,246,255,0.62)";
+            hud.font = "600 16px Trebuchet MS, sans-serif";
+            hud.fillText(META.clearCondition, VIEW_W / 2, 340);
+          }
+          hud.textAlign = "left";
+        }
+
+        function render() {
+          fitView();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (webgl) renderScene();
+          else draw2DWorld();
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world xy plane z~0; units; camera 48deg",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.score,
+            fuel: state.fuel,
+            launched: state.launched,
+            probe: {
+              x: Number(state.probe.x.toFixed(2)),
+              y: Number(state.probe.y.toFixed(2)),
+              z: Number(state.probe.z.toFixed(2)),
+              vx: Number(state.probe.vx.toFixed(2)),
+              vy: Number(state.probe.vy.toFixed(2)),
+              vz: Number(state.probe.vz.toFixed(2)),
+            },
+            buoys: state.buoys.map((buoy) => ({
+              x: Number(buoy.x.toFixed(2)),
+              y: Number(buoy.y.toFixed(2)),
+              collected: buoy.collected,
+            })),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          ensureAudio();
+          if (state.mode !== "running") {
+            startStage();
+            input.ignoreUp = true;
+            input.dragging = false;
+            return;
+          }
+          const point = pointerToWorld(event);
+          if (!state.launched) {
+            input.dragging = true;
+            input.dragStart = point;
+            input.dragNow = point;
+            updateAimFromDrag();
+            safeCapture(stageEl, event.pointerId);
+            return;
+          }
+          rcsToward(point.x, point.y);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running" || state.launched) return;
+          event.preventDefault();
+          input.dragNow = pointerToWorld(event);
+          updateAimFromDrag();
+        }
+        function onPointerUp(event) {
+          if (input.ignoreUp) {
+            input.ignoreUp = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (input.dragging && state.mode === "running" && !state.launched) {
+            input.dragNow = pointerToWorld(event);
+            updateAimFromDrag();
+            launchProbe();
+          }
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+
+        const aimKeyMap = {
+          ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down",
+        };
+        const rcsKeyMap = {
+          KeyW: "up", KeyS: "down", KeyA: "left", KeyD: "right",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            ensureAudio();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") {
+              startStage();
+              return;
+            }
+            if (event.repeat) return;
+            if (!state.launched) launchProbe();
+            else rcsVector(state.probe.vx, state.probe.vy);
+            return;
+          }
+          const rcsName = rcsKeyMap[event.code];
+          if (rcsName && state.mode === "running" && state.launched) {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (rcsName === "up") rcsVector(state.probe.vx, state.probe.vy);
+            else if (rcsName === "down") rcsVector(-state.probe.vx, -state.probe.vy);
+            else if (rcsName === "left") rcsVector(-state.probe.vy, state.probe.vx);
+            else if (rcsName === "right") rcsVector(state.probe.vy, -state.probe.vx);
+            return;
+          }
+          const aimName = aimKeyMap[event.code];
+          if (aimName) {
+            event.preventDefault();
+            input[aimName] = true;
+          }
+        }
+        function onKeyUp(event) {
+          const aimName = aimKeyMap[event.code];
+          if (aimName) { event.preventDefault(); input[aimName] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.buoys.forEach((buoy) => { buoy.collected = true; });
+            state.score = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          tryLaunch(angle, power) {
+            if (state.mode !== "running") startStage();
+            const rad = Number(angle);
+            const spd = clamp(Number(power), LAUNCH_MIN, LAUNCH_MAX);
+            state.aimDir = { x: Math.cos(rad), y: Math.sin(rad) };
+            state.aimPower = spd;
+            launchProbe();
+            render();
+            return renderGameToText();
+          },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

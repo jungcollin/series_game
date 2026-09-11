@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>과수원 흔들기</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #10180c; --accent: #ff6b6b; --accent-ink: #10180c; --danger: #ff6b7a; --ink: #fff1d6; --muted: rgba(255,241,214,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">과수원 흔들기. 나무를 흔들어 익은 과일만 바구니에 받으세요. 홀드로 흔들기, 드래그로 바구니. 익은 과일 10개를 받으면 클리어. 설익은 과일 5개를 받으면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 누른 채 흔들고, 좌우로 드래그해 바구니를 옮깁니다.</p>
+    <main class="stage" aria-label="과수원 흔들기 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="과수원 흔들기" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">수확</p>
+          <p class="hud-value" id="hud-objective">0 / 10</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">설익음 0 / 5</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Orchard Shake</p>
+          <h1>과수원 흔들기</h1>
+          <p class="brief-lead">나무를 흔들어 익은 과일만 바구니에 받으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>홀드로 흔들기, 드래그로 바구니</span></li>
+            <li><strong>클리어</strong><span>익은 과일 10개를 받으면 클리어</span></li>
+            <li><strong>실패</strong><span>설익은 과일 5개를 받으면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">설익은 수확</p>
+          <h2>바구니가 섞였다</h2>
+          <p class="brief-lead" id="fail-detail">설익은 과일 5개를 받으면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">익은 열매</p>
+          <h2>과수원 수확</h2>
+          <p class="brief-lead">익은 과일만 골라 열 개를 받았습니다.</p>
+          <p class="hud-sub" id="clear-stat">익은 과일 10개를 받으면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const GOAL = 10;
+        const MAX_GREEN = 5;
+        const RIPE_COUNT = 12;
+        const GREEN_COUNT = 8;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "orchard-shake",
+          title: "과수원 흔들기",
+          description: "나무를 흔들어 익은 과일만 바구니에 받으세요.",
+          creator: "collin",
+          genre: "3D tree shaking",
+          clearCondition: "익은 과일 10개를 받으면 클리어",
+          failCondition: "설익은 과일 5개를 받으면 실패",
+          controls: "홀드로 흔들기, 드래그로 바구니",
+        };
+        const COLORS = {
+          bg: "#10180c",
+          ink: "#fff1d6",
+          accent: "#ff6b6b",
+          leaf: "#3a7a32",
+          green: "#8dff6a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          unripe: "설익은 과일을 다섯 개나 받았습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0.4, y: 2.6, z: 7.4 },
+          right: { x: 0.98, y: 0, z: -0.2 },
+          up: { x: -0.05, y: 0.97, z: -0.22 },
+          fwd: { x: -0.19, y: 0.23, z: -0.95 },
+          focal: 470,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        function makeFruit(kind, index) {
+          const side = index % 2 === 0 ? -1 : 1;
+          const ring = Math.floor(index / 2);
+          return {
+            kind,
+            attached: true,
+            falling: false,
+            caught: false,
+            missed: false,
+            homeX: side * (0.35 + (index % 4) * 0.28),
+            homeY: 2.15 + (ring % 4) * 0.42 + (kind === "green" ? 0.12 : 0),
+            x: side * (0.35 + (index % 4) * 0.28),
+            y: 2.15 + (ring % 4) * 0.42 + (kind === "green" ? 0.12 : 0),
+            z: -0.15 + (index % 3) * 0.22,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            threshold: kind === "ripe" ? 0.28 + index * 0.028 : 0.72 + (index % 8) * 0.03,
+            size: kind === "ripe" ? 0.16 : 0.13,
+          };
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          ripe: 0,
+          green: 0,
+          shake: 0,
+          intensity: 0,
+          basketX: 0,
+          treeSway: 0,
+          fruits: [],
+          particles: [],
+          flash: 0,
+          camShake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = {
+          holding: false,
+          downX: 0,
+          baseBasket: 0,
+          steer: 0,
+          left: false,
+          right: false,
+          shakeKey: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            build: 0.85 + difficulty * 0.35,
+            decay: 1.15 - difficulty * 0.2,
+            gravity: 4.6 + difficulty * 0.8,
+            basket: 1.05 - difficulty * 0.12,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(5, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.4, 2.2),
+              vy: randRange(0.6, 2.8),
+              vz: Math.sin(a) * randRange(0.2, 1.4),
+              life: randRange(0.24, 0.62),
+              kind,
+              size: randRange(0.03, 0.08),
+            });
+          }
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "shake") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(60, now + 0.05);
+              gain.gain.setValueAtTime(0.025, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+              osc.start(now); osc.stop(now + 0.07);
+            } else if (kind === "catch") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(280, now + 0.08);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "green") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(80, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "fail") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(88, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.28);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(660, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+              osc.start(now); osc.stop(now + 0.36);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function resetFruits() {
+          const fruits = [];
+          for (let i = 0; i < RIPE_COUNT; i += 1) fruits.push(makeFruit("ripe", i));
+          for (let i = 0; i < GREEN_COUNT; i += 1) fruits.push(makeFruit("green", i + 3));
+          return fruits;
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.ripe = 0;
+          state.green = 0;
+          state.shake = 0;
+          state.intensity = 0;
+          state.basketX = 0;
+          state.treeSway = 0;
+          state.fruits = resetFruits();
+          state.particles = [];
+          state.flash = 0;
+          state.camShake = 0;
+          state.message = "짧게 흔들어 익은 것만";
+          state.messageTime = 1.5;
+          state.failReason = "";
+          input.holding = false;
+          input.steer = 0;
+          hostClearReported = false;
+          hostFailReported = false;
+          reseed((Date.now() ^ 0x39b4) >>> 0);
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(state.basketX, 0.5, 1.2, 26, "ripe");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.camShake = reducedMotion ? 0.14 : 0.55;
+          playSfx("fail");
+          burst(state.basketX, 0.5, 1.2, 18, "bad");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function catchFruit(fruit) {
+          fruit.falling = false;
+          fruit.caught = true;
+          fruit.y = 0.45;
+          if (fruit.kind === "ripe") {
+            state.ripe += 1;
+            state.flash = 0.35;
+            state.message = `수확 ${state.ripe}/${GOAL}`;
+            state.messageTime = 0.65;
+            burst(fruit.x, 0.55, 1.1, 10, "ripe");
+            playSfx("catch");
+            if (state.ripe >= GOAL) clearStage();
+          } else {
+            state.green += 1;
+            state.flash = 0.35;
+            state.camShake = reducedMotion ? 0.1 : 0.32;
+            state.message = `설익음 ${state.green}/${MAX_GREEN}`;
+            state.messageTime = 0.75;
+            burst(fruit.x, 0.55, 1.1, 10, "bad");
+            playSfx("green");
+            if (state.green >= MAX_GREEN) failStage("unripe");
+          }
+        }
+
+        function updateFruits(dt, params) {
+          const shaking = input.holding || input.shakeKey;
+          if (shaking) {
+            state.intensity = clamp(state.intensity + params.build * dt, 0, 1.25);
+            state.treeSway = Math.sin(state.elapsed * 14) * state.intensity * 0.18;
+            if (random() < dt * 6) playSfx("shake");
+          } else {
+            state.intensity = Math.max(0, state.intensity - params.decay * dt);
+            state.treeSway *= Math.max(0, 1 - dt * 6);
+          }
+          let steer = input.steer;
+          if (input.left) steer -= 1;
+          if (input.right) steer += 1;
+          if (input.holding) {
+            state.basketX = clamp(input.baseBasket + input.steer * 2.4, -2.1, 2.1);
+          } else {
+            state.basketX = clamp(state.basketX + steer * 3.2 * dt, -2.1, 2.1);
+          }
+
+          state.fruits.forEach((fruit) => {
+            if (fruit.caught || fruit.missed) return;
+            if (fruit.attached && state.intensity >= fruit.threshold) {
+              fruit.attached = false;
+              fruit.falling = true;
+              fruit.vx = state.treeSway * 8 + randRange(-0.4, 0.4);
+              fruit.vy = randRange(0.2, 1.1);
+              fruit.vz = randRange(0.4, 1.2);
+            }
+            if (!fruit.falling) {
+              if (fruit.attached) {
+                fruit.x = fruit.homeX + state.treeSway * 1.4;
+                fruit.y = fruit.homeY;
+              }
+              return;
+            }
+            fruit.vy -= params.gravity * dt;
+            fruit.x += fruit.vx * dt;
+            fruit.y += fruit.vy * dt;
+            fruit.z += fruit.vz * dt;
+            if (fruit.y < 0.48 && fruit.z > 0.4) {
+              const catchW = params.basket;
+              if (Math.abs(fruit.x - state.basketX) < catchW) {
+                catchFruit(fruit);
+              }
+            }
+            if (fruit.y < -0.2 && fruit.falling) {
+              fruit.falling = false;
+              fruit.missed = true;
+              fruit.y = 0.05;
+            }
+          });
+        }
+
+        function updateFx(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 3.2 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.camShake = Math.max(0, state.camShake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") {
+            state.treeSway = Math.sin((state.elapsed || 0) * 0.6) * 0.03;
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateFruits(dt, params);
+          if (state.mode !== "running") return;
+          updateFx(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `수확 ${state.ripe} / ${GOAL} · 설익음 ${state.green} / ${MAX_GREEN}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 설익음 ${state.green}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x10180c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x10180c);
+          scene.fog = new THREE.Fog(0x10180c, 8, 22);
+
+          const camera = new THREE.PerspectiveCamera(46, VIEW_W / VIEW_H, 0.1, 50);
+          camera.position.set(0.6, 2.7, 7.6);
+
+          scene.add(new THREE.AmbientLight(0x243018, 0.5));
+          const hemi = new THREE.HemisphereLight(0xffe8b0, 0x142010, 0.44);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xfff1d6, 0.62);
+          sun.position.set(-5, 8, 6);
+          scene.add(sun);
+          const orchardLight = new THREE.PointLight(0xff6b6b, 0.7, 12);
+          orchardLight.position.set(0.4, 2.2, 2.2);
+          scene.add(orchardLight);
+
+          const grassMat = new THREE.MeshStandardMaterial({ color: 0x2a4a22, roughness: 0.92, metalness: 0.03 });
+          const dirtMat = new THREE.MeshStandardMaterial({ color: 0x4a3820, roughness: 0.9, metalness: 0.04 });
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x5a3a1c, roughness: 0.8, metalness: 0.06 });
+          const leafMat = new THREE.MeshStandardMaterial({ color: 0x3a7a32, roughness: 0.78, metalness: 0.05, emissive: 0x102010, emissiveIntensity: 0.12 });
+          const ripeMat = new THREE.MeshStandardMaterial({
+            color: 0xff6b6b, roughness: 0.45, metalness: 0.12, emissive: 0x4a1010, emissiveIntensity: 0.22,
+          });
+          const greenMat = new THREE.MeshStandardMaterial({ color: 0x8dff6a, roughness: 0.55, metalness: 0.08, emissive: 0x143010, emissiveIntensity: 0.12 });
+          const basketMat = new THREE.MeshStandardMaterial({ color: 0xc4a056, roughness: 0.7, metalness: 0.1 });
+          const fenceMat = new THREE.MeshStandardMaterial({ color: 0x6a4a28, roughness: 0.86, metalness: 0.05 });
+
+          const ground = new THREE.Mesh(new THREE.CircleGeometry(10, 24), grassMat);
+          ground.rotation.x = -Math.PI / 2;
+          ground.position.y = -0.15;
+          scene.add(ground);
+          const plot = new THREE.Mesh(new THREE.CircleGeometry(2.2, 16), dirtMat);
+          plot.rotation.x = -Math.PI / 2;
+          plot.position.y = -0.12;
+          scene.add(plot);
+
+          const tree = new THREE.Group();
+          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.28, 2.4, 8), woodMat);
+          trunk.position.y = 1.1;
+          tree.add(trunk);
+          const canopyGeo = new THREE.SphereGeometry(1.05, 10, 10);
+          [[0, 2.7, 0, 1.2], [-0.7, 2.4, 0.2, 0.85], [0.75, 2.45, -0.15, 0.9], [0.1, 3.35, 0.1, 0.75]].forEach((row) => {
+            const canopy = new THREE.Mesh(canopyGeo, leafMat);
+            canopy.position.set(row[0], row[1], row[2]);
+            canopy.scale.setScalar(row[3]);
+            tree.add(canopy);
+          });
+          const branchGeo = new THREE.CylinderGeometry(0.05, 0.08, 1.1, 6);
+          const b1 = new THREE.Mesh(branchGeo, woodMat);
+          b1.position.set(-0.45, 2.0, 0.1);
+          b1.rotation.z = 0.9;
+          tree.add(b1);
+          const b2 = b1.clone();
+          b2.position.set(0.5, 2.05, -0.05);
+          b2.rotation.z = -0.85;
+          tree.add(b2);
+          scene.add(tree);
+
+          const fruitGeo = new THREE.SphereGeometry(0.15, 8, 8);
+          const fruitMeshes = [];
+          const total = RIPE_COUNT + GREEN_COUNT;
+          for (let i = 0; i < total; i += 1) {
+            const ripe = i < RIPE_COUNT;
+            const mesh = new THREE.Mesh(fruitGeo, ripe ? ripeMat.clone() : greenMat.clone());
+            scene.add(mesh);
+            fruitMeshes.push(mesh);
+          }
+
+          const basket = new THREE.Group();
+          const bowl = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.42, 0.38, 12), basketMat);
+          basket.add(bowl);
+          const handle = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.04, 6, 12, Math.PI), basketMat);
+          handle.rotation.x = Math.PI;
+          handle.position.y = 0.28;
+          basket.add(handle);
+          basket.position.set(0, 0.22, 1.35);
+          scene.add(basket);
+
+          const postGeo = new THREE.BoxGeometry(0.1, 1.1, 0.1);
+          const railGeo = new THREE.BoxGeometry(0.08, 0.08, 6);
+          for (let i = 0; i < 6; i += 1) {
+            const post = new THREE.Mesh(postGeo, fenceMat);
+            post.position.set(-4 + i * 1.6, 0.45, -2.4);
+            scene.add(post);
+          }
+          const rail = new THREE.Mesh(railGeo, fenceMat);
+          rail.position.set(0, 0.7, -2.4);
+          rail.rotation.y = Math.PI / 2;
+          scene.add(rail);
+
+          const farGeo = new THREE.SphereGeometry(0.9, 8, 8);
+          const farTrunk = new THREE.CylinderGeometry(0.12, 0.16, 1.6, 6);
+          [-4.5, 4.2, -5.5, 5.1].forEach((x, i) => {
+            const t = new THREE.Mesh(farTrunk, woodMat);
+            t.position.set(x, 0.7, -4 - i * 0.7);
+            scene.add(t);
+            const c = new THREE.Mesh(farGeo, leafMat);
+            c.position.set(x, 1.8, -4 - i * 0.7);
+            scene.add(c);
+          });
+          const crateGeo = new THREE.BoxGeometry(0.55, 0.38, 0.55);
+          [[-2.2, 0.12, 1.6], [-1.55, 0.12, 1.85], [2.15, 0.12, 1.5]].forEach((row, i) => {
+            const crate = new THREE.Mesh(crateGeo, i === 2 ? basketMat : woodMat);
+            crate.position.set(row[0], row[1], row[2]);
+            crate.rotation.y = i * 0.2;
+            scene.add(crate);
+          });
+          const scarecrow = new THREE.Group();
+          const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.8, 6), woodMat);
+          pole.position.y = 0.9;
+          scarecrow.add(pole);
+          const arms = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.08, 0.08), woodMat);
+          arms.position.y = 1.35;
+          scarecrow.add(arms);
+          const shirt = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.5, 0.18), ripeMat);
+          shirt.position.y = 1.2;
+          scarecrow.add(shirt);
+          const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.16, 0.12, 8), basketMat);
+          hat.position.y = 1.72;
+          scarecrow.add(hat);
+          scarecrow.position.set(2.8, 0, -1.2);
+          scene.add(scarecrow);
+          const leafGeo = new THREE.SphereGeometry(0.08, 6, 6);
+          for (let i = 0; i < 10; i += 1) {
+            const leaf = new THREE.Mesh(leafGeo, leafMat);
+            leaf.scale.set(1.4, 0.25, 0.8);
+            leaf.position.set(-1.8 + i * 0.38, -0.08, 0.6 + (i % 3) * 0.35);
+            scene.add(leaf);
+          }
+
+          const mistCount = reducedMotion ? 40 : 110;
+          const mistPos = new Float32Array(mistCount * 3);
+          for (let i = 0; i < mistCount; i += 1) {
+            mistPos[i * 3] = randRange(-6, 6);
+            mistPos[i * 3 + 1] = randRange(0.1, 3.4);
+            mistPos[i * 3 + 2] = randRange(-5, 5);
+          }
+          const mistGeo = new THREE.BufferGeometry();
+          mistGeo.setAttribute("position", new THREE.BufferAttribute(mistPos, 3));
+          const mist = new THREE.Points(mistGeo, new THREE.PointsMaterial({
+            color: 0xc8e8a8, size: 0.07, transparent: true, opacity: 0.24, depthWrite: false,
+          }));
+          scene.add(mist);
+
+          const particleGeo = new THREE.SphereGeometry(0.04, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xff6b6b, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, orchardLight, tree, fruitMeshes, basket, mist,
+            particleGeo, particleMat, particleMeshes: [], proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.tree.rotation.z = state.treeSway;
+          webgl.basket.position.x = state.basketX;
+          webgl.orchardLight.intensity = 0.5 + state.intensity * 0.5;
+          webgl.fruitMeshes.forEach((mesh, index) => {
+            const fruit = state.fruits[index];
+            if (!fruit || fruit.caught) {
+              mesh.visible = false;
+              return;
+            }
+            mesh.visible = true;
+            mesh.position.set(fruit.x, fruit.y, fruit.z);
+            mesh.scale.setScalar(fruit.kind === "ripe" ? 1 : 0.85);
+            if (fruit.missed) mesh.material.opacity = 0.35;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "bad" ? 0x8dff6a : 0xff6b6b);
+            mesh.material.opacity = clamp(p.life * 1.8, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.camShake > 0 ? (Math.random() - 0.5) * state.camShake * 0.26 : 0;
+          const shakeY = state.camShake > 0 ? (Math.random() - 0.5) * state.camShake * 0.2 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.25) * 0.08;
+          webgl.camera.position.set(0.55 + sway + shakeX, 2.65 + shakeY, 7.55);
+          webgl.camera.lookAt(state.basketX * 0.2, 1.4, 0.2);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#243820");
+          sky.addColorStop(1, "#10180c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#2a4a22";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H * 0.38);
+          const trunk = projectToScreen(0, 1.1, 0);
+          ctx.fillStyle = "#5a3a1c";
+          ctx.fillRect(trunk.x - 10, trunk.y - 40, 20, 90);
+          ctx.fillStyle = COLORS.leaf;
+          ctx.beginPath();
+          ctx.arc(trunk.x + state.treeSway * 40, trunk.y - 70, 54, 0, Math.PI * 2);
+          ctx.fill();
+          state.fruits.forEach((fruit) => {
+            if (fruit.caught) return;
+            const p = projectToScreen(fruit.x, fruit.y, fruit.z);
+            ctx.globalAlpha = fruit.missed ? 0.35 : 1;
+            ctx.fillStyle = fruit.kind === "ripe" ? COLORS.accent : COLORS.green;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, fruit.kind === "ripe" ? 8 : 6, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          const b = projectToScreen(state.basketX, 0.3, 1.35);
+          ctx.strokeStyle = "#c4a056";
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.ellipse(b.x, b.y, 28, 12, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = "rgba(255,241,214,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.ripe} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.ripe / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const shake = state.intensity > 0.7 ? "과하게" : state.intensity > 0.25 ? "흔들림" : "대기";
+            sub.textContent = `설익음 ${state.green} / ${MAX_GREEN} · ${shake}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          hud.fillStyle = "rgba(255,107,107,0.35)";
+          hud.fillRect(VIEW_W / 2 - 80, 82, 160 * clamp(state.intensity / 1.1, 0, 1), 8);
+          hud.strokeStyle = "rgba(255,241,214,0.35)";
+          hud.strokeRect(VIEW_W / 2 - 80, 82, 160, 8);
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.startsWith("설") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 114);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            const bad = state.message.startsWith("설");
+            hud.fillStyle = bad ? `rgba(141,255,106,${state.flash * 0.12})` : `rgba(255,107,107,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "tree at origin; basket +z; orchard camera",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.ripe,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            intensity: Number(state.intensity.toFixed(3)),
+            green: state.green,
+            basketX: Number(state.basketX.toFixed(3)),
+          });
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.downX = event.clientX;
+          input.baseBasket = state.basketX;
+          input.steer = 0;
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          const rect = hudCanvas.getBoundingClientRect();
+          input.steer = clamp((event.clientX - input.downX) / Math.max(70, rect.width * 0.22), -1, 1);
+        }
+        function onPointerUp() {
+          if (ignoreUp) { ignoreUp = false; return; }
+          input.holding = false;
+          input.steer = 0;
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "ArrowLeft" || event.code === "KeyA") { input.left = true; event.preventDefault(); }
+          if (event.code === "ArrowRight" || event.code === "KeyD") { input.right = true; event.preventDefault(); }
+          if (event.code === "Space") {
+            event.preventDefault();
+            input.shakeKey = true;
+            if (state.mode !== "running") startStage();
+          }
+        }
+        function onKeyUp(event) {
+          if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = false;
+          if (event.code === "ArrowRight" || event.code === "KeyD") input.right = false;
+          if (event.code === "Space") input.shakeKey = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.ripe = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        window.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

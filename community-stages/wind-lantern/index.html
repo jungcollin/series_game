@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>바람 등롱</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #100c14; --accent: #ffc86a; --accent-ink: #140e08; --danger: #ff6b7a; --ink: #fff0d8; --muted: rgba(255,240,216,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">바람 등롱. 바람을 막아 등불을 사당까지 운반하세요. 이동과 홀드로 몸 가리기. 사당에 등불을 도착시키면 클리어. 등불이 꺼지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 터치한 채 드래그해 이동하고, 홀드하면 몸으로 바람을 가립니다.</p>
+    <main class="stage" aria-label="바람 등롱 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="바람 등롱" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">불꽃</p>
+          <p class="hud-value" id="hud-objective">100</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">38.0</p>
+          <p class="hud-sub" id="hud-sub">거리 52</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Wind Lantern</p>
+          <h1>바람 등롱</h1>
+          <p class="brief-lead">바람을 막아 등불을 사당까지 운반하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>이동과 홀드로 몸 가리기</span></li>
+            <li><strong>클리어</strong><span>사당에 등불을 도착시키면 클리어</span></li>
+            <li><strong>실패</strong><span>등불이 꺼지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">등롱 소실</p>
+          <h2>불꽃이 꺼졌다</h2>
+          <p class="brief-lead" id="fail-detail">등불이 꺼지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">사당 도착</p>
+          <h2>등불을 바쳤다</h2>
+          <p class="brief-lead">산바람 속에서도 불꽃을 지켜 사당에 도착했습니다.</p>
+          <p class="hud-sub" id="clear-stat">사당에 등불을 도착시키면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 38;
+        const PATH_LEN = 52;
+        const WALK = 1.82;
+        const WALK_SHIELD = 0.82;
+        const LATERAL_MAX = 1.85;
+        const FLAME_MAX = 100;
+        const GUST_START = 5.45;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "wind-lantern",
+          title: "바람 등롱",
+          description: "바람을 막아 등불을 사당까지 운반하세요.",
+          creator: "collin",
+          genre: "3D lantern escort",
+          clearCondition: "사당에 등불을 도착시키면 클리어",
+          failCondition: "등불이 꺼지면 실패",
+          controls: "이동과 홀드로 몸 가리기",
+        };
+        const COLORS = {
+          night: "#100c14",
+          ink: "#fff0d8",
+          gold: "#ffc86a",
+          ember: "#ff8a3d",
+          pine: "#2a4a38",
+          stone: "#6a5a62",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          flame_out: "등불이 꺼졌습니다",
+          fell: "절벽 밖으로 떨어졌습니다",
+          time_limit: "제한 시간 38초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0, y: 3.2, z: 7.4 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.94, z: 0.34 },
+          fwd: { x: 0, y: -0.34, z: 0.94 },
+          focal: 390,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        function pathAt(s) {
+          const t = clamp(s, 0, 1);
+          const z = t * PATH_LEN;
+          const x = Math.sin(t * Math.PI * 2.15) * 4.05;
+          const y = 0.08 + t * 4.85 + Math.sin(t * Math.PI * 1.4) * 0.28;
+          const dx = Math.cos(t * Math.PI * 2.15) * 4.05 * Math.PI * 2.15;
+          const dz = PATH_LEN;
+          const yaw = Math.atan2(dx, dz);
+          const rightX = Math.cos(yaw);
+          const rightZ = -Math.sin(yaw);
+          return { x, y, z, yaw, rightX, rightZ };
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          s: 0,
+          lateral: 0,
+          flame: FLAME_MAX,
+          shielding: false,
+          gust: null,
+          gustWait: 0,
+          particles: [],
+          flags: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          arrived: false,
+        };
+        const input = {
+          left: false, right: false, hold: false,
+          dragging: false, holding: false, downX: 0, downY: 0, pointerId: null, moved: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            gustGap: 3.35 - difficulty * 0.95,
+            gustDur: 1.05 + difficulty * 0.35,
+            gustForce: 14 + difficulty * 12,
+            flameIdle: difficulty > 0.22 ? 1.1 + difficulty * 1.4 : 0,
+          };
+        }
+
+        function playerPose() {
+          const p = pathAt(state.s);
+          return {
+            x: p.x + p.rightX * state.lateral,
+            y: p.y + 0.92,
+            z: p.z + p.rightZ * state.lateral,
+            yaw: p.yaw,
+            path: p,
+          };
+        }
+
+        function spawnGust(params) {
+          const side = random() < 0.5 ? -1 : 1;
+          state.gust = {
+            side,
+            age: 0,
+            tele: 0.92,
+            dur: params.gustDur,
+            force: params.gustForce,
+            drain: 0,
+            hit: false,
+          };
+          state.message = side < 0 ? "왼쪽 바람!" : "오른쪽 바람!";
+          state.messageTime = 0.85;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(1.1, 4.8);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.8, 4.2),
+              vz: Math.sin(angle) * lift,
+              life: randRange(0.28, 0.78),
+              kind,
+              size: randRange(0.05, 0.14),
+            });
+          }
+          if (state.particles.length > 56) state.particles.splice(0, state.particles.length - 56);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "gust") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(42, now + 0.22);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            } else if (kind === "shield") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(220, now);
+              osc.frequency.exponentialRampToValueAtTime(140, now + 0.08);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "ember") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(180, now + 0.12);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "clear") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(440, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.18);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.23);
+            } else if (kind === "boom") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.s = 0;
+          state.lateral = 0;
+          state.flame = FLAME_MAX;
+          state.shielding = false;
+          state.gust = null;
+          state.gustWait = 0.4;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.arrived = false;
+          input.holding = false;
+          input.dragging = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.68;
+          playSfx("boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function updateGust(dt, params, pose) {
+          if (state.elapsed < GUST_START) return;
+          if (!state.gust) {
+            state.gustWait -= dt;
+            if (state.gustWait <= 0) spawnGust(params);
+            return;
+          }
+          const gust = state.gust;
+          gust.age += dt;
+          const active = gust.age >= gust.tele && gust.age < gust.tele + gust.dur;
+          if (active) {
+            const facing = state.shielding && Math.sign(state.lateral || gust.side) !== gust.side;
+            const covered = state.shielding && (gust.side < 0 ? state.lateral <= 0.15 : state.lateral >= -0.15);
+            if (!covered && !facing) {
+              gust.drain += dt;
+              state.flame = Math.max(0, state.flame - gust.force * dt * 0.85);
+              state.lateral = clamp(state.lateral + gust.side * dt * 0.85, -LATERAL_MAX - 0.4, LATERAL_MAX + 0.4);
+              if (!gust.hit) {
+                gust.hit = true;
+                state.flash = 0.42;
+                state.shake = reducedMotion ? 0.12 : 0.38;
+                burst(pose.x, pose.y + 0.4, pose.z, 14, "ember");
+                playSfx("gust");
+              }
+            }
+          }
+          if (gust.age >= gust.tele + gust.dur) {
+            state.gust = null;
+            state.gustWait = params.gustGap;
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 2.8 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          state.shielding = input.holding || input.hold;
+          const steer = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+          state.lateral = clamp(state.lateral + steer * dt * 2.4, -LATERAL_MAX, LATERAL_MAX);
+          const speed = (state.shielding ? WALK_SHIELD : WALK) / PATH_LEN;
+          state.s = clamp(state.s + speed * dt, 0, 1);
+          const pose = playerPose();
+          if (state.elapsed > 8) {
+            state.flame = Math.max(0, state.flame - params.flameIdle * dt);
+          }
+          if (state.shielding && state.flame < FLAME_MAX && !state.gust) {
+            state.flame = Math.min(FLAME_MAX, state.flame + dt * 2.2);
+          }
+          updateGust(dt, params, pose);
+          if (Math.abs(state.lateral) > LATERAL_MAX + 0.22) {
+            burst(pose.x, pose.y, pose.z, 18, "stone");
+            failStage("fell");
+            return;
+          }
+          if (state.flame <= 0) {
+            burst(pose.x, pose.y + 0.3, pose.z, 20, "ember");
+            failStage("flame_out");
+            return;
+          }
+          if (state.s >= 0.985 && state.flame > 0 && !state.arrived) {
+            state.arrived = true;
+            burst(pose.x, pose.y + 0.6, pose.z, 26, "gold");
+            clearStage();
+            return;
+          }
+          if (random() < (reducedMotion ? 0.08 : 0.22)) {
+            burst(pose.x + randRange(-0.1, 0.1), pose.y + 0.55, pose.z, 1, "ember");
+          }
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `불꽃 ${Math.round(state.flame)} · 거리 ${(PATH_LEN * (1 - state.s)).toFixed(1)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 불꽃 ${Math.round(state.flame)}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x100c14, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x100c14);
+          scene.fog = new THREE.Fog(0x100c14, 12, 48);
+
+          const camera = new THREE.PerspectiveCamera(56, VIEW_W / VIEW_H, 0.1, 140);
+          camera.position.set(0, 3.4, 8);
+
+          scene.add(new THREE.AmbientLight(0x3a2438, 0.42));
+          scene.add(new THREE.HemisphereLight(0xffd9a0, 0x1a1024, 0.48));
+          const moonLight = new THREE.DirectionalLight(0xc8d4ff, 0.55);
+          moonLight.position.set(-12, 18, 6);
+          scene.add(moonLight);
+          const flameLight = new THREE.PointLight(0xffc86a, 1.35, 14);
+          flameLight.position.set(0, 1.6, 0);
+          scene.add(flameLight);
+
+          const starCount = reducedMotion ? 160 : 420;
+          const starPositions = new Float32Array(starCount * 3);
+          for (let index = 0; index < starCount; index += 1) {
+            starPositions[index * 3] = randRange(-40, 40);
+            starPositions[index * 3 + 1] = randRange(6, 28);
+            starPositions[index * 3 + 2] = randRange(-20, 60);
+          }
+          const starGeo = new THREE.BufferGeometry();
+          starGeo.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
+          scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({
+            color: 0xfff0d8, size: 0.22, transparent: true, opacity: 0.85,
+          })));
+
+          const moon = new THREE.Mesh(
+            new THREE.SphereGeometry(1.8, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xffe6c0 })
+          );
+          moon.position.set(-14, 16, -8);
+          scene.add(moon);
+
+          const groundMat = new THREE.MeshStandardMaterial({ color: 0x241820, roughness: 0.94, metalness: 0.04 });
+          const ground = new THREE.Mesh(new THREE.PlaneGeometry(90, 90), groundMat);
+          ground.rotation.x = -Math.PI / 2;
+          ground.position.set(0, -0.4, 24);
+          scene.add(ground);
+
+          const stoneMat = new THREE.MeshStandardMaterial({ color: 0x6a5a62, roughness: 0.78, metalness: 0.08 });
+          const stepGeo = new THREE.BoxGeometry(1.7, 0.16, 1.05);
+          const steps = [];
+          for (let index = 0; index < 46; index += 1) {
+            const p = pathAt(index / 45);
+            const mesh = new THREE.Mesh(stepGeo, stoneMat);
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.rotation.y = p.yaw;
+            scene.add(mesh);
+            steps.push(mesh);
+          }
+
+          const pineMat = new THREE.MeshStandardMaterial({ color: 0x2a4a38, roughness: 0.86 });
+          const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3a2418, roughness: 0.9 });
+          const trunkGeo = new THREE.CylinderGeometry(0.12, 0.18, 1.4, 6);
+          const crownGeo = new THREE.ConeGeometry(0.85, 2.2, 7);
+          const pines = [];
+          for (let index = 0; index < 22; index += 1) {
+            const s = index / 21;
+            const p = pathAt(s);
+            const side = index % 2 === 0 ? -1 : 1;
+            const group = new THREE.Group();
+            const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+            trunk.position.y = 0.7;
+            const crown = new THREE.Mesh(crownGeo, pineMat);
+            crown.position.y = 2.1;
+            group.add(trunk);
+            group.add(crown);
+            group.position.set(p.x + p.rightX * side * 3.4, p.y, p.z + p.rightZ * side * 3.4);
+            scene.add(group);
+            pines.push(group);
+          }
+
+          const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a2a36, roughness: 0.92 });
+          const wallGeo = new THREE.BoxGeometry(2.4, 6.5, 8.5);
+          for (let index = 0; index < 8; index += 1) {
+            const s = 0.08 + index * 0.11;
+            const p = pathAt(s);
+            [-1, 1].forEach((side) => {
+              const wall = new THREE.Mesh(wallGeo, wallMat);
+              wall.position.set(p.x + p.rightX * side * 6.4, p.y + 2.4, p.z + p.rightZ * side * 6.4);
+              wall.rotation.y = p.yaw + side * 0.08;
+              scene.add(wall);
+            });
+          }
+
+          const shrine = new THREE.Group();
+          const shrineMat = new THREE.MeshStandardMaterial({ color: 0x4a2018, roughness: 0.55, metalness: 0.12 });
+          const roofMat = new THREE.MeshStandardMaterial({ color: 0x2a1010, roughness: 0.48, metalness: 0.18, emissive: 0x3a1208, emissiveIntensity: 0.25 });
+          const goldMat = new THREE.MeshStandardMaterial({ color: 0xffc86a, roughness: 0.35, metalness: 0.55, emissive: 0x6a3a10, emissiveIntensity: 0.4 });
+          const base = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.4, 3.4), shrineMat);
+          base.position.y = 0.2;
+          shrine.add(base);
+          const hall = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.8, 2.2), shrineMat);
+          hall.position.y = 1.2;
+          shrine.add(hall);
+          const roof = new THREE.Mesh(new THREE.ConeGeometry(2.3, 1.4, 4), roofMat);
+          roof.position.y = 2.55;
+          roof.rotation.y = Math.PI / 4;
+          shrine.add(roof);
+          const bowl = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.5, 0.28, 10), goldMat);
+          bowl.position.set(0, 0.55, 1.5);
+          shrine.add(bowl);
+          const end = pathAt(1);
+          shrine.position.set(end.x, end.y, end.z);
+          shrine.rotation.y = end.yaw;
+          scene.add(shrine);
+
+          const toriiMat = new THREE.MeshStandardMaterial({ color: 0xa83a28, roughness: 0.5, metalness: 0.12 });
+          const postGeo = new THREE.BoxGeometry(0.18, 2.4, 0.18);
+          const beamGeo = new THREE.BoxGeometry(2.6, 0.16, 0.22);
+          [0.22, 0.48, 0.74].forEach((s) => {
+            const p = pathAt(s);
+            const gate = new THREE.Group();
+            const left = new THREE.Mesh(postGeo, toriiMat);
+            left.position.set(-1.05, 1.2, 0);
+            const right = new THREE.Mesh(postGeo, toriiMat);
+            right.position.set(1.05, 1.2, 0);
+            const beam = new THREE.Mesh(beamGeo, toriiMat);
+            beam.position.y = 2.25;
+            gate.add(left); gate.add(right); gate.add(beam);
+            gate.position.set(p.x, p.y, p.z);
+            gate.rotation.y = p.yaw;
+            scene.add(gate);
+          });
+
+          const carrier = new THREE.Group();
+          const robeMat = new THREE.MeshStandardMaterial({ color: 0x3a2430, roughness: 0.62, metalness: 0.08 });
+          const robe = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.32, 0.95, 8), robeMat);
+          robe.position.y = 0.1;
+          carrier.add(robe);
+          const head = new THREE.Mesh(
+            new THREE.SphereGeometry(0.18, 10, 10),
+            new THREE.MeshStandardMaterial({ color: 0xd8b090, roughness: 0.55 })
+          );
+          head.position.y = 0.68;
+          carrier.add(head);
+          const lantern = new THREE.Group();
+          const frame = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.16, 0.16, 0.38, 8, 1, true),
+            new THREE.MeshStandardMaterial({ color: 0x6a3a18, roughness: 0.45, metalness: 0.2, side: THREE.DoubleSide })
+          );
+          const paper = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.145, 0.145, 0.34, 8, 1, true),
+            new THREE.MeshStandardMaterial({
+              color: 0xffc86a, roughness: 0.4, metalness: 0.05, emissive: 0xff8a3d, emissiveIntensity: 0.7, transparent: true, opacity: 0.88, side: THREE.DoubleSide,
+            })
+          );
+          const flame = new THREE.Mesh(
+            new THREE.ConeGeometry(0.07, 0.18, 6),
+            new THREE.MeshStandardMaterial({ color: 0xffe08a, emissive: 0xffc86a, emissiveIntensity: 1.2, roughness: 0.3 })
+          );
+          flame.position.y = 0.02;
+          lantern.add(frame);
+          lantern.add(paper);
+          lantern.add(flame);
+          lantern.position.set(0.28, 0.35, 0.18);
+          carrier.add(lantern);
+          scene.add(carrier);
+
+          const shieldMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.62, 12, 10, 0, Math.PI),
+            new THREE.MeshBasicMaterial({ color: 0xffc86a, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide })
+          );
+          scene.add(shieldMesh);
+
+          const ribbonGeo = new THREE.PlaneGeometry(7.5, 1.6, 10, 2);
+          const ribbonMat = new THREE.MeshBasicMaterial({
+            color: 0xfff0d8, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
+          });
+          const ribbon = new THREE.Mesh(ribbonGeo, ribbonMat);
+          scene.add(ribbon);
+
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const emberMat = new THREE.MeshBasicMaterial({ color: 0xffc86a, transparent: true, opacity: 0.9, depthWrite: false });
+          const flagMat = new THREE.MeshStandardMaterial({ color: 0xc45a3a, roughness: 0.55, metalness: 0.08, side: THREE.DoubleSide });
+          const flagGeo = new THREE.PlaneGeometry(0.7, 0.42);
+          const flags = [];
+          for (let index = 0; index < 10; index += 1) {
+            const p = pathAt(0.05 + index * 0.09);
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.6, 5), trunkMat);
+            const cloth = new THREE.Mesh(flagGeo, flagMat);
+            cloth.position.set(0.35, 0.55, 0);
+            const g = new THREE.Group();
+            pole.position.y = 0.8;
+            g.add(pole);
+            g.add(cloth);
+            g.position.set(p.x + p.rightX * 2.1, p.y, p.z + p.rightZ * 2.1);
+            scene.add(g);
+            flags.push({ root: g, cloth });
+          }
+
+          return {
+            renderer, scene, camera, flameLight, carrier, lantern, flame, paper: paper,
+            shieldMesh, ribbon, shrine, steps, pines, flags,
+            particleGeo, emberMat, particleMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const pose = playerPose();
+          webgl.carrier.position.set(pose.x, pose.y - 0.7, pose.z);
+          webgl.carrier.rotation.y = pose.yaw + (state.shielding ? (state.gust?.side || 0) * 0.55 : 0);
+          webgl.lantern.rotation.z = Math.sin(state.elapsed * 3.2) * 0.12;
+          const flameScale = 0.55 + (state.flame / FLAME_MAX) * 0.9;
+          webgl.flame.scale.setScalar(flameScale);
+          webgl.paper.material.emissiveIntensity = 0.35 + (state.flame / FLAME_MAX) * 0.8;
+          webgl.flameLight.position.set(pose.x + 0.28, pose.y + 0.1, pose.z + 0.18);
+          webgl.flameLight.intensity = 0.4 + (state.flame / FLAME_MAX) * 1.3;
+          webgl.shieldMesh.position.set(pose.x, pose.y, pose.z);
+          webgl.shieldMesh.rotation.y = pose.yaw + Math.PI / 2;
+          webgl.shieldMesh.material.opacity = state.shielding ? 0.22 : 0;
+          const gust = state.gust;
+          if (gust) {
+            const p = pose.path;
+            webgl.ribbon.visible = true;
+            webgl.ribbon.position.set(p.x + p.rightX * gust.side * 3.2, p.y + 1.6, p.z);
+            webgl.ribbon.rotation.y = p.yaw + (gust.side < 0 ? 0.4 : -0.4);
+            webgl.ribbon.material.opacity = gust.age < gust.tele ? 0.18 + gust.age * 0.2 : 0.38;
+          } else {
+            webgl.ribbon.material.opacity = 0;
+          }
+          webgl.flags.forEach((flag, index) => {
+            const wind = gust ? 0.55 : 0.12;
+            flag.cloth.rotation.y = Math.sin(state.elapsed * 4 + index) * wind;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.emberMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.material.opacity = clamp(particle.life * 1.6, 0, 1);
+            mesh.material.color.setHex(particle.kind === "gold" ? 0xffe08a : particle.kind === "stone" ? 0x8a7a82 : 0xff8a3d);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const pose = playerPose();
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.5 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const back = 6.2;
+          const camX = pose.x - Math.sin(pose.yaw) * back + shakeX;
+          const camZ = pose.z - Math.cos(pose.yaw) * back;
+          const camY = pose.y + 2.15 + shakeY;
+          webgl.camera.position.set(camX, camY, camZ);
+          webgl.look.set(pose.x + Math.sin(pose.yaw) * 6, pose.y + 0.4, pose.z + Math.cos(pose.yaw) * 6);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const pose = playerPose();
+          const ex = x - pose.x;
+          const ey = y - pose.y;
+          const ez = z - (pose.z - 6);
+          const depth = ez * 0.9 + 4;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + ex * w, y: VIEW_H * 0.62 - ey * w, visible: depth > 0.6 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#1a1024");
+          sky.addColorStop(0.55, "#100c14");
+          sky.addColorStop(1, "#1a1410");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "rgba(255,240,216,0.7)";
+          for (let index = 0; index < 60; index += 1) {
+            ctx.globalAlpha = 0.2 + (index % 5) * 0.1;
+            ctx.fillRect((index * 89) % VIEW_W, (index * 47) % (VIEW_H * 0.5), 2, 2);
+          }
+          ctx.globalAlpha = 1;
+          const pose = playerPose();
+          ctx.fillStyle = "#2a1c22";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H * 0.38);
+          ctx.strokeStyle = "rgba(106,90,98,0.9)";
+          ctx.lineWidth = 18;
+          ctx.beginPath();
+          for (let index = 0; index <= 18; index += 1) {
+            const p = pathAt(clamp(state.s + (index - 4) * 0.03, 0, 1));
+            const s = projectToScreen(p.x, p.y, p.z);
+            if (index === 0) ctx.moveTo(s.x, s.y + 28);
+            else ctx.lineTo(s.x, s.y + 28);
+          }
+          ctx.stroke();
+          const shrine = projectToScreen(...(() => { const p = pathAt(1); return [p.x, p.y + 1.6, p.z]; })());
+          ctx.fillStyle = "#4a2018";
+          ctx.fillRect(shrine.x - 22, shrine.y - 36, 44, 40);
+          ctx.fillStyle = "#2a1010";
+          ctx.beginPath();
+          ctx.moveTo(shrine.x - 30, shrine.y - 32);
+          ctx.lineTo(shrine.x, shrine.y - 58);
+          ctx.lineTo(shrine.x + 30, shrine.y - 32);
+          ctx.fill();
+          const body = projectToScreen(pose.x, pose.y, pose.z);
+          ctx.fillStyle = "#3a2430";
+          ctx.fillRect(body.x - 8, body.y - 22, 16, 30);
+          ctx.fillStyle = COLORS.gold;
+          ctx.beginPath();
+          ctx.arc(body.x + 10, body.y - 8, 7, 0, Math.PI * 2);
+          ctx.fill();
+          if (state.shielding) {
+            ctx.strokeStyle = "rgba(255,200,106,0.7)";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(body.x, body.y - 6, 22, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          if (state.gust) {
+            ctx.fillStyle = `rgba(255,240,216,${state.gust.age < state.gust.tele ? 0.18 : 0.4})`;
+            ctx.font = "800 18px Trebuchet MS, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(state.gust.side < 0 ? "◀ 바람" : "바람 ▶", VIEW_W / 2, 92);
+          }
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.5, 0, 1);
+            ctx.fillStyle = COLORS.ember;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,240,216,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const dist = PATH_LEN * (1 - state.s);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(state.flame)}`;
+          if (meter) meter.style.width = `${(state.flame / FLAME_MAX) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            sub.textContent = state.shielding ? `가리는 중 · 거리 ${dist.toFixed(1)}` : `거리 ${dist.toFixed(1)}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.gold;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,138,61,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const pose = playerPose();
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            flame: Number(state.flame.toFixed(1)),
+            distance: Number((PATH_LEN * (1 - state.s)).toFixed(2)),
+            s: Number(state.s.toFixed(3)),
+            lateral: Number(state.lateral.toFixed(3)),
+            shielding: state.shielding,
+            gust: state.gust ? { side: state.gust.side, age: Number(state.gust.age.toFixed(2)) } : null,
+            player: { x: Number(pose.x.toFixed(2)), y: Number(pose.y.toFixed(2)), z: Number(pose.z.toFixed(2)) },
+            difficulty: Number(params.difficulty.toFixed(3)),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.holding = true;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+          playSfx("shield");
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          if (Math.abs(dx) > 6) input.moved = true;
+          state.lateral = clamp(state.lateral + dx * 0.0042, -LATERAL_MAX, LATERAL_MAX);
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.holding = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          input.dragging = false;
+          input.holding = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          input.holding = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right" };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space" || event.code === "ShiftLeft" || event.code === "ShiftRight") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            input.hold = true;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space" || event.code === "ShiftLeft" || event.code === "ShiftRight") {
+            input.hold = false;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.s = 1;
+            state.flame = Math.max(20, state.flame);
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = false; input.right = false; input.hold = false; input.holding = false; input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>풍차 날개</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #14180c; --accent: #e8c36a; --accent-ink: #14180c; --danger: #ff6b7a; --ink: #fff4dc; --muted: rgba(255,244,220,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">풍차 날개. 날개 각도를 바람과 맞춰 곡식을 제분하세요. 드래그로 날개 피치. 가루 100%면 클리어. 날개가 부러지거나 멈추면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 위아래로 드래그해 날개 피치를 맞춥니다.</p>
+    <main class="stage" aria-label="풍차 날개 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="풍차 날개" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">제분</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">바람 0°</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Windmill Set</p>
+          <h1>풍차 날개</h1>
+          <p class="brief-lead">날개 각도를 바람과 맞춰 곡식을 제분하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 날개 피치</span></li>
+            <li><strong>클리어</strong><span>가루 100%면 클리어</span></li>
+            <li><strong>실패</strong><span>날개가 부러지거나 멈추면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">제분 중단</p>
+          <h2>날개가 멈췄다</h2>
+          <p class="brief-lead" id="fail-detail">날개가 부러지거나 멈추면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">곡식 가루</p>
+          <h2>제분을 마쳤다</h2>
+          <p class="brief-lead">바람을 받아 곡식을 모두 가루로 만들었습니다.</p>
+          <p class="hud-sub" id="clear-stat">가루 100%면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const FIRST_SHIFT = 6.2;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "windmill-set",
+          title: "풍차 날개",
+          description: "날개 각도를 바람과 맞춰 곡식을 제분하세요.",
+          creator: "collin",
+          genre: "3D sail angle",
+          clearCondition: "가루 100%면 클리어",
+          failCondition: "날개가 부러지거나 멈추면 실패",
+          controls: "드래그로 날개 피치",
+        };
+        const COLORS = {
+          night: "#14180c",
+          ink: "#fff4dc",
+          accent: "#e8c36a",
+          sail: "#f4e6c0",
+          brick: "#8a5a32",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          snap: "날개가 부러졌습니다",
+          stalled: "풍차가 멈췄습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 5.4, y: 4.2, z: 9.2 },
+          right: { x: 0.86, y: 0, z: -0.51 },
+          up: { x: -0.08, y: 0.97, z: -0.14 },
+          fwd: { x: -0.5, y: 0.22, z: -0.84 },
+          focal: 430,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function wrap180(a) {
+          while (a > 180) a -= 360;
+          while (a < -180) a += 360;
+          return a;
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          flour: 0,
+          pitch: 28,
+          wind: 30,
+          windTarget: 30,
+          windSpeed: 0.72,
+          rpm: 0.55,
+          strain: 0,
+          stallAge: 0,
+          spin: 0,
+          nextShift: FIRST_SHIFT,
+          telegraph: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          vane: 30,
+        };
+        const input = {
+          dragging: false, lastY: 0, pointerId: null,
+          up: false, down: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            shiftGap: 7.2 - difficulty * 1.8,
+            windJump: 18 + difficulty * 16,
+            millRate: 0.048 + difficulty * 0.01,
+            snapNeed: 0.92 - difficulty * 0.08,
+          };
+        }
+
+        function idealPitch() {
+          return clamp(state.wind, 10, 62);
+        }
+        function catchFactor() {
+          const err = Math.abs(state.pitch - idealPitch());
+          return clamp(1 - err / 20, 0, 1);
+        }
+        function tooSteep() {
+          return state.pitch > idealPitch() + 15;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.4, 2.4),
+              vy: randRange(0.5, 3.2),
+              vz: Math.sin(a) * randRange(0.3, 1.8),
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.04, 0.1),
+            });
+          }
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "mill") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.08);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "gust") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(160, now + 0.14);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "snap") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(50, now + 0.16);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.2);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(440, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.22);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else if (kind === "fail") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(110, now);
+              osc.frequency.exponentialRampToValueAtTime(36, now + 0.24);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.flour = 0;
+          state.pitch = 28;
+          state.wind = 30;
+          state.windTarget = 30;
+          state.windSpeed = 0.7;
+          state.rpm = 0.58;
+          state.strain = 0;
+          state.stallAge = 0;
+          state.spin = 0;
+          state.nextShift = FIRST_SHIFT;
+          state.telegraph = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "피치를 바람에 맞추세요";
+          state.messageTime = 1.5;
+          state.failReason = "";
+          state.vane = 30;
+          input.dragging = false;
+          reseed((Date.now() ^ 0xa11) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.flour = 1;
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(0, 3.2, 0.4, 28, "gold");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.6;
+          playSfx(reason === "snap" ? "snap" : "fail");
+          burst(0, 4.6, 0.8, 18, "bad");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function maybeShift(dt, params) {
+          state.wind = lerp(state.wind, state.windTarget, 0.08);
+          state.vane = lerp(state.vane, state.wind, 0.06);
+          if (state.elapsed < state.nextShift) {
+            const until = state.nextShift - state.elapsed;
+            state.telegraph = until < 1.15 ? 1 - until / 1.15 : 0;
+            return;
+          }
+          const jump = (random() < 0.5 ? -1 : 1) * randRange(params.windJump * 0.55, params.windJump);
+          state.windTarget = clamp(state.wind + jump, 8, 70);
+          state.windSpeed = clamp(0.55 + random() * 0.45, 0.5, 1);
+          state.nextShift = state.elapsed + params.shiftGap;
+          state.telegraph = 0;
+          state.message = "바람 전환";
+          state.messageTime = 0.8;
+          playSfx("gust");
+          burst(2.4, 5.5, 2.2, 10, "gold");
+        }
+
+        function updateMill(dt, params) {
+          if (input.up) state.pitch += 38 * dt;
+          if (input.down) state.pitch -= 38 * dt;
+          state.pitch = clamp(state.pitch, 6, 68);
+          const catchN = catchFactor();
+          const targetRpm = 0.12 + catchN * (0.55 + state.windSpeed * 0.5);
+          state.rpm = lerp(state.rpm, targetRpm, 0.08);
+          state.spin += state.rpm * dt * 4.8;
+          if (tooSteep()) {
+            state.strain += dt * (0.28 + state.windSpeed * 0.22);
+          } else {
+            state.strain = Math.max(0, state.strain - dt * 0.22);
+          }
+          if (state.strain >= params.snapNeed) {
+            failStage("snap");
+            return;
+          }
+          if (state.rpm < 0.16) state.stallAge += dt;
+          else state.stallAge = 0;
+          if (state.elapsed > 6.4 && state.stallAge > 2.6) {
+            failStage("stalled");
+            return;
+          }
+          const grind = catchN * state.rpm * params.millRate;
+          state.flour = clamp(state.flour + grind * dt * 2.15, 0, 1);
+          if (grind > 0.02 && Math.random() < dt * 8) {
+            burst(0.2, 1.15, 1.4, 2, "flour");
+            if (Math.random() < 0.08) playSfx("mill");
+          }
+          if (state.flour >= 1) clearStage();
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 2.6 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") {
+            state.spin += dt * 0.35;
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          maybeShift(dt, params);
+          updateMill(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `제분 ${Math.round(state.flour * 100)}% · 피치 ${Math.round(state.pitch)}°`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 가루 100%`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x14180c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x14180c);
+          scene.fog = new THREE.Fog(0x14180c, 12, 40);
+
+          const camera = new THREE.PerspectiveCamera(48, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(5.6, 4.4, 9.4);
+
+          scene.add(new THREE.AmbientLight(0x2a3018, 0.5));
+          const hemi = new THREE.HemisphereLight(0xffe6a0, 0x14180c, 0.4);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xfff4dc, 0.65);
+          sun.position.set(-8, 14, 8);
+          scene.add(sun);
+          const gold = new THREE.PointLight(0xe8c36a, 1.1, 16);
+          gold.position.set(1.2, 5.2, 2.4);
+          scene.add(gold);
+          const doorLight = new THREE.PointLight(0xffa040, 0.55, 10);
+          doorLight.position.set(0.4, 1.1, 2.2);
+          scene.add(doorLight);
+
+          const grassMat = new THREE.MeshStandardMaterial({ color: 0x2a3814, roughness: 0.92, metalness: 0.04 });
+          const brickMat = new THREE.MeshStandardMaterial({
+            color: 0x8a5a32, roughness: 0.78, metalness: 0.08, emissive: 0x2a180c, emissiveIntensity: 0.12,
+          });
+          const woodMat = new THREE.MeshStandardMaterial({
+            color: 0x5a3a18, roughness: 0.7, metalness: 0.1, emissive: 0x201408, emissiveIntensity: 0.12,
+          });
+          const sailMat = new THREE.MeshStandardMaterial({
+            color: 0xf4e6c0, roughness: 0.55, metalness: 0.05, emissive: 0x4a3a18, emissiveIntensity: 0.18,
+          });
+          const capMat = new THREE.MeshStandardMaterial({
+            color: 0xe8c36a, roughness: 0.4, metalness: 0.25, emissive: 0x5a4010, emissiveIntensity: 0.2,
+          });
+
+          const ground = new THREE.Mesh(new THREE.CircleGeometry(22, 28), grassMat);
+          ground.rotation.x = -Math.PI / 2;
+          scene.add(ground);
+
+          const tower = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.55, 5.4, 12), brickMat);
+          tower.position.y = 2.7;
+          scene.add(tower);
+          const cap = new THREE.Mesh(new THREE.ConeGeometry(1.45, 1.5, 12), capMat);
+          cap.position.y = 6.1;
+          scene.add(cap);
+          const door = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.15, 0.12), woodMat);
+          door.position.set(0, 0.7, 1.48);
+          scene.add(door);
+          const windowGeo = new THREE.BoxGeometry(0.32, 0.4, 0.08);
+          [2.2, 3.6].forEach((y) => {
+            const w = new THREE.Mesh(windowGeo, capMat);
+            w.position.set(0.55, y, 1.42);
+            scene.add(w);
+          });
+
+          const hub = new THREE.Group();
+          hub.position.set(0, 4.55, 1.55);
+          const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.7, 10), woodMat);
+          axle.rotation.x = Math.PI / 2;
+          hub.add(axle);
+          const blades = [];
+          const sailGeo = new THREE.BoxGeometry(0.9, 3.4, 0.06);
+          const armGeo = new THREE.BoxGeometry(0.12, 3.6, 0.1);
+          for (let i = 0; i < 4; i += 1) {
+            const arm = new THREE.Group();
+            const spar = new THREE.Mesh(armGeo, woodMat);
+            spar.position.y = 1.8;
+            arm.add(spar);
+            const sail = new THREE.Mesh(sailGeo, sailMat.clone());
+            sail.position.set(0.28, 1.85, 0);
+            arm.add(sail);
+            arm.rotation.z = (i / 4) * Math.PI * 2;
+            hub.add(arm);
+            blades.push({ arm, sail });
+          }
+          scene.add(hub);
+
+          const vaneGroup = new THREE.Group();
+          const vaneRod = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.1, 6), woodMat);
+          vaneRod.rotation.z = Math.PI / 2;
+          vaneGroup.add(vaneRod);
+          const vaneSail = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.02, 0.18), capMat);
+          vaneSail.position.x = 0.55;
+          vaneGroup.add(vaneSail);
+          vaneGroup.position.set(0, 6.7, 0.2);
+          scene.add(vaneGroup);
+
+          const hopper = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.7, 0.9), woodMat);
+          hopper.position.set(2.15, 0.55, 1.1);
+          scene.add(hopper);
+          const sack = new THREE.Mesh(new THREE.SphereGeometry(0.38, 10, 8), capMat);
+          sack.scale.set(1, 0.7, 1);
+          sack.position.set(2.15, 0.28, 1.85);
+          scene.add(sack);
+          const flourPile = new THREE.Mesh(
+            new THREE.ConeGeometry(0.45, 0.4, 10),
+            new THREE.MeshStandardMaterial({ color: 0xfff4dc, roughness: 0.85, metalness: 0.02 })
+          );
+          flourPile.position.set(2.15, 0.22, 1.85);
+          scene.add(flourPile);
+
+          [[-8, 1.4, -6, 2.4], [9, 1.6, -8, 2.8], [-6, 1.1, -12, 2]].forEach((row) => {
+            const tree = new THREE.Mesh(new THREE.ConeGeometry(row[3] * 0.45, row[3], 7), grassMat);
+            tree.position.set(row[0], row[1], row[2]);
+            scene.add(tree);
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.8, 6), woodMat);
+            trunk.position.set(row[0], 0.3, row[2]);
+            scene.add(trunk);
+          });
+
+          const cloudGeo = new THREE.SphereGeometry(0.8, 8, 8);
+          const cloudMat = new THREE.MeshStandardMaterial({
+            color: 0xfff4dc, roughness: 0.9, metalness: 0, transparent: true, opacity: 0.55,
+          });
+          const clouds = [];
+          for (let i = 0; i < 5; i += 1) {
+            const c = new THREE.Mesh(cloudGeo, cloudMat);
+            c.position.set(-6 + i * 3.2, 8.2 + (i % 2) * 0.5, -6 - i);
+            c.scale.set(1.6, 0.7, 1);
+            scene.add(c);
+            clouds.push(c);
+          }
+
+          const moteCount = reducedMotion ? 50 : 150;
+          const motePos = new Float32Array(moteCount * 3);
+          for (let i = 0; i < moteCount; i += 1) {
+            motePos[i * 3] = randRange(-10, 10);
+            motePos[i * 3 + 1] = randRange(0.4, 8);
+            motePos[i * 3 + 2] = randRange(-12, 6);
+          }
+          const moteGeo = new THREE.BufferGeometry();
+          moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+          const motes = new THREE.Points(moteGeo, new THREE.PointsMaterial({
+            color: 0xe8c36a, size: 0.06, transparent: true, opacity: 0.3, depthWrite: false,
+          }));
+          scene.add(motes);
+
+          const particleGeo = new THREE.SphereGeometry(0.045, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xfff4dc, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, gold, hub, blades, vaneGroup, flourPile, sack, clouds,
+            particleGeo, particleMat, particleMeshes: [], proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.hub.rotation.z = -state.spin;
+          const pitchRad = (state.pitch - 28) * 0.018;
+          webgl.blades.forEach((b) => {
+            b.sail.rotation.y = pitchRad;
+            b.sail.material.emissiveIntensity = 0.12 + catchFactor() * 0.35;
+            if (tooSteep()) b.sail.material.color.setHex(0xffb0a0);
+            else b.sail.material.color.setHex(0xf4e6c0);
+          });
+          webgl.vaneGroup.rotation.y = state.vane * 0.012;
+          webgl.flourPile.scale.setScalar(0.35 + state.flour * 1.4);
+          webgl.flourPile.position.y = 0.12 + state.flour * 0.22;
+          webgl.gold.intensity = 0.8 + catchFactor() * 0.6 + state.telegraph * 0.4;
+          if (!reducedMotion) {
+            webgl.clouds.forEach((c, i) => {
+              c.position.x += (0.4 + state.windSpeed) * 0.012 * (i % 2 ? 1 : 0.7);
+              if (c.position.x > 12) c.position.x = -10;
+            });
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "bad" ? 0xff6b7a : p.kind === "gold" ? 0xe8c36a : 0xfff4dc);
+            mesh.material.opacity = clamp(p.life * 1.7, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.28 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.2) * 0.12;
+          webgl.camera.position.set(5.5 + sway + shakeX, 4.35 + shakeY, 9.3);
+          webgl.camera.lookAt(0.2, 3.4, 0.6);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#3a4018");
+          sky.addColorStop(1, "#14180c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          const base = projectToScreen(0, 0, 0);
+          const top = projectToScreen(0, 6.2, 0);
+          ctx.fillStyle = COLORS.brick;
+          ctx.fillRect(base.x - 28, top.y, 56, base.y - top.y);
+          const hub = projectToScreen(0, 4.55, 1.55);
+          ctx.strokeStyle = COLORS.sail;
+          ctx.lineWidth = 6;
+          for (let i = 0; i < 4; i += 1) {
+            const a = state.spin + (i * Math.PI) / 2;
+            ctx.beginPath();
+            ctx.moveTo(hub.x, hub.y);
+            ctx.lineTo(hub.x + Math.cos(a) * 70, hub.y + Math.sin(a) * 70);
+            ctx.stroke();
+          }
+          ctx.fillStyle = COLORS.accent;
+          ctx.beginPath();
+          ctx.arc(hub.x, hub.y, 8, 0, Math.PI * 2);
+          ctx.fill();
+          const pile = projectToScreen(2.15, 0.3 + state.flour * 0.4, 1.85);
+          ctx.fillStyle = COLORS.ink;
+          ctx.beginPath();
+          ctx.arc(pile.x, pile.y, 8 + state.flour * 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(255,244,220,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          const pct = Math.round(state.flour * 100);
+          if (objective) objective.textContent = `${pct}%`;
+          if (meter) meter.style.width = `${pct}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const warn = tooSteep() ? " · 과각" : catchFactor() < 0.35 ? " · 빗각" : " · 맞춤";
+            sub.textContent = `바람 ${Math.round(state.wind)}° · 피치 ${Math.round(state.pitch)}°${warn}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const ideal = idealPitch();
+          const x = VIEW_W * 0.5;
+          const y = VIEW_H * 0.86;
+          const w = 240;
+          hud.fillStyle = "rgba(20,24,12,0.45)";
+          hud.fillRect(x - w / 2, y - 8, w, 10);
+          hud.fillStyle = "rgba(90,200,120,0.5)";
+          const band = 18;
+          hud.fillRect(x - w / 2 + ((ideal - band - 6) / 62) * w, y - 8, (band * 2 / 62) * w, 10);
+          hud.fillStyle = tooSteep() ? COLORS.danger : COLORS.accent;
+          hud.fillRect(x - w / 2, y - 8, ((state.pitch - 6) / 62) * w, 10);
+          if (state.telegraph > 0) {
+            hud.strokeStyle = COLORS.accent;
+            hud.globalAlpha = state.telegraph;
+            hud.lineWidth = 3;
+            hud.beginPath();
+            hud.arc(x, VIEW_H * 0.2, 16 + state.telegraph * 12, 0, Math.PI * 2);
+            hud.stroke();
+            hud.globalAlpha = 1;
+            hud.fillStyle = COLORS.accent;
+            hud.font = "800 12px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("바람 예고", x, VIEW_H * 0.2 - 22);
+          }
+          if (state.strain > 0.4) {
+            hud.fillStyle = COLORS.danger;
+            hud.font = "800 12px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("날개 부담", x, VIEW_H * 0.78);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(232,195,106,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "mill at origin; vanes on +z face; +y up",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: Math.round(state.flour * 100),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            pitch: Number(state.pitch.toFixed(1)),
+            wind: Number(state.wind.toFixed(1)),
+            rpm: Number(state.rpm.toFixed(3)),
+            strain: Number(state.strain.toFixed(3)),
+            catch: Number(catchFactor().toFixed(3)),
+          });
+        }
+
+        function safeCapture(el, id) { try { el.setPointerCapture?.(id); } catch (_e) { /* synthetic */ } }
+        function safeRelease(el, id) { try { el.releasePointerCapture?.(id); } catch (_e) { /* synthetic */ } }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.lastY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          const dy = event.clientY - input.lastY;
+          input.lastY = event.clientY;
+          state.pitch = clamp(state.pitch - dy * 0.12, 6, 68);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) ignoreUp = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+            return;
+          }
+          if (event.code === "ArrowUp" || event.code === "KeyW") { event.preventDefault(); input.up = true; }
+          if (event.code === "ArrowDown" || event.code === "KeyS") { event.preventDefault(); input.down = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "ArrowUp" || event.code === "KeyW") input.up = false;
+          if (event.code === "ArrowDown" || event.code === "KeyS") input.down = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.flour = 1;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

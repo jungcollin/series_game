@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>물레방아</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #10180c; --accent: #c4a056; --accent-ink: #10180c; --danger: #ff6b7a; --ink: #f6eedc; --muted: rgba(246,238,220,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">물레방아. 물레방아 통이 물줄기를 받는 순간에 곡식을 넣으세요. 탭으로 곡식 투입. 정확한 투입 8회면 클리어. 빗맞힘 3회면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 통이 홈 아래에 올 때 화면을 탭해 곡식을 넣습니다.</p>
+    <main class="stage" aria-label="물레방아 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="물레방아" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">투입</p>
+          <p class="hud-value" id="hud-objective">0 / 8</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">실수 0 / 3</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Mill Wheel</p>
+          <h1>물레방아</h1>
+          <p class="brief-lead">물레방아 통이 물줄기를 받는 순간에 곡식을 넣으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 곡식 투입</span></li>
+            <li><strong>클리어</strong><span>정확한 투입 8회면 클리어</span></li>
+            <li><strong>실패</strong><span>빗맞힘 3회면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">제분 중단</p>
+          <h2>곡식이 흘렀다</h2>
+          <p class="brief-lead" id="fail-detail">빗맞힘 3회면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">제분 완료</p>
+          <h2>여덟 통을 채웠다</h2>
+          <p class="brief-lead">물레방아 통에 곡식을 정확히 넣었습니다.</p>
+          <p class="hud-sub" id="clear-stat">정확한 투입 8회면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const GOAL = 8;
+        const MAX_MISS = 3;
+        const BUCKETS = 8;
+        const WHEEL_R = 1.85;
+        const WHEEL_Y = 2.15;
+        const CHUTE_ANG = Math.PI * 0.5;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "mill-wheel",
+          title: "물레방아",
+          description: "물레방아 통이 물줄기를 받는 순간에 곡식을 넣으세요.",
+          creator: "collin",
+          genre: "3D mill timing",
+          clearCondition: "정확한 투입 8회면 클리어",
+          failCondition: "빗맞힘 3회면 실패",
+          controls: "탭으로 곡식 투입",
+        };
+        const COLORS = {
+          night: "#10180c",
+          ink: "#f6eedc",
+          accent: "#c4a056",
+          water: "#5aa0c8",
+          wood: "#6a4a28",
+          moss: "#3a5a28",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          miss_limit: "곡식이 세 번 빗맞았습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0.35, y: 2.55, z: 7.4 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.98, z: 0.2 },
+          fwd: { x: 0, y: -0.2, z: -0.98 },
+          focal: 430,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function wrapAng(a) {
+          const t = a % (Math.PI * 2);
+          return t < 0 ? t + Math.PI * 2 : t;
+        }
+        function angDiff(a, b) {
+          let d = wrapAng(a) - wrapAng(b);
+          if (d > Math.PI) d -= Math.PI * 2;
+          if (d < -Math.PI) d += Math.PI * 2;
+          return d;
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          hits: 0,
+          misses: 0,
+          angle: 0.15,
+          glow: 0,
+          hopper: 0,
+          drops: [],
+          particles: [],
+          splash: 0,
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          filled: [0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        const input = { pending: false };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            spin: 0.72 + difficulty * 0.38,
+            window: 0.22 - difficulty * 0.05,
+          };
+        }
+
+        function bucketAngle(index) {
+          return wrapAng(state.angle + (index / BUCKETS) * Math.PI * 2);
+        }
+        function bucketPos(index) {
+          const a = bucketAngle(index);
+          return {
+            x: Math.cos(a) * WHEEL_R,
+            y: WHEEL_Y + Math.sin(a) * WHEEL_R,
+            z: 0.12,
+            a,
+          };
+        }
+        function nearestBucket() {
+          let best = 0;
+          let bestGap = 99;
+          for (let i = 0; i < BUCKETS; i += 1) {
+            const gap = Math.abs(angDiff(bucketAngle(i), CHUTE_ANG));
+            if (gap < bestGap) { bestGap = gap; best = i; }
+          }
+          return { index: best, gap: bestGap };
+        }
+        function inWindow(params) {
+          return nearestBucket().gap <= params.window;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const angle = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.4, 2.2),
+              vy: randRange(0.5, 2.8),
+              vz: Math.sin(angle) * randRange(0.2, 1.2),
+              life: randRange(0.28, 0.7),
+              kind,
+              size: randRange(0.04, 0.1),
+            });
+          }
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "hit") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(140, now + 0.12);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.18);
+            } else if (kind === "miss") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(110, now);
+              osc.frequency.exponentialRampToValueAtTime(55, now + 0.1);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "water") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.08);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(660, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.2);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.24);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.hits = 0;
+          state.misses = 0;
+          state.angle = 0.2;
+          state.glow = 0;
+          state.hopper = 0;
+          state.drops = [];
+          state.particles = [];
+          state.splash = 0;
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.filled = [0, 0, 0, 0, 0, 0, 0, 0];
+          input.pending = false;
+          reseed((Date.now() ^ 0x11e11) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.62;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function dropGrain() {
+          if (state.mode !== "running") return;
+          const params = difficultyAt(state.elapsed);
+          const near = nearestBucket();
+          state.hopper = 1;
+          state.drops.push({
+            x: 0.05, y: 4.55, z: 0.2, vy: -2.4, life: 0.55, good: near.gap <= params.window,
+          });
+          if (near.gap <= params.window) {
+            state.hits += 1;
+            state.filled[near.index] = 1;
+            state.flash = 0.4;
+            burst(0, 4.15, 0.2, 12, "grain");
+            playSfx("hit");
+            state.message = `투입 ${state.hits}/${GOAL}`;
+            state.messageTime = 0.65;
+            if (state.hits >= GOAL) clearStage();
+          } else {
+            state.misses += 1;
+            state.shake = 0.28;
+            burst(0.2, 3.6, 0.4, 8, "miss");
+            playSfx("miss");
+            state.message = `빗맞힘 ${state.misses}/${MAX_MISS}`;
+            state.messageTime = 0.7;
+            if (state.misses >= MAX_MISS) failStage("miss_limit");
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 3.2 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          state.drops.forEach((d) => {
+            d.y += d.vy * dt;
+            d.vy -= 8 * dt;
+            d.life -= dt;
+          });
+          state.drops = state.drops.filter((d) => d.life > 0 && d.y > 0.4);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.hopper = Math.max(0, state.hopper - dt * 3.4);
+          state.splash = (state.splash + dt * 7) % (Math.PI * 2);
+          if (state.mode !== "running") {
+            state.angle += dt * 0.35;
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          state.angle += dt * params.spin;
+          const near = nearestBucket();
+          state.glow = clamp(1 - near.gap / (params.window * 2.2), 0, 1);
+          if (input.pending) {
+            input.pending = false;
+            dropGrain();
+            if (state.mode !== "running") return;
+          }
+          if (state.glow > 0.75 && Math.random() < dt * 8) burst(0, 4.2, 0.15, 1, "water");
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `투입 ${state.hits} / ${GOAL} · 실수 ${state.misses} / ${MAX_MISS}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 실수 ${state.misses}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x10180c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x10180c);
+          scene.fog = new THREE.Fog(0x10180c, 8, 22);
+
+          const camera = new THREE.PerspectiveCamera(48, VIEW_W / VIEW_H, 0.1, 50);
+          camera.position.set(0.4, 2.6, 7.5);
+
+          scene.add(new THREE.AmbientLight(0x243018, 0.48));
+          const hemi = new THREE.HemisphereLight(0xc8e0a0, 0x102010, 0.4);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffe8c0, 0.45);
+          sun.position.set(-6, 10, 8);
+          scene.add(sun);
+          const millLight = new THREE.PointLight(0xc4a056, 1.05, 14);
+          millLight.position.set(0.2, 3.4, 1.4);
+          scene.add(millLight);
+          const waterLight = new THREE.PointLight(0x5aa0c8, 0.7, 10);
+          waterLight.position.set(1.6, 2.2, 0.6);
+          scene.add(waterLight);
+
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x6a4a28, roughness: 0.72, metalness: 0.08 });
+          const darkWood = new THREE.MeshStandardMaterial({ color: 0x3a2818, roughness: 0.78, metalness: 0.06 });
+          const mossMat = new THREE.MeshStandardMaterial({ color: 0x3a5a28, roughness: 0.9, metalness: 0.04 });
+          const stoneMat = new THREE.MeshStandardMaterial({ color: 0x4a5040, roughness: 0.86, metalness: 0.08 });
+          const waterMat = new THREE.MeshStandardMaterial({
+            color: 0x3a78a0, roughness: 0.22, metalness: 0.35, emissive: 0x123848, emissiveIntensity: 0.25,
+          });
+          const grainMat = new THREE.MeshStandardMaterial({ color: 0xc4a056, roughness: 0.55, metalness: 0.08 });
+
+          const ground = new THREE.Mesh(new THREE.CircleGeometry(16, 24), mossMat);
+          ground.rotation.x = -Math.PI / 2;
+          ground.position.y = -0.15;
+          scene.add(ground);
+          const pond = new THREE.Mesh(new THREE.CircleGeometry(4.4, 24), waterMat);
+          pond.rotation.x = -Math.PI / 2;
+          pond.position.set(0.4, -0.08, 0.2);
+          scene.add(pond);
+
+          const house = new THREE.Mesh(new THREE.BoxGeometry(3.4, 2.6, 2.8), stoneMat);
+          house.position.set(-3.6, 1.15, -0.4);
+          scene.add(house);
+          const roof = new THREE.Mesh(
+            new THREE.ConeGeometry(2.6, 1.4, 4),
+            new THREE.MeshStandardMaterial({ color: 0x5a3820, roughness: 0.7 })
+          );
+          roof.position.set(-3.6, 3.1, -0.4);
+          roof.rotation.y = Math.PI / 4;
+          scene.add(roof);
+          const door = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.1, 0.08), darkWood);
+          door.position.set(-2.0, 0.45, 0.95);
+          scene.add(door);
+          const win = new THREE.Mesh(
+            new THREE.BoxGeometry(0.5, 0.45, 0.06),
+            new THREE.MeshStandardMaterial({ color: 0xc4a056, emissive: 0x6a4a10, emissiveIntensity: 0.45, roughness: 0.4 })
+          );
+          win.position.set(-3.5, 1.55, 1.02);
+          scene.add(win);
+
+          const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1.4, 10), darkWood);
+          axle.rotation.x = Math.PI / 2;
+          axle.position.set(0, WHEEL_Y, 0);
+          scene.add(axle);
+
+          const wheel = new THREE.Group();
+          const rim = new THREE.Mesh(new THREE.TorusGeometry(WHEEL_R, 0.08, 8, 28), woodMat);
+          wheel.add(rim);
+          const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.28, 10), darkWood);
+          hub.rotation.x = Math.PI / 2;
+          wheel.add(hub);
+          const spokeGeo = new THREE.BoxGeometry(0.08, WHEEL_R * 2 - 0.2, 0.06);
+          for (let i = 0; i < 8; i += 1) {
+            const spoke = new THREE.Mesh(spokeGeo, woodMat);
+            spoke.rotation.z = (i / 8) * Math.PI;
+            wheel.add(spoke);
+          }
+          const bucketGeo = new THREE.BoxGeometry(0.38, 0.22, 0.32);
+          const buckets = [];
+          for (let i = 0; i < BUCKETS; i += 1) {
+            const a = (i / BUCKETS) * Math.PI * 2;
+            const b = new THREE.Mesh(bucketGeo, darkWood.clone());
+            b.position.set(Math.cos(a) * WHEEL_R, Math.sin(a) * WHEEL_R, 0.18);
+            b.rotation.z = a + Math.PI / 2;
+            wheel.add(b);
+            const grain = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.08, 0.2), grainMat.clone());
+            grain.position.set(Math.cos(a) * WHEEL_R, Math.sin(a) * WHEEL_R, 0.22);
+            grain.visible = false;
+            wheel.add(grain);
+            buckets.push({ mesh: b, grain, index: i });
+          }
+          wheel.position.set(0, WHEEL_Y, 0);
+          scene.add(wheel);
+
+          const chute = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.12, 0.7), woodMat);
+          chute.position.set(0, 4.55, 0.35);
+          chute.rotation.x = 0.35;
+          scene.add(chute);
+          const hopper = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.12, 0.32, 0.55, 8),
+            woodMat
+          );
+          hopper.position.set(0, 4.95, 0.15);
+          scene.add(hopper);
+          const hopperGrain = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 8, 8),
+            grainMat
+          );
+          hopperGrain.position.set(0, 5.05, 0.15);
+          scene.add(hopperGrain);
+
+          const flume = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.12, 0.4), woodMat);
+          flume.position.set(1.6, 4.35, 0.2);
+          flume.rotation.z = -0.28;
+          scene.add(flume);
+          const stream = new THREE.Mesh(
+            new THREE.BoxGeometry(0.18, 1.6, 0.12),
+            new THREE.MeshStandardMaterial({
+              color: 0x6ab4d8, roughness: 0.2, metalness: 0.25, transparent: true, opacity: 0.7,
+              emissive: 0x246080, emissiveIntensity: 0.3,
+            })
+          );
+          stream.position.set(1.15, 3.35, 0.35);
+          stream.rotation.z = 0.18;
+          scene.add(stream);
+
+          const postGeo = new THREE.CylinderGeometry(0.12, 0.16, 3.4, 8);
+          const postL = new THREE.Mesh(postGeo, woodMat);
+          postL.position.set(-2.05, 1.5, 0.55);
+          scene.add(postL);
+          const postR = new THREE.Mesh(postGeo, woodMat);
+          postR.position.set(2.15, 1.5, 0.55);
+          scene.add(postR);
+          const beam = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.16, 0.2), darkWood);
+          beam.position.set(0.05, 3.15, 0.55);
+          scene.add(beam);
+
+          const sackGeo = new THREE.SphereGeometry(0.28, 8, 8);
+          for (let i = 0; i < 3; i += 1) {
+            const sack = new THREE.Mesh(sackGeo, grainMat);
+            sack.position.set(-1.6 + i * 0.42, 0.18, 1.35);
+            sack.scale.set(1, 0.85, 0.9);
+            scene.add(sack);
+          }
+          const millstone = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.18, 16), stoneMat);
+          millstone.position.set(-2.4, 0.22, 1.1);
+          scene.add(millstone);
+          const millCap = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.28, 8), darkWood);
+          millCap.position.set(-2.4, 0.42, 1.1);
+          scene.add(millCap);
+          const gearMat = new THREE.MeshStandardMaterial({ color: 0x8a7048, roughness: 0.4, metalness: 0.45 });
+          const gear = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.08, 12), gearMat);
+          gear.position.set(-2.05, 1.85, 0.95);
+          gear.rotation.x = Math.PI / 2;
+          scene.add(gear);
+          const lanternPole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.4, 6), darkWood);
+          lanternPole.position.set(-1.15, 0.7, 1.55);
+          scene.add(lanternPole);
+          const lantern = new THREE.Mesh(
+            new THREE.BoxGeometry(0.16, 0.2, 0.16),
+            new THREE.MeshStandardMaterial({ color: 0xc4a056, emissive: 0x6a4a10, emissiveIntensity: 0.55, roughness: 0.4 })
+          );
+          lantern.position.set(-1.15, 1.4, 1.55);
+          scene.add(lantern);
+          const fenceGeo = new THREE.BoxGeometry(0.08, 0.45, 0.08);
+          for (let i = 0; i < 6; i += 1) {
+            const post = new THREE.Mesh(fenceGeo, woodMat);
+            post.position.set(-4.6 + i * 0.55, 0.12, 1.85);
+            scene.add(post);
+          }
+          const railFence = new THREE.Mesh(new THREE.BoxGeometry(3.1, 0.06, 0.06), darkWood);
+          railFence.position.set(-3.25, 0.28, 1.85);
+          scene.add(railFence);
+          const splashRing = new THREE.Mesh(
+            new THREE.TorusGeometry(2.15, 0.04, 6, 20),
+            new THREE.MeshBasicMaterial({ color: 0x8ad0e8, transparent: true, opacity: 0.22, depthWrite: false })
+          );
+          splashRing.rotation.x = Math.PI / 2;
+          splashRing.position.set(0.3, 0.02, 0.15);
+          scene.add(splashRing);
+          const barrel = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.22, 0.24, 0.38, 10),
+            woodMat
+          );
+          barrel.position.set(2.35, 0.12, 1.25);
+          scene.add(barrel);
+          const scoop = new THREE.Mesh(
+            new THREE.SphereGeometry(0.12, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
+            new THREE.MeshStandardMaterial({ color: 0x8a7048, roughness: 0.45, metalness: 0.3, side: THREE.DoubleSide })
+          );
+          scoop.position.set(0.55, 4.42, 0.55);
+          scoop.rotation.x = 0.6;
+          scene.add(scoop);
+
+          [[-7, 1.4, -6, 2.4], [7.5, 1.8, -5, 2.8], [-5, 0.9, -10, 1.8]].forEach((row) => {
+            const tree = new THREE.Mesh(new THREE.ConeGeometry(row[3] * 0.45, row[3] * 1.4, 6), mossMat);
+            tree.position.set(row[0], row[1], row[2]);
+            scene.add(tree);
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 0.7, 6), darkWood);
+            trunk.position.set(row[0], 0.2, row[2]);
+            scene.add(trunk);
+          });
+
+          const mistCount = reducedMotion ? 40 : 110;
+          const mistPos = new Float32Array(mistCount * 3);
+          for (let i = 0; i < mistCount; i += 1) {
+            mistPos[i * 3] = randRange(-6, 6);
+            mistPos[i * 3 + 1] = randRange(0.1, 4.5);
+            mistPos[i * 3 + 2] = randRange(-4, 4);
+          }
+          const mistGeo = new THREE.BufferGeometry();
+          mistGeo.setAttribute("position", new THREE.BufferAttribute(mistPos, 3));
+          scene.add(new THREE.Points(mistGeo, new THREE.PointsMaterial({
+            color: 0xd8f0e0, size: 0.08, transparent: true, opacity: 0.28, depthWrite: false,
+          })));
+
+          const particleGeo = new THREE.SphereGeometry(0.045, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xc4a056, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+          const dropGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const dropMat = new THREE.MeshStandardMaterial({ color: 0xc4a056, roughness: 0.5 });
+          const dropMeshes = [];
+          for (let i = 0; i < 6; i += 1) {
+            const m = new THREE.Mesh(dropGeo, dropMat.clone());
+            m.visible = false;
+            scene.add(m);
+            dropMeshes.push(m);
+          }
+
+          return {
+            renderer, scene, camera, wheel, buckets, hopper, millLight, stream,
+            particleGeo, particleMat, particleMeshes: [], dropMeshes, look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.wheel.rotation.z = state.angle;
+          const near = nearestBucket();
+          webgl.buckets.forEach((b) => {
+            b.grain.visible = state.filled[b.index] > 0;
+            const hot = b.index === near.index && state.glow > 0.35;
+            b.mesh.material.emissive = b.mesh.material.emissive || new THREE.Color(0x000000);
+            b.mesh.material.emissive.setHex(hot ? 0xc4a056 : 0x000000);
+            b.mesh.material.emissiveIntensity = hot ? state.glow * 0.55 : 0;
+          });
+          webgl.hopper.scale.y = 1 - state.hopper * 0.18;
+          webgl.millLight.intensity = 0.8 + state.glow * 0.7 + state.flash;
+          webgl.stream.material.opacity = 0.55 + Math.sin(state.splash) * 0.12;
+          webgl.dropMeshes.forEach((mesh, i) => {
+            const d = state.drops[i];
+            if (!d) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(d.x, d.y, d.z);
+            mesh.material.color.setHex(d.good ? 0xc4a056 : 0xff6b7a);
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, i) => {
+            const p = state.particles[i];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "miss" ? 0xff6b7a : p.kind === "water" ? 0x6ab4d8 : 0xc4a056);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.32 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.22) * 0.08;
+          webgl.camera.position.set(0.4 + sway + shakeX, 2.6 + shakeY, 7.5);
+          webgl.camera.lookAt(0, 2.3, 0);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = webgl.look.set(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.0, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.6 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#243820");
+          sky.addColorStop(1, "#10180c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = COLORS.moss;
+          ctx.fillRect(0, VIEW_H * 0.72, VIEW_W, VIEW_H);
+          ctx.fillStyle = COLORS.water;
+          ctx.globalAlpha = 0.55;
+          ctx.fillRect(VIEW_W * 0.22, VIEW_H * 0.7, VIEW_W * 0.56, VIEW_H * 0.18);
+          ctx.globalAlpha = 1;
+          const c = projectToScreen(0, WHEEL_Y, 0);
+          ctx.strokeStyle = COLORS.wood;
+          ctx.lineWidth = 8;
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, 90, 0, Math.PI * 2);
+          ctx.stroke();
+          for (let i = 0; i < BUCKETS; i += 1) {
+            const p = bucketPos(i);
+            const s = projectToScreen(p.x, p.y, p.z);
+            const near = nearestBucket();
+            ctx.fillStyle = i === near.index && state.glow > 0.4 ? COLORS.accent : COLORS.wood;
+            ctx.fillRect(s.x - 10, s.y - 8, 20, 14);
+          }
+          const h = projectToScreen(0, 4.7, 0.15);
+          ctx.fillStyle = COLORS.accent;
+          ctx.fillRect(h.x - 14, h.y - 18, 28, 22);
+          const house = projectToScreen(-3.6, 1.2, -0.4);
+          ctx.fillStyle = "#4a5040";
+          ctx.fillRect(house.x - 40, house.y - 36, 70, 55);
+          ctx.fillStyle = "#5a3820";
+          ctx.beginPath();
+          ctx.moveTo(house.x - 48, house.y - 36);
+          ctx.lineTo(house.x - 5, house.y - 62);
+          ctx.lineTo(house.x + 38, house.y - 36);
+          ctx.fill();
+          ctx.strokeStyle = COLORS.water;
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          const flumeA = projectToScreen(2.4, 4.5, 0.2);
+          const flumeB = projectToScreen(1.15, 3.35, 0.35);
+          ctx.moveTo(flumeA.x, flumeA.y);
+          ctx.lineTo(flumeB.x, flumeB.y);
+          ctx.stroke();
+          ctx.fillStyle = "rgba(246,238,220,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.hits} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.hits / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          const cue = inWindow(difficultyAt(state.elapsed)) ? " · 지금" : "";
+          if (sub) sub.textContent = `실수 ${state.misses} / ${MAX_MISS}${cue}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const chute = projectToScreen(0, 4.2, 0.2);
+          if (state.glow > 0.25) {
+            hud.strokeStyle = `rgba(196,160,86,${0.35 + state.glow * 0.55})`;
+            hud.lineWidth = 3;
+            hud.beginPath();
+            hud.arc(chute.x, chute.y + 18, 16 + (1 - state.glow) * 14, 0, Math.PI * 2);
+            hud.stroke();
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.startsWith("빗") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(196,160,86,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const near = nearestBucket();
+          return JSON.stringify({
+            coordinate_system: "world units; wheel in XY; camera +z side view",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.hits,
+            misses: state.misses,
+            angle: Number(state.angle.toFixed(3)),
+            nearest: near.index,
+            gap: Number(near.gap.toFixed(3)),
+            window: inWindow(params),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+          });
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.pending = true;
+        }
+        function onPointerUp() {
+          if (ignoreUp) ignoreUp = false;
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            input.pending = true;
+          }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.hits = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
