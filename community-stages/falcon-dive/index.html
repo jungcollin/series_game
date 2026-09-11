@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>매 급강하</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #1a140c; --accent: #ffc46b; --accent-ink: #1a140c; --danger: #ff6b7a; --ink: #fff1d4; --muted: rgba(255,241,212,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">매 급강하. 급강하로 토끼를 잡고 지면 직전에 끌어올리세요. 홀드로 급강하, 떼면 끌어올리기. 토끼 5마리를 잡으면 클리어. 땅에 충돌하면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 누른 채 급강하하고 손을 떼면 끌어올립니다.</p>
+    <main class="stage" aria-label="매 급강하 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="매 급강하" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">사냥</p>
+          <p class="hud-value" id="hud-objective">0 / 5</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">38.0</p>
+          <p class="hud-sub" id="hud-sub">고도 9.5</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Falcon Dive</p>
+          <h1>매 급강하</h1>
+          <p class="brief-lead">급강하로 토끼를 잡고 지면 직전에 끌어올리세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>홀드로 급강하, 떼면 끌어올리기</span></li>
+            <li><strong>클리어</strong><span>토끼 5마리를 잡으면 클리어</span></li>
+            <li><strong>실패</strong><span>땅에 충돌하면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">충돌</p>
+          <h2>날개가 꺾였다</h2>
+          <p class="brief-lead" id="fail-detail">땅에 충돌하면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">사냥 완료</p>
+          <h2>급강하 성공</h2>
+          <p class="brief-lead">급강하로 토끼를 모두 잡았습니다.</p>
+          <p class="hud-sub" id="clear-stat">토끼 5마리를 잡으면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 38;
+        const GOAL_CATCH = 5;
+        const CRASH_Y = 0.22;
+        const CATCH_Y = 1.72;
+        const CRUISE_Y = 9.4;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "falcon-dive",
+          title: "매 급강하",
+          description: "급강하로 토끼를 잡고 지면 직전에 끌어올리세요.",
+          creator: "collin",
+          genre: "3D stoop hunting",
+          clearCondition: "토끼 5마리를 잡으면 클리어",
+          failCondition: "땅에 충돌하면 실패",
+          controls: "홀드로 급강하, 떼면 끌어올리기",
+        };
+        const COLORS = {
+          night: "#1a140c",
+          ink: "#fff1d4",
+          accent: "#ffc46b",
+          grass: "#4a6a32",
+          danger: "#ff6b7a",
+          fur: "#c48a52",
+        };
+        const CAM2D = {
+          eye: { x: 0, y: 4.2, z: 10.5 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.94, z: 0.34 },
+          fwd: { x: 0, y: 0.34, z: -0.94 },
+          focal: 380,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          catches: 0,
+          bird: { x: 0, y: CRUISE_Y, z: 0, vx: 0, vy: 0, pitch: 0.12 },
+          rabbit: { x: 0, z: -14, hop: 0, alive: true },
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          wind: 0,
+        };
+        const input = {
+          left: false, right: false, hold: false,
+          dragging: false, downX: 0, nowX: 0, baseX: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            diveAcc: 16.5 + difficulty * 5,
+            pullAcc: 19 + difficulty * 2,
+            hop: 1.6 + difficulty * 1.4,
+            catchR: 1.45 - difficulty * 0.18,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(1.2, 5.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.8, 4.4),
+              vz: Math.sin(angle) * lift,
+              life: randRange(0.3, 0.8),
+              kind,
+              size: randRange(0.04, 0.12),
+            });
+          }
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "stoop") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(420, now + 0.12);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "catch") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.1);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "pull") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(140, now + 0.08);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "boom") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(26, now + 0.24);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            } else if (kind === "clear") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(1100, now + 0.22);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function placeRabbit(ahead) {
+          state.rabbit.x = randRange(-3.2, 3.2);
+          state.rabbit.z = state.bird.z - ahead;
+          state.rabbit.hop = randRange(0, Math.PI * 2);
+          state.rabbit.alive = true;
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.catches = 0;
+          state.bird = { x: 0, y: CRUISE_Y, z: 0, vx: 0, vy: 0, pitch: 0.12 };
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.wind = 0;
+          input.hold = false;
+          input.dragging = false;
+          reseed((Date.now() ^ 0xfa1c) >>> 0);
+          placeRabbit(16);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.2 : 0.82;
+          playSfx("boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function catchRabbit() {
+          if (!state.rabbit.alive) return;
+          state.rabbit.alive = false;
+          state.catches += 1;
+          state.flash = 0.5;
+          state.message = `사냥 ${state.catches}/${GOAL_CATCH}`;
+          state.messageTime = 0.85;
+          burst(state.rabbit.x, 0.6, state.rabbit.z, 18, "catch");
+          playSfx("catch");
+          if (state.catches >= GOAL_CATCH) {
+            clearStage();
+            return;
+          }
+          placeRabbit(randRange(13, 17));
+        }
+
+        function applyInput(dt, params) {
+          if (input.left) state.bird.vx -= 7 * dt;
+          if (input.right) state.bird.vx += 7 * dt;
+          if (input.dragging) {
+            const dx = input.nowX - input.downX;
+            state.bird.x = clamp(input.baseX + dx * 0.012, -5.4, 5.4);
+          }
+          if (input.hold) {
+            state.bird.vy -= params.diveAcc * dt;
+            state.bird.pitch = lerp(state.bird.pitch, 1.05, clamp(dt * 5, 0, 1));
+            const tx = state.rabbit.x;
+            state.bird.vx += (tx - state.bird.x) * 1.15 * dt;
+          } else {
+            if (state.bird.y < CRUISE_Y - 0.4) {
+              state.bird.vy += params.pullAcc * dt;
+              state.bird.pitch = lerp(state.bird.pitch, -0.28, clamp(dt * 4, 0, 1));
+            } else {
+              state.bird.vy += (0.15 - state.bird.vy) * 2.4 * dt;
+              state.bird.pitch = lerp(state.bird.pitch, 0.1, clamp(dt * 3, 0, 1));
+            }
+          }
+          state.bird.vx *= Math.pow(0.22, dt);
+          state.bird.x = clamp(state.bird.x + state.bird.vx * dt, -5.4, 5.4);
+        }
+
+        function updateBird(dt, params) {
+          applyInput(dt, params);
+          state.bird.y += state.bird.vy * dt;
+          state.bird.z -= (7.2 + Math.max(0, -state.bird.vy) * 0.35) * dt;
+          if (!input.hold && state.bird.y > CRUISE_Y) {
+            state.bird.y = CRUISE_Y;
+            if (state.bird.vy > 0) state.bird.vy = 0;
+          }
+          if (state.bird.y <= CRASH_Y) {
+            burst(state.bird.x, 0.3, state.bird.z, 22, "dirt");
+            failStage("ground");
+            return;
+          }
+          if (state.rabbit.alive && input.hold && state.bird.y <= CATCH_Y && state.bird.y > CRASH_Y + 0.12) {
+            const gap = Math.hypot(state.bird.x - state.rabbit.x, state.bird.z - state.rabbit.z);
+            if (gap <= params.catchR) catchRabbit();
+          }
+        }
+
+        function updateRabbit(dt, params) {
+          state.rabbit.hop += dt * params.hop;
+          state.rabbit.x = clamp(state.rabbit.x + Math.sin(state.rabbit.hop) * 0.9 * dt, -4.6, 4.6);
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 5.2 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.wind += dt;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateBird(dt, params);
+          if (state.mode !== "running") return;
+          updateRabbit(dt, params);
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+        const FAIL_COPY = {
+          ground: "지면 직전에 끌어올리지 못해 충돌했습니다",
+          time_limit: "제한 시간 38초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `사냥 ${state.catches} / ${GOAL_CATCH} · 고도 ${state.bird.y.toFixed(1)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 사냥 ${state.catches}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x1a140c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a140c);
+          scene.fog = new THREE.Fog(0x1a140c, 18, 70);
+
+          const camera = new THREE.PerspectiveCamera(58, VIEW_W / VIEW_H, 0.1, 160);
+          camera.position.set(0, 5.2, 11);
+
+          scene.add(new THREE.AmbientLight(0x3a2a18, 0.48));
+          const hemi = new THREE.HemisphereLight(0xffd8a0, 0x2a1c10, 0.5);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffc46b, 0.85);
+          sun.position.set(10, 16, 8);
+          scene.add(sun);
+          const birdLight = new THREE.PointLight(0xffc46b, 0.9, 14);
+          birdLight.position.set(0, 8, 2);
+          scene.add(birdLight);
+
+          const grassMat = new THREE.MeshStandardMaterial({ color: 0x4a6a32, roughness: 0.92, metalness: 0.04 });
+          const dirtMat = new THREE.MeshStandardMaterial({ color: 0x6a4a28, roughness: 0.88, metalness: 0.05 });
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x6a5a48, roughness: 0.8, metalness: 0.08 });
+          const featherMat = new THREE.MeshStandardMaterial({
+            color: 0x3a2414, roughness: 0.55, metalness: 0.12, emissive: 0x1a0c04, emissiveIntensity: 0.2,
+          });
+          const goldMat = new THREE.MeshStandardMaterial({
+            color: 0xc48a32, roughness: 0.4, metalness: 0.35, emissive: 0x3a2008, emissiveIntensity: 0.18,
+          });
+          const furMat = new THREE.MeshStandardMaterial({ color: 0xc48a52, roughness: 0.78, metalness: 0.05 });
+
+          const ground = new THREE.Mesh(new THREE.PlaneGeometry(90, 140), grassMat);
+          ground.rotation.x = -Math.PI / 2;
+          scene.add(ground);
+          const path = new THREE.Mesh(new THREE.PlaneGeometry(7.5, 140), dirtMat);
+          path.rotation.x = -Math.PI / 2;
+          path.position.y = 0.02;
+          scene.add(path);
+
+          const rockGeo = new THREE.DodecahedronGeometry(0.7, 0);
+          const rocks = [];
+          for (let index = 0; index < 16; index += 1) {
+            const rock = new THREE.Mesh(rockGeo, rockMat);
+            rock.position.set((index % 2 ? -1 : 1) * (6 + (index % 5) * 1.4), 0.25, -index * 7.5);
+            rock.scale.setScalar(0.5 + (index % 4) * 0.25);
+            scene.add(rock);
+            rocks.push(rock);
+          }
+          const treeGeo = new THREE.ConeGeometry(0.85, 2.6, 6);
+          const trunkGeo = new THREE.CylinderGeometry(0.12, 0.16, 0.8, 6);
+          const trees = [];
+          for (let index = 0; index < 12; index += 1) {
+            const tree = new THREE.Group();
+            const trunk = new THREE.Mesh(trunkGeo, dirtMat);
+            trunk.position.y = 0.4;
+            tree.add(trunk);
+            const crown = new THREE.Mesh(treeGeo, grassMat);
+            crown.position.y = 1.7;
+            tree.add(crown);
+            tree.position.set((index % 2 ? -9.5 : 9.5), 0, -4 - index * 8);
+            scene.add(tree);
+            trees.push(tree);
+          }
+
+          const sunDisk = new THREE.Mesh(
+            new THREE.CircleGeometry(4.2, 24),
+            new THREE.MeshBasicMaterial({ color: 0xffc46b })
+          );
+          sunDisk.position.set(14, 9, -48);
+          scene.add(sunDisk);
+          const haze = new THREE.Mesh(
+            new THREE.CircleGeometry(8, 24),
+            new THREE.MeshBasicMaterial({ color: 0xff8a3d, transparent: true, opacity: 0.22, depthWrite: false })
+          );
+          haze.position.set(14, 9, -49);
+          scene.add(haze);
+
+          const falcon = new THREE.Group();
+          const body = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 10), featherMat);
+          body.scale.set(1.6, 0.7, 0.7);
+          falcon.add(body);
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), featherMat);
+          head.position.set(0.28, 0.06, 0);
+          falcon.add(head);
+          const beak = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.14, 5), goldMat);
+          beak.rotation.z = -Math.PI / 2;
+          beak.position.set(0.4, 0.04, 0);
+          falcon.add(beak);
+          const wingGeo = new THREE.BoxGeometry(0.95, 0.05, 0.32);
+          const leftWing = new THREE.Mesh(wingGeo, featherMat);
+          leftWing.position.set(-0.05, 0.04, 0.42);
+          falcon.add(leftWing);
+          const rightWing = new THREE.Mesh(wingGeo, featherMat);
+          rightWing.position.set(-0.05, 0.04, -0.42);
+          falcon.add(rightWing);
+          const tail = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.03, 0.22), goldMat);
+          tail.position.set(-0.38, 0.02, 0);
+          falcon.add(tail);
+          scene.add(falcon);
+
+          const rabbit = new THREE.Group();
+          const rBody = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), furMat);
+          rBody.scale.set(1.3, 0.8, 0.8);
+          rabbit.add(rBody);
+          const rHead = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), furMat);
+          rHead.position.set(0.16, 0.1, 0);
+          rabbit.add(rHead);
+          const earGeo = new THREE.CylinderGeometry(0.03, 0.04, 0.22, 5);
+          const earL = new THREE.Mesh(earGeo, furMat);
+          earL.position.set(0.14, 0.28, 0.05);
+          rabbit.add(earL);
+          const earR = new THREE.Mesh(earGeo, furMat);
+          earR.position.set(0.14, 0.28, -0.05);
+          rabbit.add(earR);
+          scene.add(rabbit);
+
+          const catchRing = new THREE.Mesh(
+            new THREE.TorusGeometry(1.2, 0.03, 8, 24),
+            new THREE.MeshBasicMaterial({
+              color: 0xffc46b, transparent: true, opacity: 0.0, depthWrite: false,
+            })
+          );
+          catchRing.rotation.x = Math.PI / 2;
+          scene.add(catchRing);
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xffc46b, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+          const particleMeshes = [];
+          const dustCount = reducedMotion ? 40 : 140;
+          const dustPos = new Float32Array(dustCount * 3);
+          for (let index = 0; index < dustCount; index += 1) {
+            dustPos[index * 3] = randRange(-16, 16);
+            dustPos[index * 3 + 1] = randRange(0.4, 10);
+            dustPos[index * 3 + 2] = randRange(-40, 10);
+          }
+          const dustGeo = new THREE.BufferGeometry();
+          dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+          const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+            color: 0xffe0a8, size: 0.08, transparent: true, opacity: 0.35, depthWrite: false,
+          }));
+          scene.add(dust);
+
+          return {
+            renderer, scene, camera, falcon, leftWing, rightWing, rabbit, catchRing,
+            birdLight, particleGeo, particleMat, particleMeshes, rocks, trees, dust,
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const bird = state.bird;
+          webgl.falcon.position.set(bird.x, bird.y, bird.z);
+          webgl.falcon.rotation.x = bird.pitch;
+          webgl.falcon.rotation.z = -bird.vx * 0.08;
+          const flap = input.hold ? 0.08 : Math.sin(state.elapsed * 14) * 0.35;
+          webgl.leftWing.rotation.z = flap;
+          webgl.rightWing.rotation.z = -flap;
+          webgl.rabbit.visible = state.rabbit.alive;
+          const hopY = 0.18 + Math.abs(Math.sin(state.rabbit.hop * 2.4)) * 0.22;
+          webgl.rabbit.position.set(state.rabbit.x, hopY, state.rabbit.z);
+          webgl.rabbit.rotation.y = Math.sin(state.rabbit.hop) * 0.4;
+          webgl.catchRing.position.set(state.rabbit.x, 0.08, state.rabbit.z);
+          webgl.catchRing.material.opacity = input.hold && bird.y < 3.2 ? 0.55 : 0.08;
+          webgl.birdLight.position.set(bird.x, bird.y + 0.8, bird.z + 0.4);
+          webgl.rocks.forEach((rock, index) => {
+            let z = rock.position.z;
+            if (z - bird.z > 18) rock.position.z -= 120;
+          });
+          webgl.trees.forEach((tree) => {
+            if (tree.position.z - bird.z > 18) tree.position.z -= 96;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.05);
+            mesh.material.color.setHex(particle.kind === "dirt" ? 0x6a4a28 : 0xffc46b);
+            mesh.material.opacity = clamp(particle.life * 1.7, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const bird = state.bird;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.28 : 0;
+          const follow = reducedMotion ? 0 : Math.sin(state.elapsed * 0.4) * 0.08;
+          webgl.camera.position.set(bird.x * 0.35 + shakeX, bird.y + 2.4 + shakeY, bird.z + 7.4);
+          webgl.camera.lookAt(bird.x + follow, bird.y - 0.4, bird.z - 6);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - (state.bird.x * 0.35);
+          const ey = y - (state.bird.y + 2.4);
+          const ez = z - (state.bird.z + 7.4);
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, -ez);
+          return {
+            x: VIEW_W * 0.5 + lx * w,
+            y: VIEW_H * 0.5 - ly * w,
+            visible: depth > 0.4,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#4a3018");
+          sky.addColorStop(0.45, "#1a140c");
+          sky.addColorStop(1, "#2a3a18");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#4a6a32";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H * 0.38);
+          ctx.fillStyle = "#6a4a28";
+          ctx.fillRect(VIEW_W * 0.35, VIEW_H * 0.62, VIEW_W * 0.3, VIEW_H * 0.38);
+          const rabbit = projectToScreen(state.rabbit.x, 0.3, state.rabbit.z);
+          if (state.rabbit.alive) {
+            ctx.fillStyle = COLORS.fur;
+            ctx.beginPath();
+            ctx.ellipse(rabbit.x, rabbit.y, 12, 8, 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          const bird = projectToScreen(state.bird.x, state.bird.y, state.bird.z);
+          ctx.fillStyle = "#3a2414";
+          ctx.beginPath();
+          ctx.ellipse(bird.x, bird.y, 18, 8, state.bird.pitch, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = COLORS.accent;
+          ctx.beginPath();
+          ctx.moveTo(bird.x + 16, bird.y);
+          ctx.lineTo(bird.x + 26, bird.y + 4);
+          ctx.lineTo(bird.x + 16, bird.y + 3);
+          ctx.fill();
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.6, 0, 1);
+            ctx.fillStyle = COLORS.accent;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,241,212,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.catches} / ${GOAL_CATCH}`;
+          if (meter) meter.style.width = `${(state.catches / GOAL_CATCH) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          const hint = input.hold ? (state.bird.y < CATCH_Y ? "잡기!" : "급강하") : "끌어올리기";
+          if (sub) sub.textContent = `고도 ${state.bird.y.toFixed(1)} · ${hint}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const gy = VIEW_H - 46;
+          const h = clamp(state.bird.y / 10, 0, 1);
+          hud.fillStyle = "rgba(26,20,12,0.55)";
+          hud.fillRect(VIEW_W - 36, gy - 120, 10, 120);
+          hud.fillStyle = state.bird.y < 1.2 ? COLORS.danger : COLORS.accent;
+          hud.fillRect(VIEW_W - 36, gy - 120 * h, 10, 120 * h);
+          hud.fillStyle = "rgba(255,196,107,0.35)";
+          hud.fillRect(VIEW_W - 38, gy - 120 * (CATCH_Y / 10), 14, 3);
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,196,107,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; falcon chase; +y up; -z forward",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.catches,
+            altitude: Number(state.bird.y.toFixed(3)),
+            diving: input.hold,
+            bird: { x: Number(state.bird.x.toFixed(2)), y: Number(state.bird.y.toFixed(2)), z: Number(state.bird.z.toFixed(2)) },
+            rabbit: { x: Number(state.rabbit.x.toFixed(2)), z: Number(state.rabbit.z.toFixed(2)), alive: state.rabbit.alive },
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.hold = true;
+          input.dragging = true;
+          input.downX = event.clientX;
+          input.nowX = event.clientX;
+          input.baseX = state.bird.x;
+          input.pointerId = event.pointerId;
+          playSfx("stoop");
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          input.nowX = event.clientX;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.hold = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (input.hold) playSfx("pull");
+          input.hold = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.hold = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = { ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right" };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            if (!input.hold) playSfx("stoop");
+            input.hold = true;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") {
+            if (input.hold) playSfx("pull");
+            input.hold = false;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.catches = GOAL_CATCH;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = false;
+          input.hold = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
