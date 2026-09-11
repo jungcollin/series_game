@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>외바퀴 수레</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #16140c; --accent: #c45c32; --accent-ink: #16140c; --danger: #ff6b7a; --ink: #fff1d4; --muted: rgba(255,241,212,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">외바퀴 수레. 벽돌을 싣고 외바퀴 수레로 비계까지 가세요. 드래그로 균형, 홀드로 전진. 비계에 도착하면 클리어. 수레가 넘어지거나 벽돌이 떨어지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 누른 채 전진하고 좌우로 드래그해 균형을 잡습니다.</p>
+    <main class="stage" aria-label="외바퀴 수레 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="외바퀴 수레" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">거리</p>
+          <p class="hud-value" id="hud-objective">0 / 24m</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">균형 100%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Wheelbarrow</p>
+          <h1>외바퀴 수레</h1>
+          <p class="brief-lead">벽돌을 싣고 외바퀴 수레로 비계까지 가세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 균형, 홀드로 전진</span></li>
+            <li><strong>클리어</strong><span>비계에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>수레가 넘어지거나 벽돌이 떨어지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">적재 실패</p>
+          <h2>수레가 기울었다</h2>
+          <p class="brief-lead" id="fail-detail">수레가 넘어지거나 벽돌이 떨어지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">비계 도착</p>
+          <h2>벽돌을 실어 왔다</h2>
+          <p class="brief-lead">외바퀴 수레를 세워 비계까지 벽돌을 옮겼습니다.</p>
+          <p class="hud-sub" id="clear-stat">비계에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const GOAL_Z = 24;
+        const TIP = 0.94;
+        const BRICK = 0.72;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "wheel-barrow",
+          title: "외바퀴 수레",
+          description: "벽돌을 싣고 외바퀴 수레로 비계까지 가세요.",
+          creator: "collin",
+          genre: "3D wheelbarrow",
+          clearCondition: "비계에 도착하면 클리어",
+          failCondition: "수레가 넘어지거나 벽돌이 떨어지면 실패",
+          controls: "드래그로 균형, 홀드로 전진",
+        };
+        const COLORS = {
+          bg: "#16140c",
+          ink: "#fff1d4",
+          accent: "#c45c32",
+          wood: "#8a6232",
+          brick: "#c45c32",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          tip: "수레가 옆으로 넘어졌습니다",
+          bricks: "벽돌이 떨어져 나갔습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0.4, y: 2.4, z: -6.2 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.94, z: 0.34 },
+          fwd: { x: 0, y: -0.34, z: 0.94 },
+          focal: 440,
+        };
+        const BUMPS = [
+          { z: 5.6, impulse: 0.42 },
+          { z: 11.2, impulse: -0.48 },
+          { z: 16.8, impulse: 0.55 },
+          { z: 20.4, impulse: -0.4 },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          z: 0,
+          lean: 0,
+          leanV: 0,
+          brickRisk: 0,
+          wheel: 0,
+          particles: [],
+          bumpHit: [false, false, false, false],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = {
+          holding: false, dragging: false, downX: 0, steer: 0,
+          left: false, right: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            speed: 1.08 + difficulty * 0.18,
+            drift: 0.22 + difficulty * 0.55,
+            bump: 0.9 + difficulty * 0.35,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.8, 3.4),
+              vy: randRange(0.8, 4.2),
+              vz: Math.sin(a) * randRange(0.4, 2.2),
+              life: randRange(0.25, 0.7),
+              kind,
+              size: randRange(0.04, 0.11),
+            });
+          }
+          if (state.particles.length > 70) state.particles.splice(0, state.particles.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "roll") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(60, now + 0.05);
+              gain.gain.setValueAtTime(0.018, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+              osc.start(now); osc.stop(now + 0.07);
+            } else if (kind === "bump") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+              osc.start(now); osc.stop(now + 0.1);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(360, now);
+              osc.frequency.exponentialRampToValueAtTime(720, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.28);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.z = 0;
+          state.lean = 0;
+          state.leanV = 0;
+          state.brickRisk = 0;
+          state.wheel = 0;
+          state.particles = [];
+          state.bumpHit = [false, false, false, false];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "눌러 전진, 드래그로 균형";
+          state.messageTime = 1.4;
+          state.failReason = "";
+          input.holding = false;
+          input.dragging = false;
+          input.steer = 0;
+          reseed((Date.now() ^ 0xb10c) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.18 : 0.64;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function updateBalance(dt, params) {
+          const rolling = input.holding;
+          if (rolling) {
+            state.z += params.speed * dt;
+            state.wheel += params.speed * 4.2 * dt;
+            state.leanV += (random() - 0.5) * params.drift * dt * 3.2;
+            state.rollSfx = (state.rollSfx || 0) - dt;
+            if (state.rollSfx <= 0) {
+              playSfx("roll");
+              state.rollSfx = 0.16;
+            }
+          } else {
+            state.leanV *= 0.92;
+            state.lean *= 0.985;
+          }
+          if (input.left) input.steer = Math.max(input.steer - dt * 2.4, -1);
+          if (input.right) input.steer = Math.min(input.steer + dt * 2.4, 1);
+          if (!input.left && !input.right && !input.dragging) input.steer *= 0.86;
+          state.leanV += -input.steer * 2.6 * dt;
+          state.leanV -= state.lean * 1.15 * dt;
+          state.lean += state.leanV * dt;
+          state.lean = clamp(state.lean, -1.25, 1.25);
+
+          BUMPS.forEach((bump, index) => {
+            if (state.bumpHit[index]) return;
+            if (state.z >= bump.z) {
+              state.bumpHit[index] = true;
+              if (rolling) {
+                state.leanV += bump.impulse * params.bump;
+                burst(state.lean * 0.4, 0.3, state.z, 8, "dust");
+                playSfx("bump");
+                state.message = "요철!";
+                state.messageTime = 0.5;
+                state.shake = reducedMotion ? 0.08 : 0.28;
+              }
+            }
+          });
+
+          if (Math.abs(state.lean) > BRICK) {
+            state.brickRisk += dt;
+            if (state.brickRisk > 0.42) {
+              burst(state.lean * 0.7, 0.55, state.z, 18, "brick");
+              failStage("bricks");
+              return;
+            }
+          } else {
+            state.brickRisk = Math.max(0, state.brickRisk - dt * 0.7);
+          }
+          if (Math.abs(state.lean) > TIP) {
+            failStage("tip");
+            return;
+          }
+          if (state.z >= GOAL_Z) {
+            state.z = GOAL_Z;
+            clearStage();
+          }
+        }
+
+        function updateFx(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 5.2 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.2);
+          state.shake = Math.max(0, state.shake - dt * 2.5);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateBalance(dt, params);
+          if (state.mode !== "running") return;
+          updateFx(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `거리 ${state.z.toFixed(1)}m · 균형 ${Math.round((1 - Math.abs(state.lean)) * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · ${GOAL_Z}m`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x16140c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x16140c);
+          scene.fog = new THREE.Fog(0x16140c, 10, 32);
+
+          const camera = new THREE.PerspectiveCamera(52, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(0.45, 2.45, -6.3);
+
+          scene.add(new THREE.AmbientLight(0x3a3020, 0.5));
+          const hemi = new THREE.HemisphereLight(0xffe0b0, 0x16140c, 0.36);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffe6c0, 0.58);
+          sun.position.set(-8, 12, 4);
+          scene.add(sun);
+          const siteLight = new THREE.PointLight(0xffc070, 0.85, 16);
+          siteLight.position.set(2.4, 3.2, 8);
+          scene.add(siteLight);
+
+          const dirtMat = new THREE.MeshStandardMaterial({ color: 0x3a3020, roughness: 0.92, metalness: 0.05 });
+          const plankMat = new THREE.MeshStandardMaterial({ color: 0x8a6232, roughness: 0.7, metalness: 0.08 });
+          const brickMat = new THREE.MeshStandardMaterial({ color: 0xc45c32, roughness: 0.62, metalness: 0.1 });
+          const steelMat = new THREE.MeshStandardMaterial({ color: 0x6a6860, roughness: 0.4, metalness: 0.55 });
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x5a3a20, roughness: 0.74, metalness: 0.08 });
+
+          const ground = new THREE.Mesh(new THREE.BoxGeometry(18, 0.3, 40), dirtMat);
+          ground.position.set(0, -0.35, 14);
+          scene.add(ground);
+          const plank = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.12, GOAL_Z + 4), plankMat);
+          plank.position.set(0, 0.02, GOAL_Z / 2);
+          scene.add(plank);
+
+          const postGeo = new THREE.CylinderGeometry(0.06, 0.07, 1.4, 6);
+          for (let i = 0; i < 12; i += 1) {
+            const z = 2 + i * 2.1;
+            const left = new THREE.Mesh(postGeo, woodMat);
+            left.position.set(-0.78, 0.7, z);
+            scene.add(left);
+            const right = new THREE.Mesh(postGeo, woodMat);
+            right.position.set(0.78, 0.7, z);
+            scene.add(right);
+          }
+
+          BUMPS.forEach((bump) => {
+            const ridge = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.12, 0.35), plankMat);
+            ridge.position.set(0, 0.1, bump.z);
+            scene.add(ridge);
+          });
+
+          const scaffold = new THREE.Group();
+          const deck = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.16, 3.2), woodMat);
+          deck.position.y = 1.35;
+          scaffold.add(deck);
+          [-1.8, 1.8].forEach((x) => {
+            [-1.2, 1.2].forEach((z) => {
+              const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 2.7, 6), steelMat);
+              leg.position.set(x, 0.0, z);
+              scaffold.add(leg);
+            });
+          });
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.08, 0.08), steelMat);
+          rail.position.set(0, 2.05, -1.5);
+          scaffold.add(rail);
+          scaffold.position.set(0, 0.4, GOAL_Z + 1.4);
+          scene.add(scaffold);
+
+          [[-6.5, 2.4, 6, 2.6], [6.8, 3.1, 10, 3.2], [-7.2, 2.8, 18, 2.8], [7.4, 3.4, 22, 3.5]].forEach((row) => {
+            const building = new THREE.Mesh(new THREE.BoxGeometry(3.4, row[1] * 2, 4.2), brickMat);
+            building.position.set(row[0], row[1], row[2]);
+            scene.add(building);
+          });
+
+          const crateGeo = new THREE.BoxGeometry(0.8, 0.55, 0.8);
+          for (let i = 0; i < 6; i += 1) {
+            const crate = new THREE.Mesh(crateGeo, woodMat);
+            crate.position.set(i % 2 === 0 ? -2.6 : 2.6, 0.28, 4 + i * 3.4);
+            crate.rotation.y = i * 0.2;
+            scene.add(crate);
+          }
+          const coneMat = new THREE.MeshStandardMaterial({ color: 0xe07020, roughness: 0.55, metalness: 0.1 });
+          const coneGeo = new THREE.ConeGeometry(0.18, 0.5, 8);
+          [3.2, 9.4, 15.6, 21.2].forEach((z, idx) => {
+            const cone = new THREE.Mesh(coneGeo, coneMat);
+            cone.position.set(idx % 2 === 0 ? -1.35 : 1.35, 0.28, z);
+            scene.add(cone);
+          });
+          const bagGeo = new THREE.BoxGeometry(0.42, 0.28, 0.32);
+          const bagMat = new THREE.MeshStandardMaterial({ color: 0xc8b080, roughness: 0.8, metalness: 0.05 });
+          for (let i = 0; i < 5; i += 1) {
+            const bag = new THREE.Mesh(bagGeo, bagMat);
+            bag.position.set(-2.1, 0.18, 7.5 + i * 0.38);
+            bag.rotation.y = 0.2;
+            scene.add(bag);
+          }
+          const ladder = new THREE.Mesh(new THREE.BoxGeometry(0.08, 2.4, 0.5), steelMat);
+          ladder.position.set(1.55, 1.2, GOAL_Z + 0.4);
+          ladder.rotation.z = -0.18;
+          scene.add(ladder);
+          const craneArm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 6.4), steelMat);
+          craneArm.position.set(6.2, 5.4, 14);
+          craneArm.rotation.y = 0.4;
+          scene.add(craneArm);
+          const craneMast = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 6.2, 6), steelMat);
+          craneMast.position.set(7.4, 3.1, 16.5);
+          scene.add(craneMast);
+          const helmet = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 8, 8),
+            new THREE.MeshStandardMaterial({ color: 0xffd24a, roughness: 0.45, metalness: 0.2 })
+          );
+          helmet.scale.set(1, 0.55, 1.05);
+          helmet.position.set(-1.6, 0.22, 2.4);
+          scene.add(helmet);
+          const tapeMat = new THREE.MeshBasicMaterial({ color: 0xffc046 });
+          const tapeGeo = new THREE.BoxGeometry(0.04, 0.04, 2.2);
+          [6, 12, 18].forEach((z) => {
+            const tape = new THREE.Mesh(tapeGeo, tapeMat);
+            tape.position.set(-1.05, 1.15, z);
+            tape.rotation.z = 0.2;
+            scene.add(tape);
+          });
+          const workerMat = new THREE.MeshStandardMaterial({ color: 0x3a4a68, roughness: 0.7, metalness: 0.08 });
+          const worker = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.9, 8), workerMat);
+          worker.position.set(2.3, 0.55, GOAL_Z + 0.2);
+          scene.add(worker);
+          const workerHead = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 8), helmet.material);
+          workerHead.position.set(2.3, 1.12, GOAL_Z + 0.2);
+          scene.add(workerHead);
+          const barrelMat = new THREE.MeshStandardMaterial({ color: 0x4a4030, roughness: 0.6, metalness: 0.2 });
+          const barrelGeo = new THREE.CylinderGeometry(0.28, 0.3, 0.7, 10);
+          [8.5, 13.8, 19.2].forEach((z, idx) => {
+            const barrel = new THREE.Mesh(barrelGeo, barrelMat);
+            barrel.position.set(idx % 2 === 0 ? 2.35 : -2.4, 0.38, z);
+            scene.add(barrel);
+          });
+          const plankRail = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, GOAL_Z + 2), woodMat);
+          plankRail.position.set(-0.62, 0.18, GOAL_Z / 2);
+          scene.add(plankRail);
+          const plankRail2 = plankRail.clone();
+          plankRail2.position.x = 0.62;
+          scene.add(plankRail2);
+
+          const barrow = new THREE.Group();
+          const tray = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.22, 1.15), woodMat);
+          tray.position.set(0, 0.42, 0.05);
+          barrow.add(tray);
+          const handles = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 1.1), woodMat);
+          handles.position.set(-0.28, 0.38, -0.7);
+          barrow.add(handles);
+          const handles2 = handles.clone();
+          handles2.position.x = 0.28;
+          barrow.add(handles2);
+          const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.28, 0.12, 14), steelMat);
+          wheel.rotation.z = Math.PI / 2;
+          wheel.position.set(0, 0.28, 0.62);
+          barrow.add(wheel);
+          const brickGeo = new THREE.BoxGeometry(0.22, 0.12, 0.38);
+          const bricks = [];
+          for (let i = 0; i < 6; i += 1) {
+            const b = new THREE.Mesh(brickGeo, brickMat);
+            b.position.set(-0.22 + (i % 3) * 0.22, 0.58 + Math.floor(i / 3) * 0.13, -0.05 + (i % 2) * 0.12);
+            barrow.add(b);
+            bricks.push(b);
+          }
+          scene.add(barrow);
+
+          const dustCount = reducedMotion ? 50 : 140;
+          const dustPos = new Float32Array(dustCount * 3);
+          for (let i = 0; i < dustCount; i += 1) {
+            dustPos[i * 3] = randRange(-6, 6);
+            dustPos[i * 3 + 1] = randRange(0.2, 4);
+            dustPos[i * 3 + 2] = randRange(-2, 28);
+          }
+          const dustGeo = new THREE.BufferGeometry();
+          dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+          scene.add(new THREE.Points(dustGeo, new THREE.PointsMaterial({
+            color: 0xe8d0a0, size: 0.05, transparent: true, opacity: 0.22, depthWrite: false,
+          })));
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xc45c32, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, siteLight, barrow, wheel, bricks,
+            particleGeo, particleMat, particleMeshes: [], proj: new THREE.Vector3(), look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.barrow.position.set(state.lean * 0.22, 0.02, state.z);
+          webgl.barrow.rotation.z = -state.lean * 0.55;
+          webgl.wheel.rotation.x = state.wheel;
+          webgl.bricks.forEach((brick, index) => {
+            const wobble = Math.abs(state.lean) > 0.45 ? Math.sin(state.elapsed * 14 + index) * 0.03 * Math.abs(state.lean) : 0;
+            brick.position.x = -0.22 + (index % 3) * 0.22 + state.lean * 0.08 + wobble;
+          });
+          webgl.siteLight.position.set(2.2, 3.1, state.z + 6);
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "brick" ? 0xc45c32 : 0xe8d0a0);
+            mesh.material.opacity = clamp(p.life * 1.7, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 1.4) * 0.04;
+          webgl.camera.position.set(0.4 + sway + shakeX + state.lean * 0.35, 2.35 + shakeY, state.z - 6.2);
+          webgl.look.set(state.lean * 0.2, 0.7, state.z + 5.5);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const relZ = z - (state.z - 6.2);
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = relZ - 6.2;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#2a2418");
+          sky.addColorStop(1, "#16140c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#3a3020";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H);
+          const plankA = projectToScreen(-0.6, 0.05, state.z - 2);
+          const plankB = projectToScreen(0.6, 0.05, state.z + 8);
+          ctx.strokeStyle = COLORS.wood;
+          ctx.lineWidth = 18;
+          ctx.beginPath();
+          ctx.moveTo(plankA.x, plankA.y);
+          ctx.lineTo(plankB.x, plankB.y);
+          ctx.stroke();
+          const cart = projectToScreen(state.lean * 0.22, 0.45, state.z);
+          ctx.save();
+          ctx.translate(cart.x, cart.y);
+          ctx.rotate(-state.lean * 0.55);
+          ctx.fillStyle = COLORS.wood;
+          ctx.fillRect(-22, -12, 44, 20);
+          ctx.fillStyle = COLORS.brick;
+          ctx.fillRect(-14, -22, 28, 12);
+          ctx.fillStyle = "#6a6860";
+          ctx.beginPath();
+          ctx.arc(16, 8, 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          const scaf = projectToScreen(0, 1.4, GOAL_Z + 1.2);
+          ctx.strokeStyle = "#6a6860";
+          ctx.strokeRect(scaf.x - 28, scaf.y - 24, 56, 40);
+          state.particles.forEach((p) => {
+            const s = projectToScreen(p.x, p.y, p.z);
+            ctx.globalAlpha = clamp(p.life * 1.6, 0, 1);
+            ctx.fillStyle = p.kind === "brick" ? COLORS.brick : "#e8d0a0";
+            ctx.fillRect(s.x, s.y, 4, 4);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,241,212,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.z.toFixed(1)} / ${GOAL_Z}m`;
+          if (meter) meter.style.width = `${clamp(state.z / GOAL_Z, 0, 1) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `균형 ${Math.round(clamp(1 - Math.abs(state.lean), 0, 1) * 100)}%`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const leanPct = state.lean;
+          hud.save();
+          hud.strokeStyle = Math.abs(leanPct) > 0.55 ? COLORS.danger : COLORS.accent;
+          hud.lineWidth = 3;
+          hud.beginPath();
+          hud.moveTo(VIEW_W / 2, 86);
+          hud.lineTo(VIEW_W / 2 + leanPct * 90, 86);
+          hud.stroke();
+          hud.restore();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(196,92,50,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "plank +z; lean x; camera behind",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: Number(state.z.toFixed(2)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            z: Number(state.z.toFixed(2)),
+            lean: Number(state.lean.toFixed(3)),
+            holding: input.holding,
+            brickRisk: Number(state.brickRisk.toFixed(3)),
+          });
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.dragging = true;
+          input.downX = event.clientX;
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          input.steer = clamp((event.clientX - input.downX) / 120, -1, 1);
+        }
+        function onPointerUp() {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            input.dragging = false;
+            return;
+          }
+          input.holding = false;
+          input.dragging = false;
+          input.steer = 0;
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            input.holding = true;
+          }
+          if (event.code === "ArrowLeft" || event.code === "KeyA") { event.preventDefault(); input.left = true; }
+          if (event.code === "ArrowRight" || event.code === "KeyD") { event.preventDefault(); input.right = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.holding = false;
+          if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = false;
+          if (event.code === "ArrowRight" || event.code === "KeyD") input.right = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.z = GOAL_Z;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

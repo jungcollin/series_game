@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>새둥지</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #10180c; --accent: #8dff6a; --accent-ink: #10180c; --danger: #ff6b7a; --ink: #eaffdc; --muted: rgba(234,255,220,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">새둥지. 바람에 날아가는 나뭇가지를 받아 둥지를 엮으세요. 드래그로 받기. 가지 8개를 엮으면 클리어. 놓친 가지 5개면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 드래그해 가지를 받습니다.</p>
+    <main class="stage" aria-label="새둥지 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="새둥지" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">가지</p>
+          <p class="hud-value" id="hud-objective">0 / 8</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">36.0</p>
+          <p class="hud-sub" id="hud-sub">놓침 0 / 5</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Nest Twig</p>
+          <h1>새둥지</h1>
+          <p class="brief-lead">바람에 날아가는 나뭇가지를 받아 둥지를 엮으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 받기</span></li>
+            <li><strong>클리어</strong><span>가지 8개를 엮으면 클리어</span></li>
+            <li><strong>실패</strong><span>놓친 가지 5개면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">둥지 붕괴</p>
+          <h2>가지가 흩어졌다</h2>
+          <p class="brief-lead" id="fail-detail">놓친 가지 5개면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">한 둥지</p>
+          <h2>여덟 가지를 엮었다</h2>
+          <p class="brief-lead">바람에 실린 가지를 받아 둥지를 완성했습니다.</p>
+          <p class="hud-sub" id="clear-stat">가지 8개를 엮으면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 36;
+        const GOAL = 8;
+        const MAX_MISS = 5;
+        const LENS = [0.58, 1.08, 1.62];
+        const LEN_NAME = ["짧은", "중간", "긴"];
+        const FIRST_SPAWN = 2.25;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "nest-twig",
+          title: "새둥지",
+          description: "바람에 날아가는 나뭇가지를 받아 둥지를 엮으세요.",
+          creator: "collin",
+          genre: "3D nest building",
+          clearCondition: "가지 8개를 엮으면 클리어",
+          failCondition: "놓친 가지 5개면 실패",
+          controls: "드래그로 받기",
+        };
+        const COLORS = {
+          bg: "#10180c",
+          ink: "#eaffdc",
+          accent: "#8dff6a",
+          wood: "#c4a06a",
+          moss: "#4a8a3a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          miss_limit: "가지를 5개 놓쳤습니다",
+          time_limit: "제한 시간 36초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0.4, y: 2.15, z: 6.4 },
+          right: { x: 0.98, y: 0, z: -0.18 },
+          up: { x: -0.05, y: 0.97, z: -0.22 },
+          fwd: { x: -0.17, y: 0.24, z: -0.96 },
+          focal: 460,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          hits: 0,
+          misses: 0,
+          target: 1,
+          catcher: { x: 0, y: 1.15 },
+          twigs: [],
+          particles: [],
+          leaves: [],
+          spawnAt: FIRST_SPAWN,
+          seq: 0,
+          flash: 0,
+          shake: 0,
+          weave: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = {
+          dragging: false, downX: 0, downY: 0, baseX: 0, baseY: 0,
+          left: false, right: false, up: false, down: false, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = Math.max(0, Math.min(1, Number(seconds || 0) / DURATION));
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            speed: 4.2 + difficulty * 1.6,
+            gap: 1.85 - difficulty * 0.45,
+            matchChance: 0.62 - difficulty * 0.12,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.25, 0.25);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.8, 3.6),
+              vy: randRange(0.8, 3.8),
+              vz: Math.sin(a) * randRange(0.4, 2.2),
+              life: randRange(0.25, 0.7),
+              kind,
+              size: randRange(0.04, 0.1),
+            });
+          }
+          if (state.particles.length > 70) state.particles.splice(0, state.particles.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "hit") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(520, now + 0.1);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "miss") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.1);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+              osc.start(now); osc.stop(now + 0.12);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(860, now + 0.22);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(36, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.23);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function spawnTwig(params) {
+          const match = random() < params.matchChance;
+          let len = state.target;
+          if (!match) {
+            len = (state.target + 1 + Math.floor(random() * 2)) % 3;
+          }
+          const y = randRange(0.55, 2.35);
+          const z = randRange(-1.15, 0.85);
+          state.twigs.push({
+            id: (state.seq += 1),
+            len,
+            x: -8.6,
+            y,
+            z,
+            vx: params.speed * randRange(0.92, 1.08),
+            vy: randRange(-0.15, 0.22),
+            spin: randRange(-2.4, 2.4),
+            rot: randRange(0, Math.PI),
+            caught: false,
+            gone: false,
+          });
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.hits = 0;
+          state.misses = 0;
+          state.target = 1;
+          state.catcher = { x: 0, y: 1.15 };
+          state.twigs = [];
+          state.particles = [];
+          state.leaves = [];
+          state.spawnAt = FIRST_SPAWN;
+          state.flash = 0;
+          state.shake = 0;
+          state.weave = 0;
+          state.message = `필요 · ${LEN_NAME[state.target]} 가지`;
+          state.messageTime = 1.4;
+          state.failReason = "";
+          input.dragging = false;
+          reseed((Date.now() ^ 0xa5a5a5a5) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.5;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function missTwig(twig, reasonText) {
+          if (twig.gone) return;
+          twig.gone = true;
+          state.misses += 1;
+          burst(twig.x, twig.y, twig.z, 10, "miss");
+          playSfx("miss");
+          state.message = `${reasonText} ${state.misses}/${MAX_MISS}`;
+          state.messageTime = 0.85;
+          state.flash = 0.4;
+          if (state.misses >= MAX_MISS) failStage("miss_limit");
+        }
+
+        function catchTwig(twig) {
+          if (twig.caught || twig.gone) return;
+          twig.caught = true;
+          if (twig.len !== state.target) {
+            missTwig(twig, "길이 불일치");
+            twig.gone = true;
+            return;
+          }
+          twig.gone = true;
+          state.hits += 1;
+          state.weave = 1;
+          burst(state.catcher.x, state.catcher.y, 0.2, 16, "hit");
+          playSfx("hit");
+          state.target = (state.target + 1 + Math.floor(random() * 2)) % 3;
+          state.message = `엮음 ${state.hits}/${GOAL} · 다음 ${LEN_NAME[state.target]}`;
+          state.messageTime = 0.95;
+          state.flash = 0.5;
+          if (state.hits >= GOAL) clearStage();
+        }
+
+        function updateCatcher(dt) {
+          const speed = 5.4 * dt;
+          if (input.left) state.catcher.x -= speed;
+          if (input.right) state.catcher.x += speed;
+          if (input.up) state.catcher.y += speed;
+          if (input.down) state.catcher.y -= speed;
+          state.catcher.x = clamp(state.catcher.x, -3.2, 3.2);
+          state.catcher.y = clamp(state.catcher.y, 0.4, 2.55);
+        }
+
+        function updateTwigs(dt, params) {
+          state.twigs.forEach((twig) => {
+            if (twig.gone) return;
+            twig.x += twig.vx * dt;
+            twig.y += twig.vy * dt + Math.sin(state.elapsed * 3 + twig.id) * 0.15 * dt;
+            twig.rot += twig.spin * dt;
+            const dx = twig.x - state.catcher.x;
+            const dy = twig.y - state.catcher.y;
+            const near = Math.hypot(dx, dy) < 0.62 && Math.abs(twig.z) < 1.15 && twig.x > -1.4 && twig.x < 1.6;
+            if (near) catchTwig(twig);
+            else if (twig.x > 6.4) missTwig(twig, "놓침");
+          });
+          state.twigs = state.twigs.filter((twig) => !twig.gone || twig.x < 8);
+          if (state.elapsed >= state.spawnAt && state.twigs.filter((t) => !t.gone).length < 3) {
+            spawnTwig(params);
+            state.spawnAt = state.elapsed + params.gap;
+          }
+        }
+
+        function updateFx(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 2.6 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          state.leafTimer = (state.leafTimer || 0) - dt;
+          if (state.leafTimer <= 0) {
+            state.leafTimer = reducedMotion ? 0.22 : 0.08;
+            state.leaves.push({
+              x: randRange(-8, -6),
+              y: randRange(0.4, 3.2),
+              z: randRange(-2, 2),
+              vx: randRange(3.2, 6.4),
+              life: randRange(0.8, 1.6),
+            });
+          }
+          state.leaves.forEach((leaf) => {
+            leaf.x += leaf.vx * dt;
+            leaf.y += Math.sin(leaf.x) * 0.4 * dt;
+            leaf.life -= dt;
+          });
+          state.leaves = state.leaves.filter((leaf) => leaf.life > 0 && leaf.x < 8);
+          state.weave = Math.max(0, state.weave - dt * 2.2);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateCatcher(dt);
+          updateTwigs(dt, params);
+          if (state.mode !== "running") return;
+          updateFx(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `가지 ${state.hits} / ${GOAL} · 놓침 ${state.misses} / ${MAX_MISS}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 놓침 ${state.misses}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x10180c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x10180c);
+          scene.fog = new THREE.Fog(0x10180c, 8, 26);
+
+          const camera = new THREE.PerspectiveCamera(50, VIEW_W / VIEW_H, 0.1, 70);
+          camera.position.set(0.55, 2.2, 6.55);
+
+          scene.add(new THREE.AmbientLight(0x2a4020, 0.5));
+          const hemi = new THREE.HemisphereLight(0xc8ffb0, 0x203010, 0.4);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xfff0c8, 0.55);
+          sun.position.set(-8, 10, 6);
+          scene.add(sun);
+          const nestLight = new THREE.PointLight(0x8dff6a, 0.85, 12);
+          nestLight.position.set(0, 1.6, 1.4);
+          scene.add(nestLight);
+
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x3a4434, roughness: 0.9, metalness: 0.05 });
+          const mossMat = new THREE.MeshStandardMaterial({ color: 0x4a8a3a, roughness: 0.82, metalness: 0.04 });
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x8a6238, roughness: 0.7, metalness: 0.08 });
+          const twigMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a06a, roughness: 0.62, metalness: 0.08, emissive: 0x3a2810, emissiveIntensity: 0.12,
+          });
+          const nestMat = new THREE.MeshStandardMaterial({ color: 0x6a4a28, roughness: 0.78, metalness: 0.06 });
+
+          const cliff = new THREE.Mesh(new THREE.CylinderGeometry(3.4, 4.2, 2.2, 7), rockMat);
+          cliff.position.set(0, -1.15, -0.4);
+          scene.add(cliff);
+          const ledge = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.35, 3.2), mossMat);
+          ledge.position.set(0, -0.08, 0.2);
+          scene.add(ledge);
+
+          const nest = new THREE.Group();
+          const bowl = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.22, 8, 18), nestMat);
+          bowl.rotation.x = Math.PI / 2;
+          nest.add(bowl);
+          const inner = new THREE.Mesh(new THREE.CircleGeometry(0.78, 16), mossMat);
+          inner.rotation.x = -Math.PI / 2;
+          inner.position.y = -0.05;
+          nest.add(inner);
+          nest.position.set(0, 0.22, 0.15);
+          scene.add(nest);
+
+          const weaveGeo = new THREE.CylinderGeometry(0.035, 0.045, 1.4, 5);
+          const weaves = [];
+          for (let i = 0; i < 8; i += 1) {
+            const w = new THREE.Mesh(weaveGeo, twigMat);
+            w.rotation.z = (i / 8) * Math.PI;
+            w.position.y = 0.12;
+            w.visible = false;
+            nest.add(w);
+            weaves.push(w);
+          }
+
+          const ghost = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.04, 0.04, 1, 6),
+            new THREE.MeshBasicMaterial({ color: 0x8dff6a, transparent: true, opacity: 0.35, depthWrite: false })
+          );
+          ghost.rotation.z = Math.PI / 2;
+          ghost.position.set(0, 0.55, 0.2);
+          scene.add(ghost);
+
+          const catcher = new THREE.Group();
+          const talonMat = new THREE.MeshStandardMaterial({ color: 0xe8d080, roughness: 0.45, metalness: 0.12 });
+          [-0.16, 0.16].forEach((x) => {
+            const claw = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.42, 6), talonMat);
+            claw.position.set(x, 0, 0);
+            claw.rotation.x = Math.PI;
+            catcher.add(claw);
+          });
+          scene.add(catcher);
+
+          [[-6.5, 1.6, -8, 2.4], [7.2, 2.1, -9, 3], [-4, 0.8, -11, 1.8], [5.4, 1.2, -12, 2.2], [-8.2, 1.4, -6, 2.0], [8.4, 1.8, -7, 2.5]].forEach((row) => {
+            const pine = new THREE.Mesh(new THREE.ConeGeometry(row[3] * 0.55, row[3] * 2.1, 7), mossMat);
+            pine.position.set(row[0], row[1], row[2]);
+            scene.add(pine);
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 1.2, 6), woodMat);
+            trunk.position.set(row[0], row[1] - row[3] * 0.85, row[2]);
+            scene.add(trunk);
+          });
+          const eggMat = new THREE.MeshStandardMaterial({ color: 0xf0e0c0, roughness: 0.55, metalness: 0.05 });
+          [-0.18, 0.16].forEach((x) => {
+            const egg = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), eggMat);
+            egg.scale.set(0.85, 1.15, 0.85);
+            egg.position.set(x, 0.18, 0.12);
+            nest.add(egg);
+          });
+          const bird = new THREE.Group();
+          const body = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 8, 8),
+            new THREE.MeshStandardMaterial({ color: 0x4a6a38, roughness: 0.6, metalness: 0.05 })
+          );
+          bird.add(body);
+          const beak = new THREE.Mesh(
+            new THREE.ConeGeometry(0.04, 0.16, 6),
+            new THREE.MeshStandardMaterial({ color: 0xe8b050, roughness: 0.45 })
+          );
+          beak.rotation.z = -Math.PI / 2;
+          beak.position.set(0.18, 0.02, 0);
+          bird.add(beak);
+          bird.position.set(-0.55, 0.55, 0.35);
+          scene.add(bird);
+
+          const mistCount = reducedMotion ? 70 : 200;
+          const mistPos = new Float32Array(mistCount * 3);
+          for (let i = 0; i < mistCount; i += 1) {
+            mistPos[i * 3] = randRange(-10, 10);
+            mistPos[i * 3 + 1] = randRange(0.2, 4);
+            mistPos[i * 3 + 2] = randRange(-12, 4);
+          }
+          const mistGeo = new THREE.BufferGeometry();
+          mistGeo.setAttribute("position", new THREE.BufferAttribute(mistPos, 3));
+          const mist = new THREE.Points(mistGeo, new THREE.PointsMaterial({
+            color: 0xeaffdc, size: 0.06, transparent: true, opacity: 0.25, depthWrite: false,
+          }));
+          scene.add(mist);
+
+          const twigGeo = new THREE.CylinderGeometry(0.045, 0.06, 1, 6);
+          const twigMeshes = [];
+          for (let i = 0; i < 8; i += 1) {
+            const mesh = new THREE.Mesh(twigGeo, twigMat.clone());
+            mesh.visible = false;
+            scene.add(mesh);
+            twigMeshes.push(mesh);
+          }
+          const particleGeo = new THREE.SphereGeometry(0.045, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0x8dff6a, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+          const leafGeo = new THREE.PlaneGeometry(0.12, 0.08);
+          const leafMat = new THREE.MeshBasicMaterial({
+            color: 0x6dff4a, side: THREE.DoubleSide, transparent: true, opacity: 0.7, depthWrite: false,
+          });
+          const leafMeshes = [];
+          for (let i = 0; i < 18; i += 1) {
+            const mesh = new THREE.Mesh(leafGeo, leafMat.clone());
+            mesh.visible = false;
+            scene.add(mesh);
+            leafMeshes.push(mesh);
+          }
+
+          return {
+            renderer, scene, camera, nestLight, nest, weaves, ghost, catcher,
+            twigGeo, twigMeshes, particleGeo, particleMat, particleMeshes: [],
+            leafMeshes, mist, proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.catcher.position.set(state.catcher.x, state.catcher.y, 0.35);
+          webgl.ghost.position.set(0.05, 0.62, 0.25);
+          webgl.ghost.scale.set(1, LENS[state.target], 1);
+          webgl.ghost.material.opacity = 0.22 + Math.sin(state.elapsed * 5) * 0.08;
+          webgl.weaves.forEach((mesh, index) => {
+            mesh.visible = index < state.hits;
+            mesh.scale.set(1, 0.7 + index * 0.04, 1);
+          });
+          const breathe = reducedMotion ? 0 : Math.sin(state.elapsed * 1.5) * 0.02;
+          webgl.nest.position.y = 0.22 + breathe + state.weave * 0.08;
+          webgl.nestLight.intensity = 0.7 + state.weave * 0.8;
+
+          webgl.twigMeshes.forEach((mesh, index) => {
+            const twig = state.twigs[index];
+            if (!twig || twig.gone) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(twig.x, twig.y, twig.z);
+            mesh.scale.set(1, LENS[twig.len], 1);
+            mesh.rotation.set(0.4, 0, twig.rot);
+            mesh.material.emissiveIntensity = twig.len === state.target ? 0.45 : 0.08;
+            mesh.material.color.setHex(twig.len === state.target ? 0xd4c070 : 0x8a6238);
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "miss" ? 0xff6b7a : 0x8dff6a);
+            mesh.material.opacity = clamp(p.life * 1.8, 0, 1);
+          });
+          webgl.leafMeshes.forEach((mesh, index) => {
+            const leaf = state.leaves[index];
+            if (!leaf) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(leaf.x, leaf.y, leaf.z);
+            mesh.rotation.z = leaf.x * 0.4;
+            mesh.material.opacity = clamp(leaf.life, 0, 0.7);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.28 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.35) * 0.08;
+          webgl.camera.position.set(0.5 + sway + shakeX, 2.18 + shakeY, 6.5);
+          webgl.camera.lookAt(state.catcher.x * 0.15, 0.9, 0);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function pointerToCatcher(clientX, clientY) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = (clientX - rect.left) / Math.max(1, rect.width);
+          const ny = (clientY - rect.top) / Math.max(1, rect.height);
+          state.catcher.x = clamp((nx - 0.5) * 7.2, -3.2, 3.2);
+          state.catcher.y = clamp((0.72 - ny) * 4.4, 0.4, 2.55);
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#244018");
+          sky.addColorStop(1, "#10180c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#3a4434";
+          ctx.fillRect(0, VIEW_H * 0.72, VIEW_W, VIEW_H * 0.28);
+          const nest = projectToScreen(0, 0.25, 0.15);
+          ctx.strokeStyle = COLORS.wood;
+          ctx.lineWidth = 10;
+          ctx.beginPath();
+          ctx.arc(nest.x, nest.y, 34, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = "rgba(74,138,58,0.5)";
+          ctx.beginPath();
+          ctx.arc(nest.x, nest.y, 26, 0, Math.PI * 2);
+          ctx.fill();
+          const catcher = projectToScreen(state.catcher.x, state.catcher.y, 0.35);
+          ctx.strokeStyle = COLORS.accent;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(catcher.x - 16, catcher.y - 12, 32, 24);
+          state.twigs.forEach((twig) => {
+            if (twig.gone) return;
+            const p = projectToScreen(twig.x, twig.y, twig.z);
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(twig.rot);
+            ctx.fillStyle = twig.len === state.target ? COLORS.accent : COLORS.wood;
+            ctx.fillRect(-LENS[twig.len] * 18, -3, LENS[twig.len] * 36, 6);
+            ctx.restore();
+          });
+          state.particles.forEach((p) => {
+            const s = projectToScreen(p.x, p.y, p.z);
+            ctx.globalAlpha = clamp(p.life * 1.6, 0, 1);
+            ctx.fillStyle = p.kind === "miss" ? COLORS.danger : COLORS.accent;
+            ctx.fillRect(s.x, s.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(234,255,220,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.hits} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.hits / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `놓침 ${state.misses} / ${MAX_MISS} · ${LEN_NAME[state.target]}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const ghost = projectToScreen(0.1, 0.7, 0.25);
+          hud.save();
+          hud.textAlign = "center";
+          hud.fillStyle = COLORS.accent;
+          hud.font = "800 13px Trebuchet MS, sans-serif";
+          hud.fillText(`${LEN_NAME[state.target]} 가지`, ghost.x, ghost.y - 18);
+          hud.restore();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.includes("놓") || state.message.includes("불일치") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            const bad = state.message.includes("놓") || state.message.includes("불일치");
+            hud.fillStyle = bad ? `rgba(255,107,122,${state.flash * 0.12})` : `rgba(141,255,106,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "nest origin; wind +x; catcher xy",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.hits,
+            misses: state.misses,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            target: state.target,
+            catcher: { x: Number(state.catcher.x.toFixed(2)), y: Number(state.catcher.y.toFixed(2)) },
+            twigs: state.twigs.filter((t) => !t.gone).map((t) => ({
+              id: t.id, len: t.len, x: Number(t.x.toFixed(2)), y: Number(t.y.toFixed(2)),
+            })),
+          });
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.pointerId = event.pointerId;
+          pointerToCatcher(event.clientX, event.clientY);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          pointerToCatcher(event.clientX, event.clientY);
+        }
+        function onPointerUp() {
+          if (ignoreUp) ignoreUp = false;
+          input.dragging = false;
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          const map = {
+            ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+            ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+          };
+          const name = map[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const map = {
+            ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+            ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+          };
+          const name = map[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.hits = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

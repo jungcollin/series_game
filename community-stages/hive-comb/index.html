@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>벌집 채밀</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #1a140c; --accent: #ffc46b; --accent-ink: #1a140c; --danger: #ff6b7a; --ink: #fff1d4; --muted: rgba(255,241,212,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">벌집 채밀. 벌을 깨우지 않게 꿀방을 잘라 내세요. 드래그로 칼질, 멈춤으로 대기. 꿀방 6칸을 채밀하면 클리어. 벌에 3번 쏘이면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 드래그로 칼질하고 벌이 보면 손을 떼고 기다립니다.</p>
+    <main class="stage" aria-label="벌집 채밀 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="벌집 채밀" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">채밀</p>
+          <p class="hud-value" id="hud-objective">0 / 6</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">38.0</p>
+          <p class="hud-sub" id="hud-sub">침 0 / 3</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Hive Comb</p>
+          <h1>벌집 채밀</h1>
+          <p class="brief-lead">벌을 깨우지 않게 꿀방을 잘라 내세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 칼질, 멈춤으로 대기</span></li>
+            <li><strong>클리어</strong><span>꿀방 6칸을 채밀하면 클리어</span></li>
+            <li><strong>실패</strong><span>벌에 3번 쏘이면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">채밀 실패</p>
+          <h2>벌이 깨어났다</h2>
+          <p class="brief-lead" id="fail-detail">벌에 3번 쏘이면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">채밀 완료</p>
+          <h2>여섯 칸의 꿀</h2>
+          <p class="brief-lead">벌을 깨우지 않고 꿀방을 모두 잘랐습니다.</p>
+          <p class="hud-sub" id="clear-stat">꿀방 6칸을 채밀하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 38;
+        const GOAL = 6;
+        const MAX_STINGS = 3;
+        const HEX = 0.28;
+        const CELLS = [
+          { q: 0, r: 0 }, { q: 1, r: -1 }, { q: 1, r: 0 },
+          { q: 0, r: 1 }, { q: -1, r: 1 }, { q: -1, r: 0 },
+        ];
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "hive-comb",
+          title: "벌집 채밀",
+          description: "벌을 깨우지 않게 꿀방을 잘라 내세요.",
+          creator: "collin",
+          genre: "3D hive harvest",
+          clearCondition: "꿀방 6칸을 채밀하면 클리어",
+          failCondition: "벌에 3번 쏘이면 실패",
+          controls: "드래그로 칼질, 멈춤으로 대기",
+        };
+        const COLORS = {
+          night: "#1a140c",
+          ink: "#fff1d4",
+          accent: "#ffc46b",
+          honey: "#e8a030",
+          wax: "#d8b46a",
+          wood: "#5a3a22",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          sting_limit: "벌에게 세 번 쏘였습니다",
+          time_limit: "제한 시간 38초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0.15, y: 0.55, z: 2.65 },
+          right: { x: 0.99, y: 0, z: -0.1 },
+          up: { x: -0.02, y: 0.99, z: -0.12 },
+          fwd: { x: -0.1, y: -0.12, z: -0.99 },
+          focal: 560,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function hexToWorld(cell) {
+          return {
+            x: HEX * 1.55 * cell.q,
+            y: 0.42 + HEX * 1.35 * (cell.r + cell.q * 0.5),
+            z: -0.08,
+          };
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          harvested: 0,
+          stings: 0,
+          cuts: [0, 0, 0, 0, 0, 0],
+          done: [false, false, false, false, false, false],
+          bees: [],
+          knife: { x: 0, y: 0.4, cutting: false },
+          stingLock: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = { dragging: false, pointerId: null, sx: 0, sy: 0 };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          return {
+            difficulty,
+            phase: Math.min(3, 1 + Math.floor(difficulty * 3)),
+            lookLen: 0.55 + difficulty * 0.18,
+            period: 3.6 - difficulty * 0.6,
+            cutRate: 1.35 + difficulty * 0.1,
+          };
+        }
+
+        function spawnBees() {
+          state.bees = [
+            { x: -0.85, y: 0.55, z: 0.42, phase: 2.8, look: 0, alert: false, vx: 0.35 },
+            { x: 0.7, y: 0.72, z: 0.38, phase: 4.4, look: 0, alert: false, vx: -0.28 },
+            { x: 0.1, y: 0.28, z: 0.5, phase: 6.1, look: 0, alert: false, vx: 0.22 },
+          ];
+        }
+
+        function anyAlert() {
+          return state.bees.some((bee) => bee.alert);
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.3, 1.6),
+              vy: randRange(0.4, 2.2),
+              vz: Math.sin(a) * randRange(0.2, 1.1),
+              life: randRange(0.25, 0.7),
+              kind,
+              size: randRange(0.025, 0.07),
+            });
+          }
+          if (state.particles.length > 80) state.particles.splice(0, state.particles.length - 80);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "cut") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(180, now + 0.06);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+              osc.start(now); osc.stop(now + 0.09);
+            } else if (kind === "honey") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(360, now);
+              osc.frequency.exponentialRampToValueAtTime(620, now + 0.14);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.2);
+            } else if (kind === "sting") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.1);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.24);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.26);
+            }
+          } catch (_error) { /* optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.harvested = 0;
+          state.stings = 0;
+          state.cuts = [0, 0, 0, 0, 0, 0];
+          state.done = [false, false, false, false, false, false];
+          state.knife = { x: 0, y: 0.4, cutting: false };
+          state.stingLock = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          spawnBees();
+          input.dragging = false;
+          reseed((Date.now() ^ 0x11e00b) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function sting() {
+          if (state.stingLock > 0) return;
+          state.stings += 1;
+          state.stingLock = 0.7;
+          state.flash = 0.45;
+          state.shake = reducedMotion ? 0.1 : 0.42;
+          playSfx("sting");
+          burst(state.knife.x, state.knife.y, 0.3, 12, "sting");
+          state.message = `침 ${state.stings}/${MAX_STINGS}`;
+          state.messageTime = 0.8;
+          if (state.stings >= MAX_STINGS) failStage("sting_limit");
+        }
+
+        function harvest(i) {
+          if (state.done[i]) return;
+          state.done[i] = true;
+          state.harvested += 1;
+          const p = hexToWorld(CELLS[i]);
+          burst(p.x, p.y, 0.05, 14, "honey");
+          playSfx("honey");
+          state.message = `채밀 ${state.harvested}/${GOAL}`;
+          state.messageTime = 0.75;
+          if (state.harvested >= GOAL) clearStage();
+        }
+
+        function cellAt(x, y) {
+          let best = -1;
+          let bestD = HEX * 0.85;
+          for (let i = 0; i < CELLS.length; i += 1) {
+            if (state.done[i]) continue;
+            const p = hexToWorld(CELLS[i]);
+            const d = Math.hypot(p.x - x, p.y - y);
+            if (d < bestD) { bestD = d; best = i; }
+          }
+          return best;
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 1.8 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.stingLock = Math.max(0, state.stingLock - dt);
+          if (state.mode !== "running") {
+            state.bees.forEach((bee, i) => {
+              bee.x = Math.sin(i + 0.4) * 0.7;
+            });
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          state.bees.forEach((bee, i) => {
+            bee.x += bee.vx * dt;
+            if (bee.x > 1.05) bee.vx = -Math.abs(bee.vx);
+            if (bee.x < -1.05) bee.vx = Math.abs(bee.vx);
+            bee.y += Math.sin(state.elapsed * 2.4 + i) * 0.15 * dt;
+            const t = (state.elapsed + bee.phase) % params.period;
+            const lookStart = params.period * 0.62;
+            bee.look = clamp((t - (lookStart - 0.28)) / 0.28, 0, 1);
+            bee.alert = t >= lookStart && t <= lookStart + params.lookLen;
+          });
+          state.knife.cutting = input.dragging;
+          if (input.dragging) {
+            const hit = cellAt(state.knife.x, state.knife.y);
+            if (hit >= 0) {
+              state.cuts[hit] = clamp(state.cuts[hit] + dt * params.cutRate, 0, 1);
+              if (Math.random() < dt * 8) burst(state.knife.x, state.knife.y, 0.05, 1, "wax");
+              if (state.cuts[hit] >= 1) harvest(hit);
+            }
+            if (anyAlert() && state.elapsed > 2.4) sting();
+          }
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `채밀 ${state.harvested} / ${GOAL} · 침 ${state.stings} / ${MAX_STINGS}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 침 ${state.stings}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.shadowMap.enabled = false;
+          renderer.setClearColor(0x1a140c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a140c);
+          scene.fog = new THREE.Fog(0x1a140c, 3.0, 9.5);
+
+          const camera = new THREE.PerspectiveCamera(40, VIEW_W / VIEW_H, 0.08, 40);
+          camera.position.set(0.18, 0.62, 2.72);
+
+          scene.add(new THREE.AmbientLight(0x3a2a18, 0.48));
+          const hemi = new THREE.HemisphereLight(0xffe2a8, 0x1a140c, 0.38);
+          scene.add(hemi);
+          const key = new THREE.DirectionalLight(0xffe6c0, 0.5);
+          key.position.set(1.8, 3.6, 2.4);
+          scene.add(key);
+          const hiveLight = new THREE.PointLight(0xffc46b, 1.05, 6.5);
+          hiveLight.position.set(0, 0.8, 0.6);
+          scene.add(hiveLight);
+
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.84, metalness: 0.06 });
+          const darkWood = new THREE.MeshStandardMaterial({ color: 0x3a2414, roughness: 0.8, metalness: 0.08 });
+          const waxMat = new THREE.MeshStandardMaterial({ color: 0xd8b46a, roughness: 0.55, metalness: 0.08 });
+          const honeyMat = new THREE.MeshStandardMaterial({
+            color: 0xe8a030, roughness: 0.28, metalness: 0.1, emissive: 0x8a5008, emissiveIntensity: 0.28,
+          });
+          const ironMat = new THREE.MeshStandardMaterial({ color: 0x5a5048, roughness: 0.4, metalness: 0.55 });
+          const beeMat = new THREE.MeshStandardMaterial({ color: 0xf0c030, roughness: 0.45, metalness: 0.1 });
+          const stripeMat = new THREE.MeshStandardMaterial({ color: 0x1a140c, roughness: 0.6, metalness: 0.08 });
+
+          const floor = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.14, 3.2), darkWood);
+          floor.position.set(0, -0.55, 0.2);
+          scene.add(floor);
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(5.0, 2.8, 0.14), woodMat);
+          wall.position.set(0, 0.9, -1.35);
+          scene.add(wall);
+
+          const box = new THREE.Mesh(new THREE.BoxGeometry(2.15, 1.55, 0.28), woodMat);
+          box.position.set(0, 0.42, -0.28);
+          scene.add(box);
+          const inner = new THREE.Mesh(new THREE.BoxGeometry(1.95, 1.35, 0.08), darkWood);
+          inner.position.set(0, 0.42, -0.14);
+          scene.add(inner);
+          const lip = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.08, 0.32), woodMat);
+          lip.position.set(0, 1.18, -0.22);
+          scene.add(lip);
+
+          const hexShape = new THREE.Shape();
+          for (let i = 0; i < 6; i += 1) {
+            const a = (Math.PI / 3) * i + Math.PI / 6;
+            const x = Math.cos(a) * HEX * 0.92;
+            const y = Math.sin(a) * HEX * 0.92;
+            if (i === 0) hexShape.moveTo(x, y); else hexShape.lineTo(x, y);
+          }
+          hexShape.closePath();
+          const hexGeo = new THREE.ExtrudeGeometry(hexShape, { depth: 0.05, bevelEnabled: false });
+          const cellMeshes = [];
+          const honeyMeshes = [];
+          CELLS.forEach((cell) => {
+            const p = hexToWorld(cell);
+            const wallHex = new THREE.Mesh(hexGeo, waxMat);
+            wallHex.position.set(p.x, p.y, p.z);
+            scene.add(wallHex);
+            cellMeshes.push(wallHex);
+            const honey = new THREE.Mesh(hexGeo, honeyMat.clone());
+            honey.position.set(p.x, p.y, p.z + 0.03);
+            honey.scale.setScalar(0.72);
+            scene.add(honey);
+            honeyMeshes.push(honey);
+          });
+
+          const extraHex = new THREE.Mesh(hexGeo, waxMat);
+          extraHex.position.set(0.85, 1.05, -0.08);
+          extraHex.scale.setScalar(0.7);
+          scene.add(extraHex);
+          const extra2 = extraHex.clone();
+          extra2.position.set(-0.9, 1.08, -0.08);
+          scene.add(extra2);
+
+          const knife = new THREE.Group();
+          scene.add(knife);
+          const blade = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.04, 0.01), ironMat);
+          blade.position.set(0.12, 0, 0);
+          knife.add(blade);
+          const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.022, 0.22, 6), darkWood);
+          handle.rotation.z = Math.PI / 2;
+          handle.position.set(-0.08, 0, 0);
+          knife.add(handle);
+
+          const beeMeshes = [];
+          const beeGeo = new THREE.SphereGeometry(0.055, 8, 6);
+          const wingGeo = new THREE.PlaneGeometry(0.08, 0.04);
+          const wingMat = new THREE.MeshStandardMaterial({
+            color: 0xf6eedc, roughness: 0.4, metalness: 0.05, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+          });
+          for (let i = 0; i < 3; i += 1) {
+            const g = new THREE.Group();
+            const body = new THREE.Mesh(beeGeo, beeMat);
+            body.scale.set(1.3, 0.8, 0.8);
+            g.add(body);
+            const stripe = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 6), stripeMat);
+            stripe.scale.set(0.7, 0.85, 0.85);
+            g.add(stripe);
+            const wingL = new THREE.Mesh(wingGeo, wingMat);
+            wingL.position.set(0.02, 0.04, 0.04);
+            g.add(wingL);
+            const wingR = wingL.clone();
+            wingR.position.z = -0.04;
+            g.add(wingR);
+            const eye = new THREE.Mesh(new THREE.SphereGeometry(0.018, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff6b7a }));
+            eye.position.set(0.06, 0.02, 0.05);
+            g.add(eye);
+            scene.add(g);
+            beeMeshes.push({ root: g, wingL, wingR, eye });
+          }
+
+          const smoker = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.22, 10), ironMat);
+          smoker.position.set(1.35, -0.12, 0.55);
+          scene.add(smoker);
+          const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.03, 0.16, 6), ironMat);
+          spout.position.set(1.45, 0.02, 0.55);
+          spout.rotation.z = -0.8;
+          scene.add(spout);
+          const bellow = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.04, 0.1), darkWood);
+          bellow.position.set(1.28, -0.18, 0.55);
+          scene.add(bellow);
+
+          const jar = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.1, 0.11, 0.22, 10),
+            new THREE.MeshStandardMaterial({ color: 0x8a6a32, roughness: 0.3, metalness: 0.1, transparent: true, opacity: 0.45 })
+          );
+          jar.position.set(-1.35, -0.12, 0.55);
+          scene.add(jar);
+          const jarHoney = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.12, 10), honeyMat);
+          jarHoney.position.set(-1.35, -0.16, 0.55);
+          scene.add(jarHoney);
+
+          const veil = new THREE.Mesh(
+            new THREE.BoxGeometry(0.35, 0.08, 0.22),
+            new THREE.MeshStandardMaterial({ color: 0xc8b070, roughness: 0.7 })
+          );
+          veil.position.set(-1.15, -0.28, 0.15);
+          scene.add(veil);
+          const peg = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.5, 6), woodMat);
+          peg.position.set(1.55, 0.55, -0.9);
+          scene.add(peg);
+          const combScrap = new THREE.Mesh(hexGeo, waxMat);
+          combScrap.scale.setScalar(0.45);
+          combScrap.position.set(1.15, -0.22, 0.2);
+          combScrap.rotation.z = 0.4;
+          scene.add(combScrap);
+
+          const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), new THREE.MeshBasicMaterial({ color: 0xffd08a }));
+          lamp.position.set(-1.4, 1.35, -0.5);
+          scene.add(lamp);
+          const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.4, 5), ironMat);
+          arm.position.set(-1.4, 1.55, -0.5);
+          scene.add(arm);
+
+          const particleGeo = new THREE.SphereGeometry(0.03, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xffc46b, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          return {
+            renderer, scene, camera, cellMeshes, honeyMeshes, knife, beeMeshes, hiveLight, jarHoney,
+            particleGeo, particleMat, particleMeshes: [], look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.honeyMeshes.forEach((mesh, i) => {
+            mesh.visible = !state.done[i];
+            const s = 0.72 - state.cuts[i] * 0.4;
+            mesh.scale.setScalar(Math.max(0.12, s));
+            mesh.material.emissiveIntensity = 0.2 + state.cuts[i] * 0.4;
+          });
+          webgl.knife.position.set(state.knife.x, state.knife.y, 0.22);
+          webgl.knife.rotation.z = state.knife.cutting ? -0.35 : -0.1;
+          webgl.beeMeshes.forEach((entry, i) => {
+            const bee = state.bees[i];
+            if (!bee) { entry.root.visible = false; return; }
+            entry.root.visible = true;
+            entry.root.position.set(bee.x, bee.y, bee.z);
+            entry.root.rotation.y = bee.alert ? 0 : (bee.vx > 0 ? 0.6 : -0.6);
+            const flap = reducedMotion ? 0.2 : Math.sin(state.elapsed * 28 + i) * 0.5;
+            entry.wingL.rotation.x = flap;
+            entry.wingR.rotation.x = -flap;
+            entry.eye.visible = bee.alert || bee.look > 0.4;
+            entry.eye.material.color.setHex(bee.alert ? 0xff6b7a : 0xffc46b);
+          });
+          webgl.hiveLight.intensity = 0.8 + (anyAlert() ? 0.5 : 0) + state.harvested * 0.08;
+          webgl.jarHoney.scale.y = 0.6 + state.harvested * 0.12;
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, i) => {
+            const p = state.particles[i];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.03);
+            mesh.material.color.setHex(p.kind === "sting" ? 0xff6b7a : p.kind === "wax" ? 0xd8b46a : 0xffc46b);
+            mesh.material.opacity = clamp(p.life * 1.8, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.2 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.14 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.28) * 0.03;
+          webgl.camera.position.set(0.18 + sway + shakeX, 0.62 + shakeY, 2.72);
+          webgl.camera.lookAt(0, 0.42, -0.05);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = webgl.look.set(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(1.6, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.5 };
+        }
+
+        function screenToComb(sx, sy) {
+          const nx = (sx / VIEW_W) * 2 - 1;
+          const ny = 1 - (sy / VIEW_H) * 2;
+          return { x: clamp(nx * 1.15, -1.2, 1.2), y: clamp(0.42 + ny * 0.7, -0.15, 1.15) };
+        }
+
+        function pointerView(event) {
+          const rect = stageEl.getBoundingClientRect();
+          return {
+            x: ((event.clientX - rect.left) / Math.max(1, rect.width)) * VIEW_W,
+            y: ((event.clientY - rect.top) / Math.max(1, rect.height)) * VIEW_H,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#3a2814");
+          sky.addColorStop(1, "#1a140c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = COLORS.wood;
+          ctx.fillRect(VIEW_W * 0.18, VIEW_H * 0.18, VIEW_W * 0.64, VIEW_H * 0.64);
+          CELLS.forEach((cell, i) => {
+            const p = hexToWorld(cell);
+            const s = projectToScreen(p.x, p.y, p.z);
+            ctx.fillStyle = state.done[i] ? "#6a5030" : COLORS.honey;
+            ctx.beginPath();
+            for (let k = 0; k < 6; k += 1) {
+              const a = Math.PI / 3 * k + Math.PI / 6;
+              const px = s.x + Math.cos(a) * 22;
+              const py = s.y + Math.sin(a) * 22;
+              if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+            ctx.fill();
+          });
+          state.bees.forEach((bee) => {
+            const s = projectToScreen(bee.x, bee.y, bee.z);
+            ctx.fillStyle = bee.alert ? COLORS.danger : COLORS.accent;
+            ctx.beginPath(); ctx.ellipse(s.x, s.y, 10, 6, 0, 0, Math.PI * 2); ctx.fill();
+          });
+          ctx.fillStyle = "rgba(255,241,212,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.harvested} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.harvested / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `침 ${state.stings} / ${MAX_STINGS}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          hud.fillStyle = COLORS.ink;
+          hud.font = "700 12px Trebuchet MS, sans-serif";
+          hud.textAlign = "center";
+          const warn = anyAlert();
+          hud.fillStyle = warn ? COLORS.danger : COLORS.ink;
+          hud.fillText(warn ? "벌이 본다 · 멈추세요" : (input.dragging ? "칼질 중" : "드래그로 자르고, 보면 대기"), VIEW_W * 0.5, VIEW_H * 0.9);
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.fillStyle = state.message.indexOf("침") >= 0 ? COLORS.danger : COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,107,122,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; comb origin; +y up",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.harvested,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            stings: state.stings,
+            alert: anyAlert(),
+            cutting: input.dragging,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.pointerId = event.pointerId;
+          const p = pointerView(event);
+          const c = screenToComb(p.x, p.y);
+          state.knife.x = c.x; state.knife.y = c.y;
+          safeCapture(stageEl, event.pointerId);
+          playSfx("cut");
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          const p = pointerView(event);
+          const c = screenToComb(p.x, p.y);
+          state.knife.x = c.x; state.knife.y = c.y;
+        }
+        function onPointerUp(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (state.mode !== "running") return;
+          if (event.key === "ArrowLeft" || event.key === "a") state.knife.x = clamp(state.knife.x - 0.08, -1.2, 1.2);
+          if (event.key === "ArrowRight" || event.key === "d") state.knife.x = clamp(state.knife.x + 0.08, -1.2, 1.2);
+          if (event.key === "ArrowUp" || event.key === "w") state.knife.y = clamp(state.knife.y + 0.08, -0.15, 1.15);
+          if (event.key === "ArrowDown" || event.key === "s") state.knife.y = clamp(state.knife.y - 0.08, -0.15, 1.15);
+          if (event.code === "Space") {
+            event.preventDefault();
+            input.dragging = true;
+          }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.dragging = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.harvested = GOAL;
+            state.done = [true, true, true, true, true, true];
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        window.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => { input.dragging = false; });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
