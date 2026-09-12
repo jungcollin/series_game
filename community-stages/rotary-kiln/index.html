@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>회전 가마</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #16100c; --accent: #ff7a3d; --accent-ink: #16100c; --danger: #ff6b7a; --ink: #ffe0cc; --muted: rgba(255,224,204,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">회전 가마. 기울기와 연료를 맞춰 클링커를 태워 내세요. 좌우로 가마 기울기, 홀드로 연료. 클링커 4톤을 완성하면 클리어. 녹아 붙거나 생소성되면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 좌우로 드래그해 기울기를 바꾸고 화면을 누른 채 연료를 넣습니다.</p>
+    <main class="stage" aria-label="회전 가마 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="회전 가마" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">클링커</p>
+          <p class="hud-value" id="hud-objective">0.0 / 4.0 t</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">소성 0.50 · 기울기 0.42</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Rotary Kiln</p>
+          <h1>회전 가마</h1>
+          <p class="brief-lead">기울기와 연료를 맞춰 클링커를 태워 내세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>좌우로 가마 기울기, 홀드로 연료</span></li>
+            <li><strong>클리어</strong><span>클링커 4톤을 완성하면 클리어</span></li>
+            <li><strong>실패</strong><span>녹아 붙거나 생소성되면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">소성 실패</p>
+          <h2>가마가 죽었다</h2>
+          <p class="brief-lead" id="fail-detail">녹아 붙거나 생소성되면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">클링커 완성</p>
+          <h2>네 톤의 불덩이</h2>
+          <p class="brief-lead">기울기와 연료를 맞춰 클링커를 냉각기로 떨어뜨렸습니다.</p>
+          <p class="hud-sub" id="clear-stat">클링커 4톤을 완성하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const GOAL = 4;
+        const KILN_LEN = 22;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "rotary-kiln",
+          title: "회전 가마",
+          description: "기울기와 연료를 맞춰 클링커를 태워 내세요.",
+          creator: "collin",
+          genre: "3D cement kiln",
+          clearCondition: "클링커 4톤을 완성하면 클리어",
+          failCondition: "녹아 붙거나 생소성되면 실패",
+          controls: "좌우로 가마 기울기, 홀드로 연료",
+        };
+        const COLORS = {
+          bg: "#16100c",
+          ink: "#ffe0cc",
+          accent: "#ff7a3d",
+          ember: "#ff5a20",
+          steel: "#4a3a34",
+          brick: "#6a3a28",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          lining_melt: "연료가 과해 내화 라이닝이 녹아 붙었습니다",
+          raw_meal: "기울기가 급해 생소성 분말이 배출되었습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const PIERS = [-8.2, -2.4, 3.6, 9.2];
+        const STACKS = [
+          { x: -14.5, z: -3.2, h: 9.4 },
+          { x: -13.2, z: 2.8, h: 7.2 },
+        ];
+        const CAM2D = {
+          eye: { x: 1.2, y: 4.8, z: 16.5 },
+          right: { x: 0.98, y: 0, z: -0.18 },
+          up: { x: -0.04, y: 0.97, z: -0.22 },
+          fwd: { x: -0.17, y: 0.24, z: -0.96 },
+          focal: 480,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          pitch: 0.42,
+          fuel: 0.46,
+          temp: 0.5,
+          spin: 0,
+          tons: 0,
+          charges: [],
+          nodules: [],
+          particles: [],
+          spawnWait: 2.4,
+          meltTime: 0,
+          flash: 0,
+          shake: 0,
+          haze: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          chargeSeq: 0,
+        };
+        const input = {
+          left: false,
+          right: false,
+          hold: false,
+          pointerDown: false,
+          pointerId: null,
+          nx: 0.5,
+          pitchNudge: 0,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            feedEvery: phase === 1 ? 7.4 : phase === 2 ? 5.6 : 4.2,
+            flowBase: phase === 1 ? 0.055 : phase === 2 ? 0.07 : 0.09,
+            flowPitch: phase === 1 ? 0.16 : phase === 2 ? 0.22 : 0.3,
+            cookNeed: phase === 1 ? 0.68 : phase === 2 ? 0.74 : 0.8,
+            meltTemp: phase === 1 ? 0.96 : phase === 2 ? 0.93 : 0.9,
+            meltHold: phase === 1 ? 0.95 : phase === 2 ? 0.72 : 0.52,
+            fuelGain: phase === 1 ? 0.42 : phase === 2 ? 0.5 : 0.58,
+            fuelDecay: phase === 1 ? 0.16 : phase === 2 ? 0.22 : 0.3,
+            pitchDrift: phase === 1 ? 0 : phase === 2 ? 0.04 : 0.11,
+            idealPitch: phase === 1 ? 0.4 : phase === 2 ? 0.46 : 0.38 + Math.sin(seconds * 0.55) * 0.1,
+            hotBand: phase === 1 ? [0.32, 0.96] : phase === 2 ? [0.4, 0.94] : [0.48, 0.92],
+          };
+        }
+
+        function chargeWorld(charge, pitchRad) {
+          const t = charge.progress;
+          const x = lerp(-10.2, 10.4, t);
+          const drop = Math.sin(t * Math.PI) * 0.15;
+          const y = 3.15 - Math.sin(pitchRad) * x * 0.35 - drop;
+          const z = Math.sin(charge.spin) * 0.55;
+          return { x, y, z };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.25, 0.25);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.5, 2.8),
+              vy: randRange(0.6, 3.4),
+              vz: Math.sin(a) * randRange(0.4, 2.2),
+              life: randRange(0.3, 0.85),
+              kind,
+              size: randRange(0.05, 0.13),
+            });
+          }
+          if (state.particles.length > 80) state.particles.splice(0, state.particles.length - 80);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "fuel") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(160, now + 0.08);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "drop") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(220, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.14);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "warn") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(300, now);
+              osc.frequency.exponentialRampToValueAtTime(140, now + 0.12);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(440, now);
+              osc.frequency.exponentialRampToValueAtTime(1180, now + 0.26);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(120, now);
+              osc.frequency.exponentialRampToValueAtTime(32, now + 0.28);
+              gain.gain.setValueAtTime(0.075, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function spawnCharge() {
+          state.chargeSeq += 1;
+          state.charges.push({
+            id: state.chargeSeq,
+            progress: 0,
+            cook: 0,
+            mass: 0.95 + random() * 0.2,
+            spin: random() * Math.PI * 2,
+            glow: 0,
+          });
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.pitch = 0.42;
+          state.fuel = 0.46;
+          state.temp = 0.5;
+          state.spin = 0;
+          state.tons = 0;
+          state.charges = [];
+          state.nodules = [];
+          state.particles = [];
+          state.spawnWait = 2.6;
+          state.meltTime = 0;
+          state.flash = 0;
+          state.shake = 0;
+          state.haze = 0.2;
+          state.message = "기울기를 유지하고 연료를 태우세요";
+          state.messageTime = 1.5;
+          state.failReason = "";
+          state.chargeSeq = 0;
+          input.hold = false;
+          input.pitchNudge = 0;
+          spawnCharge();
+          reseed((Date.now() ^ 0xc0ffee) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.68;
+          playSfx("boom");
+          burst(8.5, 2.2, 0, 24, reason === "lining_melt" ? "melt" : "raw");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function dropClinker(charge, pos) {
+          const add = charge.mass;
+          state.tons = Math.min(GOAL, state.tons + add);
+          state.nodules.push({
+            x: pos.x, y: pos.y, z: pos.z,
+            vy: 0.2, life: 1.4, glow: 1,
+          });
+          burst(pos.x, pos.y, pos.z, 14, "clinker");
+          playSfx("drop");
+          state.flash = 0.4;
+          state.message = `클링커 ${state.tons.toFixed(1)} / ${GOAL} t`;
+          state.messageTime = 0.9;
+          if (state.tons >= GOAL - 0.001) {
+            state.tons = GOAL;
+            clearStage();
+          }
+        }
+
+        function updateKiln(dt, params) {
+          let pitchIn = input.pitchNudge;
+          if (input.left) pitchIn -= 1;
+          if (input.right) pitchIn += 1;
+          state.pitch = clamp(state.pitch + pitchIn * 0.55 * dt + params.pitchDrift * dt, 0.08, 0.92);
+          if (input.hold) {
+            state.fuel = clamp(state.fuel + params.fuelGain * dt, 0, 1.08);
+            if (random() < 0.05) playSfx("fuel");
+          } else {
+            state.fuel = Math.max(0, state.fuel - params.fuelDecay * dt);
+          }
+          state.temp = lerp(state.temp, state.fuel * 0.96 + 0.04, 1 - Math.exp(-1.6 * dt));
+          state.spin += (0.7 + state.fuel * 0.8) * dt;
+          state.haze = lerp(state.haze, 0.12 + state.temp * 0.55, 1 - Math.exp(-3 * dt));
+          if (state.temp >= params.meltTemp) {
+            state.meltTime += dt;
+            if (state.meltTime > params.meltHold * 0.45 && state.messageTime <= 0) {
+              state.message = "라이닝 과열";
+              state.messageTime = 0.7;
+              playSfx("warn");
+            }
+            if (state.meltTime > params.meltHold) failStage("lining_melt");
+          } else {
+            state.meltTime = Math.max(0, state.meltTime - dt * 0.5);
+          }
+        }
+
+        function updateCharges(dt, params) {
+          const pitchRad = (state.pitch - 0.35) * 0.55;
+          const flow = params.flowBase + state.pitch * params.flowPitch;
+          const band = params.hotBand;
+          const remain = [];
+          for (let i = 0; i < state.charges.length; i += 1) {
+            const charge = state.charges[i];
+            charge.progress += flow * dt;
+            charge.spin += (1.6 + state.pitch) * dt;
+            const inHot = charge.progress >= band[0] && charge.progress <= band[1];
+            const heatCook = inHot ? state.temp * (1.15 - Math.abs(state.pitch - params.idealPitch) * 1.4) : state.temp * 0.12;
+            charge.cook = clamp(charge.cook + Math.max(0, heatCook) * dt * 0.55, 0, 1);
+            charge.glow = lerp(charge.glow, charge.cook, 0.12);
+            const pos = chargeWorld(charge, pitchRad);
+            if (charge.progress >= 1) {
+              if (charge.cook >= params.cookNeed) {
+                dropClinker(charge, pos);
+              } else {
+                failStage("raw_meal");
+                return;
+              }
+            } else {
+              remain.push(charge);
+            }
+          }
+          state.charges = remain;
+        }
+
+        function updateNodules(dt) {
+          state.nodules.forEach((n) => {
+            n.vy -= 9 * dt;
+            n.y += n.vy * dt;
+            n.life -= dt;
+            n.glow = Math.max(0, n.glow - dt * 0.4);
+            if (n.y < 0.35) { n.y = 0.35; n.vy *= -0.2; }
+          });
+          state.nodules = state.nodules.filter((n) => n.life > 0);
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            p.vy += (p.kind === "melt" ? 1.2 : -2.2) * dt;
+            p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          if (state.mode === "running" && state.temp > 0.35 && random() < 0.4) {
+            burst(9.6, 2.8, 0, 2, "flame");
+          }
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.7);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") {
+            state.spin += dt * 0.35;
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateKiln(dt, params);
+          if (state.mode !== "running") return;
+          updateCharges(dt, params);
+          if (state.mode !== "running") return;
+          state.spawnWait -= dt;
+          if (state.spawnWait <= 0) {
+            spawnCharge();
+            state.spawnWait = params.feedEvery;
+            state.message = state.messageTime > 0 ? state.message : "원료 투입";
+            if (state.messageTime <= 0) state.messageTime = 0.45;
+          }
+          updateNodules(dt);
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `클링커 ${state.tons.toFixed(1)} t · 소성 ${state.temp.toFixed(2)} · 기울기 ${state.pitch.toFixed(2)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · ${state.tons.toFixed(1)} t`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x16100c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x16100c);
+          scene.fog = new THREE.Fog(0x16100c, 16, 48);
+
+          const camera = new THREE.PerspectiveCamera(58, VIEW_W / VIEW_H, 0.1, 140);
+          camera.position.set(1.4, 5.1, 16.8);
+
+          scene.add(new THREE.AmbientLight(0x4a3024, 0.4));
+          const hemi = new THREE.HemisphereLight(0xffb080, 0x1a100c, 0.42);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffc090, 0.5);
+          sun.position.set(-6, 16, 10);
+          scene.add(sun);
+          const burnerLight = new THREE.PointLight(0xff7a3d, 1.6, 18);
+          burnerLight.position.set(10.2, 3.2, 0);
+          scene.add(burnerLight);
+          const plantLamp = new THREE.PointLight(0xffc090, 0.55, 14);
+          plantLamp.position.set(-8, 6, 4);
+          scene.add(plantLamp);
+
+          const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+          const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 12);
+          const sphereGeo = new THREE.SphereGeometry(1, 10, 8);
+          const coneGeo = new THREE.ConeGeometry(1, 1, 8);
+          const torusGeo = new THREE.TorusGeometry(1.15, 0.12, 8, 18);
+
+          const steelMat = new THREE.MeshStandardMaterial({
+            color: 0x4a3a34, roughness: 0.45, metalness: 0.62, emissive: 0x180c08, emissiveIntensity: 0.12,
+          });
+          const rustMat = new THREE.MeshStandardMaterial({
+            color: 0x6a3a28, roughness: 0.7, metalness: 0.28, emissive: 0x201008, emissiveIntensity: 0.1,
+          });
+          const brickMat = new THREE.MeshStandardMaterial({ color: 0x5a3224, roughness: 0.88, metalness: 0.06 });
+          const emberMat = new THREE.MeshStandardMaterial({
+            color: 0xff7a3d, roughness: 0.32, metalness: 0.12, emissive: 0xff4a12, emissiveIntensity: 0.85,
+          });
+          const darkMat = new THREE.MeshStandardMaterial({ color: 0x1a1210, roughness: 0.9, metalness: 0.08 });
+          const concreteMat = new THREE.MeshStandardMaterial({ color: 0x3a342e, roughness: 0.92, metalness: 0.05 });
+          const clinkerMat = new THREE.MeshStandardMaterial({
+            color: 0xff8a40, roughness: 0.5, metalness: 0.15, emissive: 0xff5a18, emissiveIntensity: 0.7,
+          });
+
+          const yard = new THREE.Mesh(new THREE.PlaneGeometry(80, 50), concreteMat);
+          yard.rotation.x = -Math.PI / 2;
+          yard.position.y = 0;
+          scene.add(yard);
+
+          const kilnRoot = new THREE.Group();
+          kilnRoot.position.set(0, 3.2, 0);
+          scene.add(kilnRoot);
+
+          const shell = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.22, KILN_LEN, 16, 1, true), steelMat);
+          shell.rotation.z = Math.PI / 2;
+          kilnRoot.add(shell);
+          const inner = new THREE.Mesh(
+            new THREE.CylinderGeometry(1.02, 1.08, KILN_LEN - 0.4, 14, 1, true),
+            new THREE.MeshStandardMaterial({
+              color: 0x3a2018, roughness: 0.7, metalness: 0.2, emissive: 0xff3a10, emissiveIntensity: 0.35, side: THREE.BackSide,
+            })
+          );
+          inner.rotation.z = Math.PI / 2;
+          kilnRoot.add(inner);
+
+          const tires = [];
+          [-7.5, -1.8, 4.2, 9.0].forEach((x) => {
+            const tire = new THREE.Mesh(torusGeo, rustMat);
+            tire.rotation.y = Math.PI / 2;
+            tire.position.x = x;
+            kilnRoot.add(tire);
+            tires.push(tire);
+          });
+
+          const burner = new THREE.Mesh(coneGeo, emberMat);
+          burner.rotation.z = -Math.PI / 2;
+          burner.scale.set(0.55, 1.4, 0.55);
+          burner.position.set(11.4, 0, 0);
+          kilnRoot.add(burner);
+          const flame = new THREE.Mesh(coneGeo, emberMat);
+          flame.rotation.z = Math.PI / 2;
+          flame.scale.set(0.35, 1.8, 0.35);
+          flame.position.set(10.2, 0, 0);
+          kilnRoot.add(flame);
+
+          const hopper = new THREE.Group();
+          const hopBody = new THREE.Mesh(boxGeo, rustMat);
+          hopBody.scale.set(2.4, 2.6, 2.2);
+          hopBody.position.set(-12.4, 5.4, 0);
+          hopper.add(hopBody);
+          const hopCone = new THREE.Mesh(coneGeo, rustMat);
+          hopCone.scale.set(1.3, 1.6, 1.3);
+          hopCone.position.set(-12.4, 3.6, 0);
+          hopper.add(hopCone);
+          const feedPipe = new THREE.Mesh(cylGeo, steelMat);
+          feedPipe.scale.set(0.28, 1.6, 0.28);
+          feedPipe.rotation.z = 0.6;
+          feedPipe.position.set(-11.2, 2.9, 0);
+          hopper.add(feedPipe);
+          scene.add(hopper);
+
+          const cooler = new THREE.Group();
+          const grate = new THREE.Mesh(boxGeo, steelMat);
+          grate.scale.set(6.4, 0.35, 2.6);
+          grate.position.set(13.6, 0.9, 0);
+          cooler.add(grate);
+          for (let i = 0; i < 5; i += 1) {
+            const bar = new THREE.Mesh(boxGeo, rustMat);
+            bar.scale.set(0.12, 0.08, 2.4);
+            bar.position.set(11.4 + i * 1.05, 1.12, 0);
+            cooler.add(bar);
+          }
+          const coolerHood = new THREE.Mesh(boxGeo, darkMat);
+          coolerHood.scale.set(5.8, 1.4, 2.8);
+          coolerHood.position.set(13.8, 1.8, 0);
+          cooler.add(coolerHood);
+          scene.add(cooler);
+
+          PIERS.forEach((x) => {
+            const pier = new THREE.Mesh(boxGeo, brickMat);
+            pier.scale.set(1.4, 2.8, 1.6);
+            pier.position.set(x, 1.3, 0);
+            scene.add(pier);
+            const roller = new THREE.Mesh(cylGeo, steelMat);
+            roller.scale.set(0.22, 1.5, 0.22);
+            roller.rotation.z = Math.PI / 2;
+            roller.position.set(x, 2.55, 0);
+            scene.add(roller);
+            const cap = new THREE.Mesh(boxGeo, concreteMat);
+            cap.scale.set(1.8, 0.22, 2.0);
+            cap.position.set(x, 2.7, 0);
+            scene.add(cap);
+          });
+
+          STACKS.forEach((row) => {
+            const stack = new THREE.Mesh(cylGeo, brickMat);
+            stack.scale.set(0.55, row.h, 0.55);
+            stack.position.set(row.x, row.h * 0.5, row.z);
+            scene.add(stack);
+            const lip = new THREE.Mesh(cylGeo, rustMat);
+            lip.scale.set(0.62, 0.25, 0.62);
+            lip.position.set(row.x, row.h, row.z);
+            scene.add(lip);
+          });
+
+          const preheater = new THREE.Group();
+          for (let i = 0; i < 4; i += 1) {
+            const cyc = new THREE.Mesh(cylGeo, rustMat);
+            cyc.scale.set(0.9 - i * 0.08, 1.6, 0.9 - i * 0.08);
+            cyc.position.set(-14.8, 3.2 + i * 1.7, -0.2);
+            preheater.add(cyc);
+            const duct = new THREE.Mesh(cylGeo, steelMat);
+            duct.scale.set(0.16, 1.4, 0.16);
+            duct.position.set(-14.8, 4.1 + i * 1.7, -0.2);
+            preheater.add(duct);
+          }
+          scene.add(preheater);
+
+          const millHouse = new THREE.Mesh(boxGeo, brickMat);
+          millHouse.scale.set(7.5, 4.2, 5.5);
+          millHouse.position.set(-6, 2.0, -8.5);
+          scene.add(millHouse);
+          const millRoof = new THREE.Mesh(boxGeo, darkMat);
+          millRoof.scale.set(7.8, 0.25, 5.8);
+          millRoof.position.set(-6, 4.2, -8.5);
+          scene.add(millRoof);
+          const siloA = new THREE.Mesh(cylGeo, concreteMat);
+          siloA.scale.set(1.6, 6.4, 1.6);
+          siloA.position.set(4.5, 3.2, -7.5);
+          scene.add(siloA);
+          const siloB = siloA.clone();
+          siloB.position.x = 8.2;
+          scene.add(siloB);
+
+          const catwalk = new THREE.Mesh(boxGeo, steelMat);
+          catwalk.scale.set(18, 0.08, 0.7);
+          catwalk.position.set(0, 5.6, 2.35);
+          scene.add(catwalk);
+          const railA = new THREE.Mesh(boxGeo, steelMat);
+          railA.scale.set(18, 0.06, 0.06);
+          railA.position.set(0, 6.05, 2.65);
+          scene.add(railA);
+          const cabin = new THREE.Mesh(boxGeo, rustMat);
+          cabin.scale.set(2.2, 1.8, 1.6);
+          cabin.position.set(2.4, 4.4, 4.6);
+          scene.add(cabin);
+
+          const hazeGeo = new THREE.PlaneGeometry(16, 5, 10, 4);
+          const hazeMat = new THREE.MeshBasicMaterial({
+            color: 0xff7a3d, transparent: true, opacity: 0.1, depthWrite: false, side: THREE.DoubleSide,
+          });
+          const haze = new THREE.Mesh(hazeGeo, hazeMat);
+          haze.position.set(4, 3.6, 2.2);
+          scene.add(haze);
+          const hazeOrig = hazeGeo.attributes.position.array.slice();
+
+          const chargeGeo = new THREE.SphereGeometry(0.22, 8, 8);
+          const chargeMat = new THREE.MeshStandardMaterial({
+            color: 0x8a6a50, roughness: 0.85, metalness: 0.08, emissive: 0x401808, emissiveIntensity: 0.2,
+          });
+          const chargeMeshes = [];
+          for (let i = 0; i < 10; i += 1) {
+            const mesh = new THREE.Mesh(chargeGeo, chargeMat.clone());
+            mesh.visible = false;
+            scene.add(mesh);
+            chargeMeshes.push(mesh);
+          }
+          const noduleMeshes = [];
+          for (let i = 0; i < 8; i += 1) {
+            const mesh = new THREE.Mesh(sphereGeo, clinkerMat.clone());
+            mesh.scale.setScalar(0.22);
+            mesh.visible = false;
+            scene.add(mesh);
+            noduleMeshes.push(mesh);
+          }
+          const particleGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xff7a3d, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          const nightDust = reducedMotion ? 80 : 220;
+          const dustPos = new Float32Array(nightDust * 3);
+          for (let i = 0; i < nightDust; i += 1) {
+            dustPos[i * 3] = (Math.random() - 0.5) * 40;
+            dustPos[i * 3 + 1] = Math.random() * 10;
+            dustPos[i * 3 + 2] = (Math.random() - 0.5) * 24;
+          }
+          const dustGeo = new THREE.BufferGeometry();
+          dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+          scene.add(new THREE.Points(dustGeo, new THREE.PointsMaterial({
+            color: 0xffc090, size: 0.08, transparent: true, opacity: 0.28, sizeAttenuation: true,
+          })));
+
+          const fence = new THREE.Mesh(boxGeo, steelMat);
+          fence.scale.set(0.08, 1.2, 28);
+          fence.position.set(18, 0.6, -2);
+          scene.add(fence);
+
+          return {
+            renderer, scene, camera, kilnRoot, shell, inner, flame, burnerLight, haze, hazeOrig,
+            chargeMeshes, noduleMeshes, particleGeo, particleMat, particleMeshes: [],
+            look: new THREE.Vector3(),
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const pitchRad = (state.pitch - 0.35) * 0.55;
+          webgl.kilnRoot.rotation.z = -pitchRad;
+          webgl.kilnRoot.rotation.x = state.spin * 0.15;
+          webgl.shell.rotation.x = state.spin;
+          webgl.inner.rotation.x = state.spin;
+          webgl.inner.material.emissiveIntensity = 0.2 + state.temp * 0.7;
+          webgl.flame.scale.set(0.28 + state.temp * 0.25, 1.2 + state.temp * 1.4, 0.28 + state.temp * 0.25);
+          webgl.flame.material.emissiveIntensity = 0.5 + state.temp * 1.1;
+          webgl.burnerLight.intensity = 0.6 + state.temp * 1.6;
+          webgl.haze.material.opacity = reducedMotion ? 0.06 : 0.06 + state.haze * 0.16;
+          if (!reducedMotion) {
+            const pos = webgl.haze.geometry.attributes.position;
+            for (let i = 0; i < pos.count; i += 1) {
+              const ox = webgl.hazeOrig[i * 3];
+              const oy = webgl.hazeOrig[i * 3 + 1];
+              pos.setZ(i, Math.sin(ox * 0.4 + state.elapsed * 1.3) * 0.35 + Math.sin(oy + state.elapsed) * 0.2);
+            }
+            pos.needsUpdate = true;
+          }
+          webgl.chargeMeshes.forEach((mesh, index) => {
+            const charge = state.charges[index];
+            if (!charge) { mesh.visible = false; return; }
+            const p = chargeWorld(charge, pitchRad);
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            const s = 0.18 + charge.mass * 0.08;
+            mesh.scale.setScalar(s / 0.22);
+            mesh.material.emissiveIntensity = 0.15 + charge.glow * 1.2;
+            mesh.material.color.setHex(charge.cook > 0.55 ? 0xff7a3d : 0x8a6a50);
+          });
+          webgl.noduleMeshes.forEach((mesh, index) => {
+            const n = state.nodules[index];
+            if (!n) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(n.x, n.y, n.z);
+            mesh.material.emissiveIntensity = 0.4 + n.glow * 0.9;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.07);
+            mesh.material.opacity = clamp(p.life * 1.5, 0, 0.85);
+            mesh.material.color.setHex(p.kind === "raw" ? 0xc4a070 : 0xff7a3d);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.16 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.35) * 0.25;
+          webgl.camera.position.set(1.2 + sway + shakeX, 5.0 + shakeY, 16.6);
+          webgl.look.set(1.4, 3.1, 0);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.6 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#2a1810");
+          sky.addColorStop(0.5, "#16100c");
+          sky.addColorStop(1, "#0c0806");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#2a2420";
+          ctx.fillRect(0, VIEW_H * 0.72, VIEW_W, VIEW_H * 0.3);
+
+          const pitchRad = (state.pitch - 0.35) * 0.55;
+          const cx = VIEW_W * 0.5;
+          const cy = VIEW_H * 0.46;
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.rotate(-pitchRad);
+          ctx.fillStyle = "#4a3a34";
+          ctx.fillRect(-240, -28, 480, 56);
+          const glow = ctx.createLinearGradient(-200, 0, 220, 0);
+          glow.addColorStop(0, "rgba(138,106,80,0.3)");
+          glow.addColorStop(0.7, `rgba(255,90,32,${0.2 + state.temp * 0.55})`);
+          glow.addColorStop(1, `rgba(255,122,61,${0.4 + state.temp * 0.5})`);
+          ctx.fillStyle = glow;
+          ctx.fillRect(-220, -18, 440, 36);
+          ctx.fillStyle = COLORS.ember;
+          ctx.beginPath();
+          ctx.moveTo(220, 0);
+          ctx.lineTo(270, -18);
+          ctx.lineTo(270, 18);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+
+          ctx.fillStyle = COLORS.brick;
+          PIERS.forEach((x) => {
+            const px = cx + x * 18;
+            ctx.fillRect(px - 10, cy + 20, 20, VIEW_H * 0.72 - cy);
+          });
+          ctx.fillStyle = "#5a3224";
+          ctx.fillRect(40, 80, 70, 160);
+          ctx.fillRect(70, 40, 22, 200);
+
+          const pitchW = chargeWorld({ progress: 0, spin: 0, cook: 0, mass: 1, glow: 0 }, pitchRad);
+          state.charges.forEach((charge) => {
+            const p = chargeWorld(charge, pitchRad);
+            const sp = projectToScreen(p.x, p.y, p.z);
+            ctx.fillStyle = charge.cook > 0.55 ? COLORS.accent : "#8a6a50";
+            ctx.beginPath();
+            ctx.arc(sp.x, sp.y, 7, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          void pitchW;
+          state.nodules.forEach((n) => {
+            const sp = projectToScreen(n.x, n.y, n.z);
+            ctx.fillStyle = COLORS.ember;
+            ctx.beginPath();
+            ctx.arc(sp.x, sp.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          state.particles.forEach((p) => {
+            const sp = projectToScreen(p.x, p.y, p.z);
+            ctx.globalAlpha = clamp(p.life * 1.4, 0, 1);
+            ctx.fillStyle = COLORS.accent;
+            ctx.fillRect(sp.x, sp.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+
+          ctx.fillStyle = "rgba(22,16,12,0.55)";
+          ctx.fillRect(18, VIEW_H - 92, 220, 70);
+          ctx.fillStyle = COLORS.ink;
+          ctx.font = "700 11px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("소성", 28, VIEW_H - 72);
+          ctx.fillStyle = COLORS.accent;
+          ctx.fillRect(70, VIEW_H - 82, 150 * clamp(state.temp, 0, 1), 10);
+          ctx.fillStyle = COLORS.ink;
+          ctx.fillText("기울기", 28, VIEW_H - 48);
+          ctx.fillStyle = "#c4a056";
+          ctx.fillRect(70, VIEW_H - 58, 150 * clamp(state.pitch, 0, 1), 10);
+
+          ctx.fillStyle = "rgba(255,224,204,0.7)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.tons.toFixed(1)} / ${GOAL.toFixed(1)} t`;
+          if (meter) meter.style.width = `${(state.tons / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `소성 ${state.temp.toFixed(2)} · 기울기 ${state.pitch.toFixed(2)}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const params = difficultyAt(state.elapsed);
+          hud.save();
+          hud.globalAlpha = 0.85;
+          hud.strokeStyle = "rgba(255,122,61,0.45)";
+          hud.strokeRect(VIEW_W * 0.5 - 90, 18, 180, 12);
+          hud.fillStyle = COLORS.accent;
+          hud.fillRect(VIEW_W * 0.5 - 90, 18, 180 * clamp(state.pitch, 0, 1), 12);
+          const idealX = VIEW_W * 0.5 - 90 + 180 * clamp(params.idealPitch, 0, 1);
+          hud.fillStyle = COLORS.ink;
+          hud.fillRect(idealX - 1, 14, 2, 20);
+          hud.restore();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.indexOf("과열") >= 0 || state.message.indexOf("생") >= 0 ? COLORS.danger : COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 88);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,122,61,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; kiln along +x; feed -x, burner +x",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            pitch: Number(state.pitch.toFixed(3)),
+            fuel: Number(state.fuel.toFixed(3)),
+            temp: Number(state.temp.toFixed(3)),
+            tons: Number(state.tons.toFixed(2)),
+            charges: state.charges.map((c) => ({
+              id: c.id,
+              progress: Number(c.progress.toFixed(3)),
+              cook: Number(c.cook.toFixed(3)),
+            })),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.pointerDown = true;
+          input.hold = true;
+          input.pointerId = event.pointerId;
+          const rect = hudCanvas.getBoundingClientRect();
+          input.nx = (event.clientX - rect.left) / Math.max(1, rect.width);
+          input.pitchNudge = (input.nx - 0.5) * 2;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.pointerDown || state.mode !== "running") return;
+          event.preventDefault();
+          const rect = hudCanvas.getBoundingClientRect();
+          input.nx = (event.clientX - rect.left) / Math.max(1, rect.width);
+          input.pitchNudge = (input.nx - 0.5) * 2;
+        }
+        function onPointerUp(event) {
+          ignoreUp = false;
+          input.pointerDown = false;
+          input.hold = false;
+          input.pitchNudge = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            input.hold = true;
+            return;
+          }
+          if (event.code === "ArrowLeft" || event.code === "KeyA") { event.preventDefault(); input.left = true; }
+          if (event.code === "ArrowRight" || event.code === "KeyD") { event.preventDefault(); input.right = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.hold = false;
+          if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = false;
+          if (event.code === "ArrowRight" || event.code === "KeyD") input.right = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.tons = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.hold = input.pointerDown = false;
+          input.pitchNudge = 0;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

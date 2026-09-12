@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>활선 작업</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #101418; --accent: #f4c56d; --accent-ink: #101418; --danger: #ff6b7a; --ink: #fff4dc; --muted: rgba(255,244,220,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">활선 작업. 절연 거리를 지키며 점퍼로 전선을 다시 잇으세요. 드래그로 스틱, 홀드로 클램프. 점퍼 3본을 연결하면 클리어. 접지되거나 아크가 뛰면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 드래그해 스틱을 움직이고 손을 유지하면 클램프합니다.</p>
+    <main class="stage" aria-label="활선 작업 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="활선 작업" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">점퍼</p>
+          <p class="hud-value" id="hud-objective">0 / 3</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">48.0</p>
+          <p class="hud-sub" id="hud-sub">이격 0.00</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Hot Stick</p>
+          <h1>활선 작업</h1>
+          <p class="brief-lead">절연 거리를 지키며 점퍼로 전선을 다시 잇으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 스틱, 홀드로 클램프</span></li>
+            <li><strong>클리어</strong><span>점퍼 3본을 연결하면 클리어</span></li>
+            <li><strong>실패</strong><span>접지되거나 아크가 뛰면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">절연 파괴</p>
+          <h2>아크가 뛰었다</h2>
+          <p class="brief-lead" id="fail-detail">접지되거나 아크가 뛰면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">가압 복구</p>
+          <h2>세 본을 이었다</h2>
+          <p class="brief-lead">절연 거리를 지키며 점퍼 세 본을 모두 연결했습니다.</p>
+          <p class="hud-sub" id="clear-stat">점퍼 3본을 연결하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 48;
+        const GOAL = 3;
+        const SHOULDER = { x: 0.22, y: 3.35, z: 2.55 };
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "hot-stick",
+          title: "활선 작업",
+          description: "절연 거리를 지키며 점퍼로 전선을 다시 잇으세요.",
+          creator: "collin",
+          genre: "3D live-line work",
+          clearCondition: "점퍼 3본을 연결하면 클리어",
+          failCondition: "접지되거나 아크가 뛰면 실패",
+          controls: "드래그로 스틱, 홀드로 클램프",
+        };
+        const COLORS = {
+          bg: "#101418",
+          ink: "#fff4dc",
+          accent: "#f4c56d",
+          live: "#ffb14a",
+          porcelain: "#f4efe6",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          arc: "활선에 너무 가까워 아크가 뛰었습니다",
+          grounded: "스틱이 접지 금속에 닿았습니다",
+          time_limit: "제한 시간 48초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const JOBS = [
+          { a: { x: -3.35, y: 5.15, z: -6.05 }, b: { x: -1.55, y: 5.15, z: -6.05 }, live: "left" },
+          { a: { x: -0.45, y: 5.15, z: -6.05 }, b: { x: 1.35, y: 5.15, z: -6.05 }, live: "center" },
+          { a: { x: 2.15, y: 5.15, z: -6.05 }, b: { x: 3.85, y: 5.15, z: -6.05 }, live: "right" },
+        ];
+        const GROUNDS = [
+          { x: 0, y: 3.6, z: -6.2, r: 0.42 },
+          { x: 0, y: 1.8, z: -6.2, r: 0.38 },
+          { x: 0, y: 5.55, z: -6.15, r: 0.32 },
+        ];
+        const CAM2D = {
+          eye: { x: 0.4, y: 3.6, z: 5.4 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.98, z: 0.2 },
+          fwd: { x: 0, y: 0.2, z: -0.98 },
+          focal: 510,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          connected: 0,
+          jobIndex: 0,
+          clampOn: "none",
+          clampProg: 0,
+          tip: { x: 0.2, y: 4.35, z: -2.4 },
+          sway: 0,
+          clearance: 1.2,
+          arc: 0,
+          glow: 0,
+          particles: [],
+          sparks: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          jobs: [],
+        };
+        const input = {
+          left: false, right: false, up: false, down: false, hold: false,
+          pointer: false, downX: 0, downY: 0, baseX: 0, baseY: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            envelope: 0.62 - (phase - 1) * 0.1 - difficulty * 0.06,
+            sway: phase >= 2 ? 0.18 + (phase - 2) * 0.12 : 0.04,
+            angleCoupling: 0.55 + (phase - 1) * 0.28,
+            clampNeed: 0.52 + (phase - 1) * 0.08,
+            liveExtra: phase >= 3 ? 1 : 0,
+            reachPenalty: 0.12 + (phase - 1) * 0.08,
+          };
+        }
+
+        function resetJobs() {
+          state.jobs = JOBS.map((job, id) => ({
+            id,
+            a: { ...job.a },
+            b: { ...job.b },
+            live: job.live,
+            aDone: false,
+            bDone: false,
+            done: false,
+          }));
+          state.jobIndex = 0;
+          state.connected = 0;
+          state.clampOn = "none";
+          state.clampProg = 0;
+        }
+
+        function currentJob() {
+          return state.jobs.find((job) => !job.done) || null;
+        }
+
+        function livePoints(params) {
+          const pts = [];
+          state.jobs.forEach((job) => {
+            if (job.done) return;
+            pts.push({ x: job.a.x, y: job.a.y, z: job.a.z, kind: "term", job: job.id, end: "a" });
+            pts.push({ x: job.b.x, y: job.b.y, z: job.b.z, kind: "term", job: job.id, end: "b" });
+          });
+          pts.push({ x: -4.6, y: 5.15, z: -6.05, kind: "wire" });
+          pts.push({ x: 4.6, y: 5.15, z: -6.05, kind: "wire" });
+          if (params.liveExtra) {
+            pts.push({ x: -2.4, y: 4.55, z: -6.05, kind: "wire" });
+            pts.push({ x: 2.4, y: 4.55, z: -6.05, kind: "wire" });
+          }
+          return pts;
+        }
+
+        function stickSamples() {
+          const samples = [];
+          for (let i = 1; i <= 8; i += 1) {
+            const t = i / 8;
+            samples.push({
+              x: lerp(SHOULDER.x, state.tip.x, t),
+              y: lerp(SHOULDER.y, state.tip.y, t),
+              z: lerp(SHOULDER.z, state.tip.z, t),
+            });
+          }
+          return samples;
+        }
+
+        function stickAnglePenalty(params) {
+          const dx = state.tip.x - SHOULDER.x;
+          const dy = state.tip.y - SHOULDER.y;
+          const dz = state.tip.z - SHOULDER.z;
+          const len = Math.hypot(dx, dy, dz) || 1;
+          const align = Math.abs(dz) / len;
+          const yaw = Math.abs(dx) / len;
+          return (1 - align) * params.angleCoupling + yaw * 0.35 + (len / 10) * params.reachPenalty;
+        }
+
+        function nearestClearance(params) {
+          const job = currentJob();
+          const samples = stickSamples();
+          const lives = livePoints(params);
+          let best = { dist: 99, point: null, sample: null, allowed: false };
+          lives.forEach((pt) => {
+            samples.forEach((s) => {
+              const d = dist3(s.x, s.y, s.z, pt.x, pt.y, pt.z);
+              const allowed = Boolean(
+                job && pt.kind === "term" && pt.job === job.id && (
+                  (!job.aDone && pt.end === "a") || (job.aDone && !job.bDone && pt.end === "b")
+                )
+              );
+              if (d < best.dist) best = { dist: d, point: pt, sample: s, allowed };
+            });
+          });
+          GROUNDS.forEach((g) => {
+            samples.forEach((s) => {
+              const d = dist3(s.x, s.y, s.z, g.x, g.y, g.z);
+              if (d < best.dist) best = { dist: d, point: { ...g, kind: "ground" }, sample: s, allowed: false };
+            });
+          });
+          return best;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(1, 4.5),
+              vy: randRange(0.6, 3.8),
+              vz: Math.sin(a) * randRange(0.6, 2.4),
+              life: randRange(0.2, 0.65),
+              kind,
+              size: randRange(0.04, 0.1),
+            });
+          }
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "clamp") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(140, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "snap") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(660, now);
+              osc.frequency.exponentialRampToValueAtTime(990, now + 0.12);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "crackle") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(180 + Math.random() * 80, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.07);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+              osc.start(now); osc.stop(now + 0.09);
+            } else if (kind === "arc") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.22);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            } else if (kind === "fail") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(32, now + 0.26);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.29);
+            } else if (kind === "clear") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(1040, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.tip = { x: 0.15, y: 4.28, z: -2.35 };
+          state.sway = 0;
+          state.clearance = 1.4;
+          state.arc = 0;
+          state.glow = 0;
+          state.particles = [];
+          state.sparks = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "점퍼 1본 · A측";
+          state.messageTime = 1.1;
+          state.failReason = "";
+          input.pointer = false;
+          input.hold = false;
+          resetJobs();
+          reseed((Date.now() ^ 0xc0ffee) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.2 : 0.8;
+          playSfx(reason === "arc" ? "arc" : "fail");
+          burst(state.tip.x, state.tip.y, state.tip.z, 22, "spark");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function applyStick(dt, params) {
+          const speed = 2.35;
+          if (input.left) state.tip.x -= speed * dt;
+          if (input.right) state.tip.x += speed * dt;
+          if (input.up) state.tip.y += speed * dt;
+          if (input.down) state.tip.y -= speed * dt;
+          state.sway = Math.sin(state.elapsed * (1.1 + params.phase * 0.25)) * params.sway;
+          const reach = dist3(state.tip.x, state.tip.y, state.tip.z, SHOULDER.x, SHOULDER.y, SHOULDER.z);
+          const extraSway = state.sway * (0.35 + reach * 0.08);
+          state.tip.x = clamp(state.tip.x + extraSway * dt * 2.2, -4.6, 4.6);
+          state.tip.y = clamp(state.tip.y, 2.7, 6.4);
+          state.tip.z = clamp(state.tip.z, -6.35, -1.4);
+        }
+
+        function updateClearance(dt, params) {
+          const near = nearestClearance(params);
+          const penalty = stickAnglePenalty(params);
+          const envelope = Math.max(0.18, params.envelope - penalty * 0.16);
+          state.clearance = near.dist;
+          const danger = !near.allowed && near.dist < envelope;
+          if (danger) {
+            state.glow = 1;
+            state.arc += dt * (envelope - near.dist) * 2.4;
+            if (near.point && near.point.kind === "ground" && near.dist < 0.34) {
+              if (state.elapsed > 5) failStage("grounded");
+              return;
+            }
+            if (state.arc > 0.28) {
+              state.message = "아크 전조";
+              state.messageTime = 0.35;
+              if (Math.floor(state.elapsed * 8) !== Math.floor((state.elapsed - dt) * 8)) {
+                playSfx("crackle");
+                if (near.sample) {
+                  state.sparks.push({
+                    x: near.sample.x, y: near.sample.y, z: near.sample.z,
+                    tx: near.point.x, ty: near.point.y, tz: near.point.z, life: 0.12,
+                  });
+                }
+              }
+            }
+            if (state.elapsed > 5 && state.arc > 0.85) failStage("arc");
+          } else {
+            state.arc = Math.max(0, state.arc - dt * 0.7);
+            state.glow = Math.max(0, state.glow - dt * 2.4);
+          }
+        }
+
+        function updateClamp(dt, params) {
+          const holding = input.hold || input.pointer;
+          const job = currentJob();
+          if (!job || !holding) {
+            state.clampProg = Math.max(0, state.clampProg - dt * 1.1);
+            return;
+          }
+          const target = !job.aDone ? job.a : job.b;
+          const tag = !job.aDone ? "a" : "b";
+          const d = dist3(state.tip.x, state.tip.y, state.tip.z, target.x, target.y, target.z);
+          if (d > 0.42) {
+            state.clampProg = Math.max(0, state.clampProg - dt * 0.8);
+            return;
+          }
+          state.clampOn = tag;
+          state.clampProg += dt;
+          if (Math.floor(state.elapsed * 6) !== Math.floor((state.elapsed - dt) * 6)) playSfx("clamp");
+          if (state.clampProg >= params.clampNeed) {
+            if (tag === "a") {
+              job.aDone = true;
+              state.clampProg = 0;
+              state.message = "A측 체결 · B측으로";
+              state.messageTime = 0.9;
+              burst(target.x, target.y, target.z, 10, "gold");
+              playSfx("snap");
+            } else {
+              job.bDone = true;
+              job.done = true;
+              state.connected += 1;
+              state.clampProg = 0;
+              state.clampOn = "none";
+              burst(target.x, target.y, target.z, 16, "gold");
+              playSfx("snap");
+              state.message = `점퍼 ${state.connected}/${GOAL}`;
+              state.messageTime = 0.9;
+              if (state.connected >= GOAL) clearStage();
+              else state.message = `점퍼 ${state.connected}/${GOAL} · 다음`;
+            }
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 3.8 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          state.sparks.forEach((s) => { s.life -= dt; });
+          state.sparks = state.sparks.filter((s) => s.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          applyStick(dt, params);
+          updateClearance(dt, params);
+          if (state.mode !== "running") return;
+          updateClamp(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `점퍼 ${state.connected} / ${GOAL} · 이격 ${state.clearance.toFixed(2)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 점퍼 ${state.connected}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x101418, 1);
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x101418);
+          scene.fog = new THREE.Fog(0x101418, 10, 42);
+          const camera = new THREE.PerspectiveCamera(58, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(0.55, 3.7, 5.6);
+
+          scene.add(new THREE.AmbientLight(0x2a3038, 0.5));
+          scene.add(new THREE.HemisphereLight(0xf4c56d, 0x101418, 0.32));
+          const sun = new THREE.DirectionalLight(0xfff4dc, 0.55);
+          sun.position.set(-6, 12, 4);
+          scene.add(sun);
+          const liveLight = new THREE.PointLight(0xf4c56d, 1.05, 18);
+          liveLight.position.set(0, 5.3, -5.2);
+          scene.add(liveLight);
+
+          const box = new THREE.BoxGeometry(1, 1, 1);
+          const cyl = new THREE.CylinderGeometry(1, 1, 1, 10);
+          const wood = new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 0.82, metalness: 0.08 });
+          const steel = new THREE.MeshStandardMaterial({ color: 0x8a9098, roughness: 0.35, metalness: 0.72 });
+          const dark = new THREE.MeshStandardMaterial({ color: 0x2a3036, roughness: 0.6, metalness: 0.4 });
+          const porcelain = new THREE.MeshStandardMaterial({ color: 0xf4efe6, roughness: 0.28, metalness: 0.12 });
+          const orange = new THREE.MeshStandardMaterial({ color: 0xc45a20, roughness: 0.5, metalness: 0.2 });
+          const stickMat = new THREE.MeshStandardMaterial({
+            color: 0xf4c56d, roughness: 0.42, metalness: 0.25, emissive: 0x3a2a10, emissiveIntensity: 0.2,
+          });
+          const suitSafe = new THREE.MeshStandardMaterial({ color: 0x3a4860, roughness: 0.7, metalness: 0.1 });
+          const rubber = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9, metalness: 0.05 });
+          const liveMat = new THREE.MeshStandardMaterial({
+            color: 0xf4c56d, roughness: 0.35, metalness: 0.55, emissive: 0xffb14a, emissiveIntensity: 0.35,
+          });
+          const deadMat = new THREE.MeshStandardMaterial({ color: 0x4a5058, roughness: 0.5, metalness: 0.4 });
+
+          const ground = new THREE.Mesh(new THREE.BoxGeometry(40, 0.4, 30), new THREE.MeshStandardMaterial({
+            color: 0x1a2228, roughness: 0.92, metalness: 0.06,
+          }));
+          ground.position.y = -0.2;
+          scene.add(ground);
+
+          const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.34, 12.4, 12), wood);
+          pole.position.set(0, 6.1, -6.2);
+          scene.add(pole);
+          const cross = new THREE.Mesh(new THREE.BoxGeometry(10.4, 0.22, 0.28), wood);
+          cross.position.set(0, 5.35, -6.15);
+          scene.add(cross);
+          const brace = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.4, 0.12), steel);
+          brace.position.set(0, 4.6, -6.05);
+          scene.add(brace);
+
+          const insulators = [];
+          [-4.4, -2.45, -0.5, 1.4, 3.3, 4.5].forEach((x) => {
+            const stack = new THREE.Group();
+            for (let i = 0; i < 3; i += 1) {
+              const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.18 - i * 0.02, 0.2 - i * 0.02, 0.1, 10), porcelain);
+              disc.position.y = -i * 0.14;
+              stack.add(disc);
+            }
+            stack.position.set(x, 5.05, -6.05);
+            scene.add(stack);
+            insulators.push(stack);
+          });
+
+          const wireGeo = new THREE.CylinderGeometry(0.045, 0.045, 1, 8);
+          const wires = [];
+          function addWire(x0, x1, y, z, mat) {
+            const mesh = new THREE.Mesh(wireGeo, mat);
+            mesh.position.set((x0 + x1) / 2, y, z);
+            mesh.scale.y = Math.abs(x1 - x0);
+            mesh.rotation.z = Math.PI / 2;
+            scene.add(mesh);
+            wires.push(mesh);
+            return mesh;
+          }
+          addWire(-8, -3.55, 5.15, -6.05, liveMat);
+          addWire(-1.35, -0.55, 5.15, -6.05, deadMat);
+          addWire(1.55, 2.0, 5.15, -6.05, liveMat);
+          addWire(4.05, 8, 5.15, -6.05, liveMat);
+          addWire(-8, 8, 4.55, -6.05, liveMat);
+
+          const truck = new THREE.Group();
+          const chassis = new THREE.Mesh(box, orange);
+          chassis.scale.set(2.2, 0.7, 4.8);
+          chassis.position.set(0, 0.7, 3.4);
+          truck.add(chassis);
+          const cab = new THREE.Mesh(box, orange);
+          cab.scale.set(2.1, 1.3, 1.8);
+          cab.position.set(0, 1.55, 5.2);
+          truck.add(cab);
+          const boom = new THREE.Mesh(box, steel);
+          boom.scale.set(0.28, 0.22, 4.2);
+          boom.position.set(0, 2.4, 1.6);
+          boom.rotation.x = -0.32;
+          truck.add(boom);
+          const bucket = new THREE.Mesh(box, orange);
+          bucket.scale.set(1.15, 0.85, 1.15);
+          bucket.position.set(0, 2.85, 2.55);
+          truck.add(bucket);
+          [-0.9, 0.9].forEach((x) => {
+            [2.1, 4.4].forEach((z) => {
+              const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.28, 10), rubber);
+              wheel.rotation.z = Math.PI / 2;
+              wheel.position.set(x, 0.38, z);
+              truck.add(wheel);
+            });
+          });
+          scene.add(truck);
+
+          const worker = new THREE.Group();
+          const torso = new THREE.Mesh(cyl, suitSafe);
+          torso.scale.set(0.22, 0.55, 0.2);
+          torso.position.set(SHOULDER.x - 0.12, SHOULDER.y - 0.15, SHOULDER.z + 0.15);
+          worker.add(torso);
+          const helm = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 10), orange);
+          helm.position.set(SHOULDER.x - 0.12, SHOULDER.y + 0.28, SHOULDER.z + 0.18);
+          worker.add(helm);
+          scene.add(worker);
+
+          const stick = new THREE.Group();
+          const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 1, 8), stickMat);
+          stick.add(shaft);
+          const clampHead = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.22), steel);
+          clampHead.position.y = 0.52;
+          stick.add(clampHead);
+          const glow = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 10), new THREE.MeshBasicMaterial({
+            color: 0xf4c56d, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending,
+          }));
+          glow.position.y = 0.52;
+          stick.add(glow);
+          scene.add(stick);
+
+          const termMeshes = [];
+          JOBS.forEach((job) => {
+            ["a", "b"].forEach((end) => {
+              const pt = job[end];
+              const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 10), liveMat);
+              mesh.position.set(pt.x, pt.y, pt.z);
+              scene.add(mesh);
+              termMeshes.push({ mesh, job: job, end });
+            });
+          });
+
+          const jumperLines = [];
+          for (let i = 0; i < GOAL; i += 1) {
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+            const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xf4c56d }));
+            line.visible = false;
+            scene.add(line);
+            jumperLines.push(line);
+          }
+
+          const trees = [];
+          [-10, 9.5].forEach((x, i) => {
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 3.2, 8), wood);
+            trunk.position.set(x, 1.6, -2 + i);
+            scene.add(trunk);
+            const leaves = new THREE.Mesh(new THREE.SphereGeometry(1.3, 10, 8), new THREE.MeshStandardMaterial({
+              color: 0x1c3a28, roughness: 0.88, metalness: 0.04,
+            }));
+            leaves.position.set(x, 3.4, -2 + i);
+            scene.add(leaves);
+            trees.push(trunk);
+          });
+          const house = new THREE.Mesh(box, dark);
+          house.scale.set(3.4, 2.6, 3.2);
+          house.position.set(-8.4, 1.3, 6.2);
+          scene.add(house);
+          const skyWire = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 18, 6), steel);
+          skyWire.rotation.z = Math.PI / 2;
+          skyWire.position.set(0, 9.4, -8.5);
+          scene.add(skyWire);
+          const transformer = new THREE.Mesh(box, dark);
+          transformer.scale.set(0.9, 1.15, 0.7);
+          transformer.position.set(1.15, 4.55, -5.55);
+          scene.add(transformer);
+          const bushing = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, 0.55, 8), porcelain);
+          bushing.position.set(1.15, 5.25, -5.55);
+          scene.add(bushing);
+          const guy = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 8.4, 6), steel);
+          guy.position.set(-3.4, 3.2, -4.1);
+          guy.rotation.z = 0.55;
+          guy.rotation.x = 0.18;
+          scene.add(guy);
+          const streetLamp = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, 5.2, 8), steel);
+          streetLamp.position.set(5.6, 2.6, 1.4);
+          scene.add(streetLamp);
+          const lampHead = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), new THREE.MeshStandardMaterial({
+            color: 0xfff4dc, roughness: 0.35, metalness: 0.2, emissive: 0xf4c56d, emissiveIntensity: 0.35,
+          }));
+          lampHead.position.set(5.6, 5.25, 1.4);
+          scene.add(lampHead);
+          const cones = [-1.8, 1.6, 3.4].map((x, idx) => {
+            const cone = new THREE.Mesh(
+              new THREE.ConeGeometry(0.16, 0.48, 8),
+              new THREE.MeshStandardMaterial({ color: 0xf4c56d, roughness: 0.55, metalness: 0.12 })
+            );
+            cone.position.set(x, 0.28, 1.1 + idx * 0.15);
+            scene.add(cone);
+            return cone;
+          });
+          const nightMoon = new THREE.Mesh(new THREE.SphereGeometry(1.15, 12, 12), new THREE.MeshBasicMaterial({ color: 0xfff4dc }));
+          nightMoon.position.set(-14, 12.5, -16);
+          scene.add(nightMoon);
+
+          const particleMeshes = [];
+          const sparkMeshes = [];
+          const pgeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const pmat = new THREE.MeshBasicMaterial({ color: 0xf4c56d, transparent: true, opacity: 0.8, depthWrite: false });
+          for (let i = 0; i < 32; i += 1) {
+            const m = new THREE.Mesh(pgeo, pmat.clone());
+            m.visible = false;
+            scene.add(m);
+            particleMeshes.push(m);
+          }
+
+          return {
+            renderer, scene, camera, liveLight, stick, shaft, glow, worker,
+            termMeshes, jumperLines, particleMeshes, wires,
+            look: new THREE.Vector3(), proj: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0),
+            dir: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes(params) {
+          if (!webgl) return;
+          const dx = state.tip.x - SHOULDER.x;
+          const dy = state.tip.y - SHOULDER.y;
+          const dz = state.tip.z - SHOULDER.z;
+          const len = Math.hypot(dx, dy, dz) || 1;
+          webgl.stick.position.set(
+            (SHOULDER.x + state.tip.x) / 2,
+            (SHOULDER.y + state.tip.y) / 2,
+            (SHOULDER.z + state.tip.z) / 2
+          );
+          webgl.shaft.scale.y = len;
+          webgl.look.set(state.tip.x, state.tip.y, state.tip.z);
+          webgl.stick.lookAt(webgl.look);
+          webgl.stick.rotateX(Math.PI / 2);
+          webgl.glow.material.opacity = clamp(state.glow * 0.7 + state.arc * 0.5, 0, 0.9);
+          webgl.glow.scale.setScalar(1 + state.arc * 1.8);
+          webgl.liveLight.intensity = 0.85 + state.arc * 1.4 + Math.sin(state.elapsed * 8) * 0.1;
+
+          webgl.termMeshes.forEach((entry, index) => {
+            const job = state.jobs[Math.floor(index / 2)];
+            if (!job) return;
+            const done = entry.end === "a" ? job.aDone : job.bDone;
+            entry.mesh.material.emissiveIntensity = done ? 0.15 : 0.45 + Math.sin(state.elapsed * 5 + index) * 0.12;
+            entry.mesh.scale.setScalar(done ? 0.85 : 1 + (state.clampOn === entry.end && currentJob() === job ? 0.2 : 0));
+          });
+          webgl.jumperLines.forEach((line, i) => {
+            const job = state.jobs[i];
+            if (!job || !job.done) { line.visible = false; return; }
+            line.visible = true;
+            const pos = line.geometry.attributes.position.array;
+            pos[0] = job.a.x; pos[1] = job.a.y; pos[2] = job.a.z;
+            pos[3] = job.b.x; pos[4] = job.b.y - 0.15; pos[5] = job.b.z + 0.05;
+            line.geometry.attributes.position.needsUpdate = true;
+          });
+          webgl.particleMeshes.forEach((mesh, i) => {
+            const p = state.particles[i];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.opacity = clamp(p.life * 1.8, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          webgl.camera.position.set(0.55 + state.sway * 0.15 + shakeX, 3.7 + shakeY, 5.6);
+          webgl.camera.lookAt(state.tip.x * 0.35, 4.9, -6.0);
+          syncMeshes(difficultyAt(state.elapsed));
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return { x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W, y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H, visible: webgl.proj.z < 1 };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.5 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#1a242c");
+          sky.addColorStop(1, "#101418");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#1a2228";
+          ctx.fillRect(0, VIEW_H * 0.72, VIEW_W, VIEW_H * 0.28);
+          const pole = projectToScreen(0, 6, -6.2);
+          const poleBase = projectToScreen(0, 0, -6.2);
+          ctx.fillStyle = "#5a4632";
+          ctx.fillRect(pole.x - 8, pole.y, 16, poleBase.y - pole.y);
+          ctx.fillStyle = "#5a4632";
+          const c0 = projectToScreen(-5, 5.35, -6.15);
+          const c1 = projectToScreen(5, 5.35, -6.15);
+          ctx.fillRect(c0.x, c0.y - 4, c1.x - c0.x, 8);
+          ctx.strokeStyle = COLORS.accent;
+          ctx.lineWidth = 3;
+          const w0 = projectToScreen(-8, 5.15, -6.05);
+          const w1 = projectToScreen(8, 5.15, -6.05);
+          ctx.beginPath();
+          ctx.moveTo(w0.x, w0.y);
+          ctx.lineTo(w1.x, w1.y);
+          ctx.stroke();
+          state.jobs.forEach((job) => {
+            const a = projectToScreen(job.a.x, job.a.y, job.a.z);
+            const b = projectToScreen(job.b.x, job.b.y, job.b.z);
+            ctx.fillStyle = job.aDone ? "#8aa0a8" : COLORS.accent;
+            ctx.beginPath(); ctx.arc(a.x, a.y, 6, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = job.bDone ? "#8aa0a8" : COLORS.accent;
+            ctx.beginPath(); ctx.arc(b.x, b.y, 6, 0, Math.PI * 2); ctx.fill();
+            if (job.done) {
+              ctx.strokeStyle = COLORS.accent;
+              ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+            }
+          });
+          const sh = projectToScreen(SHOULDER.x, SHOULDER.y, SHOULDER.z);
+          const tp = projectToScreen(state.tip.x, state.tip.y, state.tip.z);
+          ctx.strokeStyle = state.glow > 0.3 ? COLORS.danger : COLORS.accent;
+          ctx.lineWidth = 4;
+          ctx.beginPath(); ctx.moveTo(sh.x, sh.y); ctx.lineTo(tp.x, tp.y); ctx.stroke();
+          ctx.fillStyle = COLORS.ink;
+          ctx.beginPath(); ctx.arc(tp.x, tp.y, 5, 0, Math.PI * 2); ctx.fill();
+          const bucket = projectToScreen(0, 2.9, 2.55);
+          ctx.fillStyle = "#c45a20";
+          ctx.fillRect(bucket.x - 22, bucket.y - 16, 44, 32);
+          state.sparks.forEach((s) => {
+            const a = projectToScreen(s.x, s.y, s.z);
+            const b = projectToScreen(s.tx, s.ty, s.tz);
+            ctx.strokeStyle = "rgba(255,177,74,0.85)";
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+          });
+          ctx.fillStyle = "rgba(255,244,220,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.connected} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.connected / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `이격 ${state.clearance.toFixed(2)} · 아크 ${Math.round(state.arc * 100)}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const job = currentJob();
+          if (job) {
+            const target = !job.aDone ? job.a : job.b;
+            const p = projectToScreen(target.x, target.y, target.z);
+            hud.save();
+            hud.strokeStyle = COLORS.accent;
+            hud.setLineDash([4, 4]);
+            hud.beginPath(); hud.arc(p.x, p.y, 16, 0, Math.PI * 2); hud.stroke();
+            hud.setLineDash([]);
+            hud.fillStyle = COLORS.accent;
+            hud.font = "700 11px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText(!job.aDone ? "클램프 A" : "클램프 B", p.x, p.y - 22);
+            if (state.clampProg > 0) {
+              hud.beginPath();
+              hud.arc(p.x, p.y, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(state.clampProg / 0.7, 0, 1));
+              hud.stroke();
+            }
+            hud.restore();
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.includes("아크") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.glow > 0) {
+            hud.fillStyle = `rgba(255,107,122,${state.glow * 0.1 + state.arc * 0.08})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) { game2d.clearRect(0, 0, VIEW_W, VIEW_H); drawWorld2D(game2d); }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const job = currentJob();
+          return JSON.stringify({
+            coordinate_system: "world units; bucket shoulder origin; crossarm at -z",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: state.connected,
+            clearance: Number(state.clearance.toFixed(3)),
+            arc: Number(state.arc.toFixed(3)),
+            tip: { x: Number(state.tip.x.toFixed(2)), y: Number(state.tip.y.toFixed(2)), z: Number(state.tip.z.toFixed(2)) },
+            job: job ? { id: job.id, aDone: job.aDone, bDone: job.bDone } : null,
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.pointer = true;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.baseX = state.tip.x;
+          input.baseY = state.tip.y;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.pointer || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          state.tip.x = clamp(input.baseX + dx * 0.008, -4.6, 4.6);
+          state.tip.y = clamp(input.baseY - dy * 0.007, 2.7, 6.4);
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = (event.clientX - rect.left) / Math.max(1, rect.width);
+          state.tip.z = clamp(-1.6 - nx * 0.2 - (1 - (event.clientY - rect.top) / Math.max(1, rect.height)) * 3.8, -6.35, -1.4);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.pointer = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          input.pointer = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            input.hold = true;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") { input.hold = false; return; }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator, genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.connected = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.hold = false; input.pointer = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

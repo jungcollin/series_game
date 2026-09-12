@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>진공종</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #0c1018; --accent: #b8f0ff; --accent-ink: #0c1018; --danger: #ff6b7a; --ink: #eefaff; --muted: rgba(238,250,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">진공종. 유리종이 깨지지 않게 진공을 뽑고 시료를 말리세요. 홀드로 펌프, 탭으로 벤트. 목표 진공에서 30초를 유지하면 클리어. 유리가 금가거나 펌프가 역류하면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 길게 눌러 펌프하고 짧게 탭해 벤트합니다.</p>
+    <main class="stage" aria-label="진공종 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="진공종" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">진공</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">48.0</p>
+          <p class="hud-sub" id="hud-sub">응력 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Vacuum Bell</p>
+          <h1>진공종</h1>
+          <p class="brief-lead">유리종이 깨지지 않게 진공을 뽑고 시료를 말리세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>홀드로 펌프, 탭으로 벤트</span></li>
+            <li><strong>클리어</strong><span>목표 진공에서 30초를 유지하면 클리어</span></li>
+            <li><strong>실패</strong><span>유리가 금가거나 펌프가 역류하면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">진공 실패</p>
+          <h2>종이 버티지 못했다</h2>
+          <p class="brief-lead" id="fail-detail">유리가 금가거나 펌프가 역류하면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">건조 완료</p>
+          <h2>시료 안정</h2>
+          <p class="brief-lead">목표 진공을 유지해 얇은 시료를 말렸습니다.</p>
+          <p class="hud-sub" id="clear-stat">목표 진공에서 30초를 유지하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 48;
+        const HOLD_NEED = 30;
+        const VAC_LO = 0.74;
+        const VAC_HI = 0.9;
+        const GRACE = 5.2;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "vacuum-jar",
+          title: "진공종",
+          description: "유리종이 깨지지 않게 진공을 뽑고 시료를 말리세요.",
+          creator: "collin",
+          genre: "3D vacuum pump",
+          clearCondition: "목표 진공에서 30초를 유지하면 클리어",
+          failCondition: "유리가 금가거나 펌프가 역류하면 실패",
+          controls: "홀드로 펌프, 탭으로 벤트",
+        };
+        const COLORS = {
+          bg: "#0c1018",
+          ink: "#eefaff",
+          accent: "#b8f0ff",
+          brass: "#c4a056",
+          danger: "#ff6b7a",
+          glass: "#c8e8f4",
+          oil: "#c4a056",
+        };
+        const FAIL_COPY = {
+          glass_craze: "급격한 차압으로 유리종에 금이 갔습니다",
+          pump_backstream: "벤트 중 펌프 오일이 역류했습니다",
+          time_limit: "제한 시간 48초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const WAFER_LAYOUT = [
+          { x: -0.12, z: 0.08, r: 0.11, tint: 0xb8d0e8 },
+          { x: 0.14, z: -0.06, r: 0.09, tint: 0xd0e8f4 },
+          { x: 0.02, z: 0.16, r: 0.07, tint: 0x9ab8d0 },
+        ];
+        const GAUGE_TICKS = [-0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9];
+        const HOSE_POINTS = [
+          [0.55, 0.78, 0.05],
+          [0.85, 0.72, 0.15],
+          [1.15, 0.7, 0.35],
+          [1.45, 0.78, 0.55],
+        ];
+        const CAM2D = {
+          eye: { x: 0.35, y: 1.55, z: 3.5 },
+          right: { x: 0.997, y: 0, z: -0.08 },
+          up: { x: 0.02, y: 0.97, z: 0.24 },
+          fwd: { x: -0.08, y: 0.24, z: -0.967 },
+          focal: 530,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          vacuum: 0.08,
+          stress: 0,
+          holdTime: 0,
+          outBand: 0,
+          backstream: 0,
+          oilTemp: 0.2,
+          flywheel: 0,
+          pumpOn: false,
+          ventFlash: 0,
+          dry: 0,
+          particles: [],
+          cracks: [],
+          bubbles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          lastPumpSfx: 0,
+          manometer: 0,
+          jarPulse: 1,
+        };
+        const input = {
+          holding: false, dragging: false, pointerId: null,
+          downAt: 0, downX: 0, downY: 0, moved: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            pumpRate: 0.078 + difficulty * 0.012,
+            stressGain: 0.92 + difficulty * 0.55 + (phase >= 2 ? 0.2 : 0),
+            leak: 0.01 + difficulty * 0.008,
+            ventSize: 0.05 + (phase >= 3 ? 0.012 : 0),
+            backGain: 0.38 + difficulty * 0.18,
+            thin: 0.7 + difficulty * 0.35,
+          };
+        }
+
+        function inWindow() {
+          return state.vacuum >= VAC_LO && state.vacuum <= VAC_HI;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(7, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const a = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(0.5, 2.8);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * lift,
+              vy: randRange(0.3, 2.4),
+              vz: Math.sin(a) * lift,
+              life: randRange(0.25, 0.75),
+              kind,
+              size: randRange(0.02, 0.08),
+            });
+          }
+          if (state.particles.length > 80) state.particles.splice(0, state.particles.length - 80);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "pump") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(55 + state.vacuum * 40, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.07);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+              osc.start(now); osc.stop(now + 0.09);
+            } else if (kind === "vent") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(340, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "crack") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(720, now);
+              osc.frequency.exponentialRampToValueAtTime(140, now + 0.12);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "done") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(960, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            } else if (kind === "boom") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(72, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.vacuum = 0.08;
+          state.stress = 0;
+          state.holdTime = 0;
+          state.outBand = 0;
+          state.backstream = 0;
+          state.oilTemp = 0.2;
+          state.flywheel = 0;
+          state.pumpOn = false;
+          state.ventFlash = 0;
+          state.dry = 0;
+          state.particles = [];
+          state.cracks = [];
+          state.bubbles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "천천히 펌프하세요";
+          state.messageTime = 1.2;
+          state.failReason = "";
+          state.lastPumpSfx = 0;
+          state.manometer = 0.08;
+          state.jarPulse = 1;
+          input.holding = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("done");
+          state.flash = 0.7;
+          burst(0, 1.2, 0.1, 22, "ice");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.2 : 0.82;
+          playSfx(reason === "glass_craze" ? "crack" : "boom");
+          if (reason === "glass_craze") {
+            for (let i = 0; i < 5; i += 1) {
+              state.cracks.push({ a: randRange(0, Math.PI * 2), len: randRange(0.3, 0.8) });
+            }
+          }
+          burst(0, 1.15, 0.1, 20, reason === "pump_backstream" ? "oil" : "glass");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function ventPulse(params) {
+          if (state.mode !== "running") return;
+          const prev = state.vacuum;
+          state.vacuum = clamp(state.vacuum - params.ventSize, 0, 1);
+          state.stress = Math.max(0, state.stress - 0.08);
+          state.ventFlash = 0.22;
+          playSfx("vent");
+          burst(0.42, 0.95, 0.35, 8, "vent");
+          if (state.pumpOn && prev > 0.48) {
+            state.backstream = clamp(state.backstream + params.backGain, 0, 1.2);
+            state.message = "역류 위험";
+            state.messageTime = 0.7;
+            if (state.elapsed > GRACE && state.backstream >= 1) failStage("pump_backstream");
+          } else {
+            state.backstream = Math.max(0, state.backstream - 0.12);
+          }
+        }
+
+        function updatePump(dt, params) {
+          state.pumpOn = input.holding;
+          let dVac = 0;
+          if (state.pumpOn) {
+            const rate = params.pumpRate * (1 - state.vacuum * 0.22);
+            dVac = rate;
+            state.vacuum = clamp(state.vacuum + rate * dt, 0, 1);
+            state.flywheel += dt * (8 + state.vacuum * 6);
+            state.oilTemp = clamp(state.oilTemp + dt * (0.05 + state.vacuum * 0.04), 0, 1);
+            const dpStress = (rate * rate) * 22 + state.vacuum * 0.05 * params.thin;
+            state.stress = clamp(state.stress + dpStress * params.stressGain * dt, 0, 1.2);
+            if (state.elapsed - state.lastPumpSfx > 0.09) {
+              state.lastPumpSfx = state.elapsed;
+              playSfx("pump");
+            }
+            if (random() < dt * 3) {
+              state.bubbles.push({
+                x: 1.55 + randRange(-0.05, 0.05),
+                y: 0.55,
+                z: 0.62,
+                vy: randRange(0.15, 0.4),
+                life: randRange(0.4, 0.9),
+              });
+            }
+          } else {
+            dVac = -params.leak;
+            state.vacuum = clamp(state.vacuum - params.leak * dt, 0, 1);
+            state.stress = Math.max(0, state.stress - dt * 0.09);
+            state.oilTemp = Math.max(0.12, state.oilTemp - dt * 0.035);
+            state.backstream = Math.max(0, state.backstream - dt * 0.12);
+          }
+          state.manometer = lerp(state.manometer, state.vacuum, clamp(dt * 5, 0, 1));
+          state.jarPulse = lerp(state.jarPulse, 1 - state.vacuum * 0.04 - state.stress * 0.03, clamp(dt * 4, 0, 1));
+          if (inWindow()) {
+            state.outBand = 0;
+            state.holdTime += dt;
+            state.dry = clamp(state.holdTime / HOLD_NEED, 0, 1);
+            if (state.holdTime >= HOLD_NEED) clearStage();
+          } else {
+            state.outBand += dt;
+            if (state.outBand > 0.4) state.holdTime = Math.max(0, state.holdTime - dt * 1.8);
+          }
+          if (state.elapsed > GRACE && state.stress >= 1) failStage("glass_craze");
+          if (state.stress > 0.72 && Math.floor(state.elapsed * 2) !== Math.floor((state.elapsed - dt) * 2)) {
+            state.message = "유리 응력";
+            state.messageTime = 0.45;
+            state.shake = Math.max(state.shake, 0.2);
+            if (state.cracks.length < 3 && random() < 0.35) {
+              state.cracks.push({ a: randRange(0, Math.PI * 2), len: randRange(0.12, 0.28) });
+              playSfx("crack");
+            }
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 4.8 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+          state.bubbles.forEach((bubble) => {
+            bubble.y += bubble.vy * dt;
+            bubble.life -= dt;
+          });
+          state.bubbles = state.bubbles.filter((bubble) => bubble.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.ventFlash = Math.max(0, state.ventFlash - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updatePump(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `진공 ${Math.round(state.vacuum * 100)}% · 유지 ${state.holdTime.toFixed(1)}s`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 응력 ${Math.round(state.stress * 100)}%`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x0c1018, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x0c1018);
+          scene.fog = new THREE.Fog(0x0c1018, 6, 15);
+
+          const camera = new THREE.PerspectiveCamera(40, VIEW_W / VIEW_H, 0.08, 50);
+          camera.position.set(0.4, 1.55, 3.5);
+          camera.lookAt(0.3, 1.05, 0.2);
+
+          scene.add(new THREE.AmbientLight(0x1a2430, 0.5));
+          scene.add(new THREE.HemisphereLight(0xb8f0ff, 0x101018, 0.3));
+          const key = new THREE.DirectionalLight(0xeefaff, 0.68);
+          key.position.set(3.4, 6.2, 4.2);
+          scene.add(key);
+          const jarLamp = new THREE.PointLight(0xb8f0ff, 0.9, 8);
+          jarLamp.position.set(0, 1.8, 0.8);
+          scene.add(jarLamp);
+          const pumpLamp = new THREE.PointLight(0xc4a056, 0.55, 6);
+          pumpLamp.position.set(1.6, 1.1, 0.9);
+          scene.add(pumpLamp);
+
+          const boxG = new THREE.BoxGeometry(1, 1, 1);
+          const cylG = new THREE.CylinderGeometry(1, 1, 1, 20);
+          const sphG = new THREE.SphereGeometry(1, 22, 16);
+          const torusG = new THREE.TorusGeometry(1, 0.08, 8, 22);
+          const paint = {
+            bench: new THREE.MeshStandardMaterial({ color: 0x2a2422, roughness: 0.86, metalness: 0.08 }),
+            edge: new THREE.MeshStandardMaterial({ color: 0x1a1614, roughness: 0.7, metalness: 0.1 }),
+            steel: new THREE.MeshStandardMaterial({ color: 0x8aa0b0, roughness: 0.32, metalness: 0.7 }),
+            dark: new THREE.MeshStandardMaterial({ color: 0x222830, roughness: 0.5, metalness: 0.35 }),
+            brass: new THREE.MeshStandardMaterial({ color: 0xc4a056, roughness: 0.36, metalness: 0.7, emissive: 0x3a2a10, emissiveIntensity: 0.15 }),
+            glass: new THREE.MeshStandardMaterial({ color: 0xc8e8f4, roughness: 0.08, metalness: 0.15, transparent: true, opacity: 0.22 }),
+            rubber: new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9, metalness: 0.05 }),
+            plate: new THREE.MeshStandardMaterial({ color: 0xd0d6dc, roughness: 0.4, metalness: 0.45 }),
+            oil: new THREE.MeshStandardMaterial({ color: 0xc4a056, roughness: 0.3, metalness: 0.2, transparent: true, opacity: 0.7, emissive: 0xc4a056, emissiveIntensity: 0.2 }),
+            wall: new THREE.MeshStandardMaterial({ color: 0x141820, roughness: 0.92, metalness: 0.04 }),
+            wafer: new THREE.MeshStandardMaterial({ color: 0xb8d0e8, roughness: 0.25, metalness: 0.55, emissive: 0x334455, emissiveIntensity: 0.2 }),
+          };
+
+          const wall = new THREE.Mesh(boxG, paint.wall);
+          wall.scale.set(10, 5, 0.2);
+          wall.position.set(0, 2.2, -2.4);
+          scene.add(wall);
+          const cabinet = new THREE.Mesh(boxG, paint.dark);
+          cabinet.scale.set(1.8, 1.6, 0.5);
+          cabinet.position.set(-2.4, 1.4, -2.05);
+          scene.add(cabinet);
+          const ventGrill = new THREE.Mesh(boxG, paint.steel);
+          ventGrill.scale.set(0.8, 0.4, 0.04);
+          ventGrill.position.set(2.2, 2.3, -2.28);
+          scene.add(ventGrill);
+
+          const bench = new THREE.Mesh(boxG, paint.bench);
+          bench.scale.set(5.2, 0.14, 2.2);
+          bench.position.set(0.2, 0.55, 0.15);
+          scene.add(bench);
+          const apron = new THREE.Mesh(boxG, paint.edge);
+          apron.scale.set(5.2, 0.48, 0.1);
+          apron.position.set(0.2, 0.26, 1.22);
+          scene.add(apron);
+
+          const plate = new THREE.Mesh(cylG, paint.plate);
+          plate.scale.set(0.55, 0.05, 0.55);
+          plate.position.set(0, 0.7, 0.12);
+          scene.add(plate);
+          const gasket = new THREE.Mesh(torusG, paint.rubber);
+          gasket.scale.set(0.5, 0.5, 0.5);
+          gasket.rotation.x = Math.PI / 2;
+          gasket.position.set(0, 0.74, 0.12);
+          scene.add(gasket);
+
+          const jar = new THREE.Group();
+          const dome = new THREE.Mesh(sphG, paint.glass);
+          dome.scale.set(0.52, 0.58, 0.52);
+          dome.position.y = 1.15;
+          jar.add(dome);
+          const rim = new THREE.Mesh(cylG, paint.glass);
+          rim.scale.set(0.5, 0.08, 0.5);
+          rim.position.y = 0.78;
+          jar.add(rim);
+          scene.add(jar);
+
+          const wafers = WAFER_LAYOUT.map((spec) => {
+            const w = new THREE.Mesh(cylG, paint.wafer.clone());
+            w.material.color.setHex(spec.tint);
+            w.scale.set(spec.r, 0.012, spec.r);
+            w.position.set(spec.x, 0.76, spec.z + 0.12);
+            scene.add(w);
+            return w;
+          });
+          const pedestal = new THREE.Mesh(cylG, paint.steel);
+          pedestal.scale.set(0.16, 0.04, 0.16);
+          pedestal.position.set(0, 0.74, 0.12);
+          scene.add(pedestal);
+
+          const pump = new THREE.Group();
+          const pumpBody = new THREE.Mesh(boxG, paint.dark);
+          pumpBody.scale.set(0.7, 0.42, 0.45);
+          pumpBody.position.y = 0.92;
+          pump.add(pumpBody);
+          const beltCover = new THREE.Mesh(cylG, paint.steel);
+          beltCover.scale.set(0.18, 0.12, 0.18);
+          beltCover.rotation.z = Math.PI / 2;
+          beltCover.position.set(-0.4, 0.92, 0);
+          pump.add(beltCover);
+          const fly = new THREE.Mesh(cylG, paint.brass);
+          fly.scale.set(0.2, 0.05, 0.2);
+          fly.rotation.z = Math.PI / 2;
+          fly.position.set(-0.48, 0.92, 0);
+          pump.add(fly);
+          const motor = new THREE.Mesh(cylG, paint.steel);
+          motor.scale.set(0.14, 0.28, 0.14);
+          motor.rotation.z = Math.PI / 2;
+          motor.position.set(-0.72, 0.92, 0);
+          pump.add(motor);
+          const sight = new THREE.Mesh(boxG, paint.glass);
+          sight.scale.set(0.08, 0.16, 0.02);
+          sight.position.set(0.2, 0.88, 0.24);
+          pump.add(sight);
+          const oil = new THREE.Mesh(boxG, paint.oil);
+          oil.scale.set(0.06, 0.1, 0.01);
+          oil.position.set(0.2, 0.84, 0.25);
+          pump.add(oil);
+          const exhaust = new THREE.Mesh(cylG, paint.steel);
+          exhaust.scale.set(0.04, 0.22, 0.04);
+          exhaust.position.set(0.28, 1.18, -0.1);
+          pump.add(exhaust);
+          pump.position.set(1.55, 0, 0.55);
+          scene.add(pump);
+
+          const hoseMeshes = HOSE_POINTS.map((pt, index) => {
+            const seg = new THREE.Mesh(cylG, paint.rubber);
+            seg.scale.set(0.03, 0.22, 0.03);
+            seg.position.set(pt[0], pt[1], pt[2]);
+            if (index < HOSE_POINTS.length - 1) {
+              const nx = HOSE_POINTS[index + 1][0] - pt[0];
+              const ny = HOSE_POINTS[index + 1][1] - pt[1];
+              const nz = HOSE_POINTS[index + 1][2] - pt[2];
+              seg.lookAt(pt[0] + nx, pt[1] + ny, pt[2] + nz);
+              seg.rotateX(Math.PI / 2);
+            }
+            scene.add(seg);
+            return seg;
+          });
+
+          const valve = new THREE.Group();
+          const valveBody = new THREE.Mesh(cylG, paint.brass);
+          valveBody.scale.set(0.06, 0.1, 0.06);
+          valve.add(valveBody);
+          const wheel = new THREE.Mesh(torusG, paint.brass);
+          wheel.scale.set(0.08, 0.08, 0.08);
+          wheel.position.y = 0.1;
+          valve.add(wheel);
+          valve.position.set(0.48, 0.82, 0.32);
+          scene.add(valve);
+
+          const gauge = new THREE.Group();
+          const gaugeFace = new THREE.Mesh(cylG, paint.dark);
+          gaugeFace.scale.set(0.16, 0.04, 0.16);
+          gaugeFace.rotation.x = Math.PI / 2;
+          gauge.add(gaugeFace);
+          const gaugeGlass = new THREE.Mesh(cylG, paint.glass);
+          gaugeGlass.scale.set(0.14, 0.02, 0.14);
+          gaugeGlass.rotation.x = Math.PI / 2;
+          gaugeGlass.position.z = 0.03;
+          gauge.add(gaugeGlass);
+          const needle = new THREE.Mesh(boxG, paint.brass);
+          needle.scale.set(0.01, 0.12, 0.01);
+          needle.position.y = 0.04;
+          gauge.add(needle);
+          GAUGE_TICKS.forEach((a) => {
+            const tick = new THREE.Mesh(boxG, paint.steel);
+            tick.scale.set(0.008, 0.03, 0.006);
+            tick.position.set(Math.sin(a) * 0.12, Math.cos(a) * 0.12, 0.03);
+            tick.rotation.z = -a;
+            gauge.add(tick);
+          });
+          gauge.position.set(-0.85, 1.15, 0.15);
+          scene.add(gauge);
+
+          const clampA = new THREE.Mesh(boxG, paint.steel);
+          clampA.scale.set(0.08, 0.16, 0.04);
+          clampA.position.set(-0.48, 0.82, 0.12);
+          scene.add(clampA);
+          const clampB = new THREE.Mesh(boxG, paint.steel);
+          clampB.scale.set(0.08, 0.16, 0.04);
+          clampB.position.set(0.48, 0.82, -0.05);
+          scene.add(clampB);
+          const notebook = new THREE.Mesh(boxG, new THREE.MeshStandardMaterial({ color: 0xe8f4f8, roughness: 0.9 }));
+          notebook.scale.set(0.5, 0.02, 0.35);
+          notebook.position.set(-1.5, 0.7, 0.7);
+          notebook.rotation.y = 0.3;
+          scene.add(notebook);
+          const trap = new THREE.Mesh(cylG, paint.glass);
+          trap.scale.set(0.08, 0.22, 0.08);
+          trap.position.set(0.85, 0.9, 0.22);
+          scene.add(trap);
+          const trapOil = new THREE.Mesh(cylG, paint.oil);
+          trapOil.scale.set(0.06, 0.08, 0.06);
+          trapOil.position.set(0.85, 0.82, 0.22);
+          scene.add(trapOil);
+          const lampArm = new THREE.Mesh(cylG, paint.dark);
+          lampArm.scale.set(0.025, 0.8, 0.025);
+          lampArm.position.set(-1.6, 1.45, 1.1);
+          scene.add(lampArm);
+          const lampHead = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.18, 10), paint.steel);
+          lampHead.position.set(-1.6, 1.9, 1.1);
+          scene.add(lampHead);
+          const warning = new THREE.Mesh(boxG, new THREE.MeshStandardMaterial({
+            color: 0xc4a056, roughness: 0.6, metalness: 0.1, emissive: 0x3a2a10, emissiveIntensity: 0.25,
+          }));
+          warning.scale.set(0.22, 0.12, 0.01);
+          warning.position.set(1.55, 1.16, 0.78);
+          scene.add(warning);
+          const desiccant = new THREE.Mesh(cylG, paint.glass);
+          desiccant.scale.set(0.12, 0.08, 0.12);
+          desiccant.position.set(-1.15, 0.78, 0.55);
+          scene.add(desiccant);
+          const beads = new THREE.Mesh(sphG, paint.brass);
+          beads.scale.setScalar(0.05);
+          beads.position.set(-1.15, 0.78, 0.55);
+          scene.add(beads);
+          const oilCan = new THREE.Mesh(cylG, paint.dark);
+          oilCan.scale.set(0.08, 0.16, 0.08);
+          oilCan.position.set(2.05, 0.82, 0.85);
+          scene.add(oilCan);
+          const oilSpout = new THREE.Mesh(cylG, paint.steel);
+          oilSpout.scale.set(0.015, 0.1, 0.015);
+          oilSpout.rotation.z = 0.8;
+          oilSpout.position.set(2.12, 0.92, 0.85);
+          scene.add(oilSpout);
+          const clampC = new THREE.Mesh(boxG, paint.steel);
+          clampC.scale.set(0.06, 0.14, 0.04);
+          clampC.position.set(0.0, 0.82, -0.38);
+          scene.add(clampC);
+          const hoseClip = new THREE.Mesh(cylG, paint.brass);
+          hoseClip.scale.set(0.04, 0.04, 0.04);
+          hoseClip.position.set(0.7, 0.78, 0.22);
+          scene.add(hoseClip);
+          const logbook = new THREE.Mesh(boxG, new THREE.MeshStandardMaterial({ color: 0x3a2a22, roughness: 0.85 }));
+          logbook.scale.set(0.32, 0.03, 0.22);
+          logbook.position.set(-1.7, 0.7, 0.15);
+          scene.add(logbook);
+
+          const crackGroup = new THREE.Group();
+          scene.add(crackGroup);
+          const particleGeo = new THREE.SphereGeometry(0.04, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xb8f0ff, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, paint, boxG, cylG, sphG,
+            jar, dome: dome, pump, fly, oil, jarLamp, pumpLamp, needle, valve,
+            wafers, trapOil, gasket, crackGroup, hoseMeshes,
+            particleGeo, particleMat, particleMeshes: [],
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const s = state.jarPulse;
+          webgl.jar.scale.set(s, 1 + (1 - s) * 0.4, s);
+          webgl.dome.material.opacity = 0.16 + state.vacuum * 0.12 + state.stress * 0.1;
+          webgl.dome.material.emissive = webgl.dome.material.emissive || new THREE.Color(0x000000);
+          webgl.fly.rotation.x = state.flywheel;
+          webgl.oil.scale.y = 0.06 + state.oilTemp * 0.08;
+          webgl.oil.position.y = 0.82 + state.oilTemp * 0.02;
+          webgl.oil.material.emissiveIntensity = 0.15 + state.oilTemp * 0.5;
+          webgl.jarLamp.intensity = 0.5 + state.vacuum * 0.7;
+          webgl.pumpLamp.intensity = 0.35 + (state.pumpOn ? 0.5 : 0.1);
+          webgl.needle.rotation.z = -state.manometer * 2.2 + 0.9;
+          webgl.valve.rotation.y = state.ventFlash * 4;
+          webgl.trapOil.material.opacity = 0.35 + state.backstream * 0.5;
+          webgl.wafers.forEach((w, i) => {
+            w.position.y = 0.76 + Math.sin(state.elapsed * 2 + i) * 0.002 * (1 - state.vacuum);
+            w.material.emissiveIntensity = 0.15 + state.dry * 0.4;
+          });
+          while (webgl.crackGroup.children.length < state.cracks.length) {
+            const line = new THREE.Mesh(webgl.boxG, new THREE.MeshStandardMaterial({
+              color: 0xeefaff, roughness: 0.3, metalness: 0.1, emissive: 0xb8f0ff, emissiveIntensity: 0.6,
+            }));
+            line.scale.set(0.004, 0.35, 0.004);
+            webgl.crackGroup.add(line);
+          }
+          webgl.crackGroup.children.forEach((mesh, index) => {
+            const crack = state.cracks[index];
+            if (!crack) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(Math.cos(crack.a) * 0.35, 1.15, 0.12 + Math.sin(crack.a) * 0.35);
+            mesh.rotation.z = crack.a;
+            mesh.scale.y = crack.len;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.04);
+            mesh.material.opacity = clamp(particle.life * 1.6, 0, 1);
+            const hex = particle.kind === "oil" ? 0xc4a056 : particle.kind === "glass" ? 0xeefaff : 0xb8f0ff;
+            mesh.material.color.setHex(hex);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.16 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.12 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.22) * 0.04;
+          webgl.camera.position.set(0.4 + sway + shakeX, 1.55 + shakeY, 3.5);
+          webgl.camera.lookAt(0.3, 1.05, 0.2);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.1, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.5 };
+        }
+
+        function drawWorld2D(ctx) {
+          const bg = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          bg.addColorStop(0, "#141820");
+          bg.addColorStop(1, "#0c1018");
+          ctx.fillStyle = bg;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#2a2422";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H * 0.38);
+          const jar = projectToScreen(0, 1.1, 0.12);
+          ctx.strokeStyle = `rgba(200,232,244,${0.35 + state.vacuum * 0.3})`;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.ellipse(jar.x, jar.y, 70 * state.jarPulse, 95, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = `rgba(184,240,255,${state.vacuum * 0.12})`;
+          ctx.beginPath();
+          ctx.ellipse(jar.x, jar.y, 66 * state.jarPulse, 90, 0, 0, Math.PI * 2);
+          ctx.fill();
+          WAFER_LAYOUT.forEach((spec) => {
+            const p = projectToScreen(spec.x, 0.76, spec.z + 0.12);
+            ctx.fillStyle = `#${spec.tint.toString(16).padStart(6, "0")}`;
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, spec.r * 180, spec.r * 70, 0, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          state.cracks.forEach((crack) => {
+            ctx.strokeStyle = "rgba(238,250,255,0.8)";
+            ctx.beginPath();
+            ctx.moveTo(jar.x, jar.y);
+            ctx.lineTo(jar.x + Math.cos(crack.a) * 70 * crack.len, jar.y + Math.sin(crack.a) * 90 * crack.len);
+            ctx.stroke();
+          });
+          const pump = projectToScreen(1.55, 0.95, 0.55);
+          ctx.fillStyle = "#222830";
+          ctx.fillRect(pump.x - 40, pump.y - 24, 80, 50);
+          ctx.fillStyle = COLORS.brass;
+          ctx.beginPath();
+          ctx.arc(pump.x - 48, pump.y, 14, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = COLORS.oil;
+          ctx.fillRect(pump.x + 10, pump.y, 12, 16 * state.oilTemp);
+          ctx.strokeStyle = "#1a1a1a";
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(jar.x + 50, jar.y + 40);
+          ctx.lineTo(pump.x - 40, pump.y);
+          ctx.stroke();
+          const g = projectToScreen(-0.85, 1.15, 0.15);
+          ctx.strokeStyle = COLORS.accent;
+          ctx.beginPath();
+          ctx.arc(g.x, g.y, 22, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.save();
+          ctx.translate(g.x, g.y);
+          ctx.rotate(-state.manometer * 2.2 + 0.9);
+          ctx.strokeStyle = COLORS.brass;
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(0, -18);
+          ctx.stroke();
+          ctx.restore();
+          ctx.fillStyle = "rgba(238,250,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(state.vacuum * 100)}%`;
+          if (meter) meter.style.width = `${state.vacuum * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `응력 ${Math.round(state.stress * 100)}%`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const params = difficultyAt(state.elapsed);
+          hud.fillStyle = "rgba(238,250,255,0.55)";
+          hud.font = "700 11px Trebuchet MS, sans-serif";
+          hud.textAlign = "left";
+          hud.fillText(`P${params.phase}  유지 ${state.holdTime.toFixed(1)} / ${HOLD_NEED}s  역류 ${Math.round(state.backstream * 100)}%`, 18, 28);
+          const x = VIEW_W * 0.5 - 110;
+          const y = VIEW_H - 50;
+          hud.fillStyle = "rgba(12,16,24,0.45)";
+          hud.fillRect(x, y, 220, 12);
+          hud.fillStyle = COLORS.accent;
+          hud.fillRect(x, y, 220 * state.vacuum, 12);
+          hud.strokeStyle = "rgba(238,250,255,0.8)";
+          hud.strokeRect(x + 220 * VAC_LO, y - 3, 220 * (VAC_HI - VAC_LO), 18);
+          hud.fillStyle = inWindow() ? COLORS.accent : COLORS.danger;
+          hud.font = "700 11px Trebuchet MS, sans-serif";
+          hud.textAlign = "center";
+          hud.fillText(inWindow() ? "목표 대역" : "대역 밖", VIEW_W / 2, y - 8);
+          if (state.stress > 0.55) {
+            hud.fillStyle = COLORS.danger;
+            hud.font = "800 13px Trebuchet MS, sans-serif";
+            hud.fillText("유리 응력", VIEW_W / 2, 88);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.fillStyle = COLORS.ink;
+            hud.font = "900 24px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 116);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(184,240,255,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          hud.textAlign = "left";
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "lab bench; bell jar at origin; pump +x",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            vacuum: Number(state.vacuum.toFixed(3)),
+            stress: Number(state.stress.toFixed(3)),
+            holdTime: Number(state.holdTime.toFixed(2)),
+            backstream: Number(state.backstream.toFixed(3)),
+            oilTemp: Number(state.oilTemp.toFixed(3)),
+            pumpOn: state.pumpOn,
+            inWindow: inWindow(),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.dragging = true;
+          input.downAt = performance.now();
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.moved = false;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          if (Math.hypot(event.clientX - input.downX, event.clientY - input.downY) > 10) input.moved = true;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          const held = performance.now() - input.downAt;
+          input.holding = false;
+          input.dragging = false;
+          if (state.mode === "running" && held < 220 && !input.moved) {
+            ventPulse(difficultyAt(state.elapsed));
+          }
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            input.holding = true;
+            return;
+          }
+          if (event.code === "KeyV") {
+            event.preventDefault();
+            if (event.repeat) return;
+            ventPulse(difficultyAt(state.elapsed));
+          }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.holding = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.vacuum = 0.82;
+            state.holdTime = HOLD_NEED;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.holding = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

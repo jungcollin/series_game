@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>코니스 능선</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #0c141c; --accent: #9be7ff; --accent-ink: #0c141c; --danger: #ff6b7a; --ink: #e9f7ff; --muted: rgba(233,247,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">코니스 능선. 코니스를 탐침한 뒤 안전한 쪽으로 능선을 건너세요. 탭으로 탐침, 드래그로 이동. 정상 너머 대피소에 도착하면 클리어. 코니스가 붕괴하면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 짧게 탭해 탐침하고 드래그해 능선을 이동합니다.</p>
+    <main class="stage" aria-label="코니스 능선 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="코니스 능선" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">거리</p>
+          <p class="hud-value" id="hud-objective">48 m</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">약층 —</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Cornice Ridge</p>
+          <h1>코니스 능선</h1>
+          <p class="brief-lead">코니스를 탐침한 뒤 안전한 쪽으로 능선을 건너세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 탐침, 드래그로 이동</span></li>
+            <li><strong>클리어</strong><span>정상 너머 대피소에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>코니스가 붕괴하면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">능선 붕괴</p>
+          <h2>코니스가 무너졌다</h2>
+          <p class="brief-lead" id="fail-detail">코니스가 붕괴하면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">대피 완료</p>
+          <h2>능선 횡단</h2>
+          <p class="brief-lead">정상 너머 대피소에 안전하게 도착했습니다.</p>
+          <p class="hud-sub" id="clear-stat">정상 너머 대피소에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const SHELTER_Z = -46.5;
+        const START_Z = 2.2;
+        const RIDGE_LEN = START_Z - SHELTER_Z;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "ridge-cornice",
+          title: "코니스 능선",
+          description: "코니스를 탐침한 뒤 안전한 쪽으로 능선을 건너세요.",
+          creator: "collin",
+          genre: "3D cornice travel",
+          clearCondition: "정상 너머 대피소에 도착하면 클리어",
+          failCondition: "코니스가 붕괴하면 실패",
+          controls: "탭으로 탐침, 드래그로 이동",
+        };
+        const COLORS = {
+          bg: "#0c141c",
+          ink: "#e9f7ff",
+          ice: "#9be7ff",
+          snow: "#d8eef8",
+          rock: "#3a4450",
+          hut: "#c4a070",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          collapse: "코니스 약층이 하중을 이기지 못하고 붕괴했습니다",
+          void: "공허 쪽으로 발을 헛디뎠습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const SEGMENT_LAYOUT = [
+          { z0: 3.2, z1: -3.4, cornice: 1, weak: 0.35 },
+          { z0: -3.4, z1: -9.8, cornice: -1, weak: 0.48 },
+          { z0: -9.8, z1: -16.4, cornice: 1, weak: 0.55 },
+          { z0: -16.4, z1: -23.0, cornice: -1, weak: 0.62 },
+          { z0: -23.0, z1: -29.6, cornice: 1, weak: 0.7 },
+          { z0: -29.6, z1: -36.2, cornice: -1, weak: 0.78 },
+          { z0: -36.2, z1: -42.4, cornice: 1, weak: 0.84 },
+          { z0: -42.4, z1: -49.5, cornice: -1, weak: 0.4 },
+        ];
+        const NEEDLE_LAYOUT = [
+          { x: -7.4, z: -8, h: 4.2 },
+          { x: 8.1, z: -18, h: 5.6 },
+          { x: -8.6, z: -30, h: 3.8 },
+          { x: 7.2, z: -41, h: 4.8 },
+        ];
+        const FLAG_LAYOUT = [
+          { z: -12.2, side: -1 },
+          { z: -24.8, side: 1 },
+          { z: -38.4, side: -1 },
+        ];
+        const SERAC_LAYOUT = [
+          { x: 5.8, z: -6.5, s: 1.4, h: 2.2 },
+          { x: 6.6, z: -14.8, s: 1.8, h: 2.8 },
+          { x: 5.2, z: -27.4, s: 1.3, h: 1.9 },
+          { x: 6.9, z: -39.2, s: 1.6, h: 2.5 },
+        ];
+        const SCREW_LAYOUT = [
+          { x: -0.85, z: -5.4 },
+          { x: -0.7, z: -17.8 },
+          { x: 0.78, z: -28.6 },
+          { x: -0.62, z: -40.2 },
+        ];
+        const LIP_LAYOUT = [
+          { z: -7.2, side: 1, w: 2.4 },
+          { z: -19.5, side: -1, w: 2.1 },
+          { z: -33.0, side: 1, w: 2.6 },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          player: { x: -0.45, y: 0.7, z: 1.8, vx: 0, vz: 0, yaw: 0 },
+          weight: 0,
+          probe: 0,
+          probeLife: 0,
+          probedSeg: -1,
+          reading: null,
+          segments: [],
+          flakes: [],
+          sparks: [],
+          gusts: [],
+          drips: [],
+          cracks: 0,
+          windGust: 0,
+          gustTimer: 2.8,
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          weakLabel: "약층 —",
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, holding: false, pointerId: null,
+          downX: 0, downY: 0, downT: 0, moved: false,
+          ax: 0, az: 0,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            walk: phase === 1 ? 2.45 : phase === 2 ? 2.25 : 2.05,
+            loadRate: phase === 1 ? 0.22 : phase === 2 ? 0.38 : 0.55,
+            recover: phase === 1 ? 0.28 : phase === 2 ? 0.2 : 0.12,
+            probeLife: phase === 1 ? 6.5 : phase === 2 ? 3.6 : 2.1,
+            wind: phase === 1 ? 0.15 : phase === 2 ? 0.45 : 0.85,
+            gustEvery: phase === 1 ? 7.4 : phase === 2 ? 5.2 : 3.6,
+            gustPush: phase === 1 ? 0.35 : phase === 2 ? 0.7 : 1.15,
+            falseSafe: phase === 3 ? 0.16 : 0,
+            summitLoad: phase === 1 ? 1 : 1.15,
+          };
+        }
+
+        function spawnWorld() {
+          state.segments = SEGMENT_LAYOUT.map((row, index) => ({
+            ...row,
+            id: index,
+            probed: false,
+            lastRead: 0,
+          }));
+          state.flakes = [];
+          for (let index = 0; index < (reducedMotion ? 16 : 42); index += 1) {
+            state.flakes.push({
+              x: randRange(-10, 10),
+              y: randRange(0.4, 4.5),
+              z: randRange(-50, 6),
+              vy: randRange(0.4, 1.1),
+              vx: randRange(-0.6, 0.2),
+              s: randRange(0.03, 0.08),
+            });
+          }
+          state.sparks = [];
+          state.gusts = [];
+          state.drips = [];
+          for (let index = 0; index < 8; index += 1) {
+            state.drips.push({
+              x: randRange(0.8, 1.6),
+              y: randRange(0.1, 0.4),
+              z: randRange(-46, 2),
+              vy: randRange(0.4, 1.1),
+              life: randRange(0.3, 1.2),
+            });
+          }
+        }
+
+        function segmentAt(z) {
+          for (let index = 0; index < state.segments.length; index += 1) {
+            const seg = state.segments[index];
+            if (z <= seg.z0 && z >= seg.z1) return seg;
+          }
+          return state.segments[state.segments.length - 1];
+        }
+
+        function distanceLeft() {
+          return Math.max(0, state.player.z - SHELTER_Z);
+        }
+
+        function ridgeY(z, x) {
+          const along = clamp((START_Z - z) / RIDGE_LEN, 0, 1);
+          const summit = Math.sin(along * Math.PI) * 1.65;
+          const camber = -x * x * 0.12;
+          return summit + camber;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(8, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.sparks.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.6, 3.4),
+              vy: randRange(0.5, 3.8),
+              vz: Math.sin(angle) * randRange(0.6, 3.4),
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.05, 0.12),
+            });
+          }
+          if (state.sparks.length > 64) state.sparks.splice(0, state.sparks.length - 64);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "probe") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "creak") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(48, now + 0.16);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.19);
+            } else if (kind === "clear") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.22);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(64, now);
+              osc.frequency.exponentialRampToValueAtTime(22, now + 0.32);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+              osc.start(now); osc.stop(now + 0.35);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.player = { x: -0.45, y: 0.7, z: 1.8, vx: 0, vz: 0, yaw: 0 };
+          state.weight = 0;
+          state.probe = 0;
+          state.probeLife = 0;
+          state.probedSeg = -1;
+          state.reading = null;
+          state.cracks = 0;
+          state.windGust = 0;
+          state.gustTimer = 2.8;
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.weakLabel = "약층 —";
+          input.dragging = false;
+          input.holding = false;
+          input.moved = false;
+          reseed((Date.now() ^ 0xb00b1e) >>> 0);
+          spawnWorld();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          state.flash = 0.65;
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.2 : 0.82;
+          playSfx("boom");
+          burst(state.player.x, state.player.y, state.player.z, 22, "snow");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function doProbe(params) {
+          const seg = segmentAt(state.player.z);
+          state.probe = 1;
+          state.probeLife = params.probeLife;
+          state.probedSeg = seg.id;
+          seg.probed = true;
+          seg.lastRead = state.elapsed;
+          const side = seg.cornice < 0 ? "왼쪽 코니스" : "오른쪽 코니스";
+          state.reading = {
+            side: seg.cornice,
+            weak: seg.weak,
+            text: `${side} · 약층 ${(seg.weak * 100).toFixed(0)}cm`,
+          };
+          state.weakLabel = state.reading.text;
+          state.message = "탐침";
+          state.messageTime = 0.55;
+          playSfx("probe");
+          burst(state.player.x, 0.2, state.player.z, 8, "ice");
+        }
+
+        function updateMove(dt, params) {
+          let ax = 0;
+          let az = 0;
+          if (input.left) ax -= 1;
+          if (input.right) ax += 1;
+          if (input.up) az -= 1;
+          if (input.down) az += 1;
+          if (input.dragging) {
+            ax += input.ax;
+            az += input.az;
+          }
+          const mag = Math.hypot(ax, az);
+          if (mag > 1) { ax /= mag; az /= mag; }
+          const probing = state.probe > 0.4;
+          const speed = params.walk * (probing ? 0.2 : 1);
+          const gust = state.windGust * params.gustPush;
+          state.player.x += (ax * speed * 0.72 + gust) * dt;
+          state.player.z += az * speed * dt;
+          state.player.x = clamp(state.player.x, -1.55, 1.55);
+          state.player.z = clamp(state.player.z, SHELTER_Z - 1.2, 3.4);
+          if (mag > 0.08) state.player.yaw = Math.atan2(ax, -az);
+          state.player.y = lerp(state.player.y, 0.62 + ridgeY(state.player.z, state.player.x), 1 - Math.exp(-dt * 8));
+          state.player.vx = ax * speed;
+          state.player.vz = az * speed;
+        }
+
+        function updateWeight(dt, params) {
+          const seg = segmentAt(state.player.z);
+          const onCornice = (seg.cornice < 0 && state.player.x < -0.12) || (seg.cornice > 0 && state.player.x > 0.12);
+          const probed = state.probedSeg === seg.id && state.probeLife > 0;
+          const along = clamp((START_Z - state.player.z) / RIDGE_LEN, 0, 1);
+          const nearSummit = along > 0.42 && along < 0.72 ? params.summitLoad : 1;
+          if (onCornice) {
+            const unread = probed ? 1 : 1.45;
+            state.weight += dt * params.loadRate * (0.65 + seg.weak) * unread * nearSummit;
+            if (state.weight > 0.55 && random() < dt * 2.2) playSfx("creak");
+          } else {
+            state.weight = Math.max(0, state.weight - dt * params.recover);
+            if (params.falseSafe > 0 && Math.abs(state.player.x) < 0.2) {
+              state.weight += dt * params.falseSafe;
+            }
+          }
+          if (Math.abs(state.player.x) > 1.48) {
+            failStage("void");
+            return;
+          }
+          state.cracks = lerp(state.cracks, clamp(state.weight, 0, 1), 1 - Math.exp(-dt * 4));
+          if (state.weight >= 1) failStage("collapse");
+        }
+
+        function updateProbe(dt) {
+          state.probe = Math.max(0, state.probe - dt * 2.4);
+          state.probeLife = Math.max(0, state.probeLife - dt);
+          if (state.probeLife <= 0) {
+            state.reading = null;
+            state.weakLabel = "약층 —";
+            state.probedSeg = -1;
+          }
+        }
+
+        function updateWind(dt, params) {
+          state.gustTimer -= dt;
+          state.windGust = lerp(state.windGust, 0, 1 - Math.exp(-dt * 1.8));
+          if (state.elapsed < 5.2) return;
+          if (state.gustTimer > 0) return;
+          state.gustTimer = params.gustEvery + randRange(-0.4, 0.8);
+          state.windGust = (random() < 0.55 ? 1 : -1) * randRange(0.7, 1);
+          state.message = state.windGust > 0 ? "돌풍 →" : "돌풍 ←";
+          state.messageTime = 0.55;
+          const p = state.player;
+          for (let index = 0; index < (reducedMotion ? 4 : 10); index += 1) {
+            state.gusts.push({
+              x: p.x + randRange(-1.2, 1.2),
+              y: randRange(0.4, 1.6),
+              z: p.z + randRange(-2.4, 1.2),
+              vx: state.windGust * randRange(2.2, 4.5),
+              life: randRange(0.3, 0.7),
+            });
+          }
+        }
+
+        function updateFx(dt, params) {
+          state.sparks.forEach((spark) => {
+            spark.x += spark.vx * dt;
+            spark.y += spark.vy * dt;
+            spark.z += spark.vz * dt;
+            spark.vy -= 4 * dt;
+            spark.life -= dt;
+          });
+          state.sparks = state.sparks.filter((spark) => spark.life > 0);
+          state.flakes.forEach((flake) => {
+            flake.y -= flake.vy * dt;
+            flake.x += (flake.vx - params.wind * 0.4 + state.windGust * 0.8) * dt;
+            flake.z += params.wind * 0.15 * dt;
+            if (flake.y < 0) {
+              flake.y = randRange(2.4, 4.8);
+              flake.x = state.player.x + randRange(-8, 8);
+              flake.z = state.player.z + randRange(-16, 6);
+            }
+          });
+          state.gusts.forEach((gust) => {
+            gust.x += gust.vx * dt;
+            gust.life -= dt;
+          });
+          state.gusts = state.gusts.filter((gust) => gust.life > 0);
+          const seg = segmentAt(state.player.z);
+          state.drips.forEach((drip) => {
+            drip.x = Math.abs(drip.x) * (seg.cornice >= 0 ? 1 : -1);
+            drip.y -= drip.vy * dt;
+            drip.life -= dt;
+            if (drip.life <= 0 || drip.y < -0.4) {
+              drip.y = 0.35;
+              drip.z = state.player.z + randRange(-8, 2);
+              drip.x = randRange(0.9, 1.6) * (seg.cornice >= 0 ? 1 : -1);
+              drip.life = randRange(0.4, 1.3);
+            }
+          });
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.4);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          const idleParams = difficultyAt(0);
+          if (state.mode !== "running") {
+            updateFx(dt * 0.5, idleParams);
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateMove(dt, params);
+          if (state.mode !== "running") return;
+          updateProbe(dt);
+          updateWind(dt, params);
+          if (state.mode !== "running") return;
+          updateWeight(dt, params);
+          if (state.mode !== "running") return;
+          updateFx(dt, params);
+          if (state.player.z <= SHELTER_Z + 0.55 && Math.abs(state.player.x) < 1.1) {
+            clearStage();
+            return;
+          }
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `잔여 ${distanceLeft().toFixed(0)}m · 하중 ${(state.weight * 100).toFixed(0)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 잔여 0m`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x0c141c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x0c141c);
+          scene.fog = new THREE.Fog(0x15202c, 8, 42);
+
+          const camera = new THREE.PerspectiveCamera(60, VIEW_W / VIEW_H, 0.1, 140);
+          camera.position.set(0.4, 1.6, 6);
+
+          scene.add(new THREE.AmbientLight(0x2a3848, 0.42));
+          const hemi = new THREE.HemisphereLight(0x9be7ff, 0x1a1010, 0.5);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xe8f4ff, 0.55);
+          sun.position.set(-8, 18, 6);
+          scene.add(sun);
+          const voidLight = new THREE.PointLight(0x406080, 0.7, 22);
+          voidLight.position.set(6, -4, -12);
+          scene.add(voidLight);
+          const hutLight = new THREE.PointLight(0xffc070, 0.9, 10);
+          hutLight.position.set(0, 1.4, SHELTER_Z);
+          scene.add(hutLight);
+
+          const snowMat = new THREE.MeshStandardMaterial({
+            color: 0xd8eef8, roughness: 0.62, metalness: 0.08, emissive: 0x102028, emissiveIntensity: 0.18,
+          });
+          const iceMat = new THREE.MeshStandardMaterial({
+            color: 0x9be7ff, roughness: 0.28, metalness: 0.22, emissive: 0x143040, emissiveIntensity: 0.28,
+          });
+          const rockMat = new THREE.MeshStandardMaterial({
+            color: 0x3a4450, roughness: 0.86, metalness: 0.08, emissive: 0x0a1014, emissiveIntensity: 0.12,
+          });
+          const woodMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a070, roughness: 0.7, metalness: 0.08, emissive: 0x2a1808, emissiveIntensity: 0.2,
+          });
+          const suitMat = new THREE.MeshStandardMaterial({
+            color: 0x2a3848, roughness: 0.58, metalness: 0.18, emissive: 0x101820, emissiveIntensity: 0.22,
+          });
+
+          const voidFloor = new THREE.Mesh(new THREE.CircleGeometry(80, 20), new THREE.MeshStandardMaterial({
+            color: 0x081018, roughness: 1, metalness: 0,
+          }));
+          voidFloor.rotation.x = -Math.PI / 2;
+          voidFloor.position.y = -8.5;
+          scene.add(voidFloor);
+
+          const ridgeGeo = new THREE.BoxGeometry(2.4, 0.55, 7.2);
+          const corniceGeo = new THREE.BoxGeometry(1.5, 0.28, 7.2);
+          const ridgeMeshes = [];
+          const corniceMeshes = [];
+          SEGMENT_LAYOUT.forEach((row, index) => {
+            const mid = (row.z0 + row.z1) * 0.5;
+            const len = Math.abs(row.z0 - row.z1);
+            const ridge = new THREE.Mesh(ridgeGeo, snowMat);
+            ridge.position.set(0, ridgeY(mid, 0), mid);
+            ridge.scale.set(1, 1, len / 7.2);
+            scene.add(ridge);
+            ridgeMeshes.push(ridge);
+            const cornice = new THREE.Mesh(corniceGeo, iceMat);
+            cornice.position.set(row.cornice * 1.45, ridgeY(mid, row.cornice * 1.2) - 0.05, mid);
+            cornice.rotation.z = row.cornice * -0.28;
+            cornice.scale.set(1, 1, len / 7.2);
+            scene.add(cornice);
+            corniceMeshes.push(cornice);
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(0.9, 3.4, len), rockMat);
+            wall.position.set(-row.cornice * 2.4, 0.4, mid);
+            scene.add(wall);
+          });
+
+          const climber = new THREE.Group();
+          const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.58, 8), suitMat);
+          torso.position.y = 0.1;
+          climber.add(torso);
+          const hood = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), suitMat);
+          hood.position.y = 0.42;
+          climber.add(hood);
+          const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.15, 6), iceMat);
+          pole.position.set(0.22, 0.15, -0.15);
+          pole.rotation.x = 0.4;
+          climber.add(pole);
+          scene.add(climber);
+
+          const hut = new THREE.Group();
+          const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.15, 1.4), woodMat);
+          cabin.position.y = 0.55;
+          hut.add(cabin);
+          const roof = new THREE.Mesh(new THREE.ConeGeometry(1.35, 0.7, 4), woodMat);
+          roof.position.y = 1.4;
+          roof.rotation.y = Math.PI / 4;
+          hut.add(roof);
+          const door = new THREE.Mesh(
+            new THREE.BoxGeometry(0.35, 0.55, 0.08),
+            new THREE.MeshStandardMaterial({ color: 0x6a4030, roughness: 0.8 })
+          );
+          door.position.set(0, 0.35, 0.72);
+          hut.add(door);
+          hut.position.set(0, ridgeY(SHELTER_Z, 0), SHELTER_Z);
+          scene.add(hut);
+
+          const summit = new THREE.Mesh(new THREE.ConeGeometry(1.1, 1.6, 5), snowMat);
+          summit.position.set(-0.2, 2.4, -24.5);
+          scene.add(summit);
+
+          const needleGeo = new THREE.ConeGeometry(0.45, 1, 5);
+          NEEDLE_LAYOUT.forEach((row) => {
+            const mesh = new THREE.Mesh(needleGeo, rockMat);
+            mesh.position.set(row.x, row.h * 0.3, row.z);
+            mesh.scale.set(1.4, row.h, 1.4);
+            scene.add(mesh);
+          });
+
+          FLAG_LAYOUT.forEach((row) => {
+            const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.4, 5), woodMat);
+            stick.position.set(row.side * 0.7, 1.1, row.z);
+            scene.add(stick);
+            const flag = new THREE.Mesh(
+              new THREE.PlaneGeometry(0.45, 0.28),
+              new THREE.MeshBasicMaterial({ color: 0xff6b7a, side: THREE.DoubleSide })
+            );
+            flag.position.set(row.side * 0.7 + 0.22, 1.65, row.z);
+            scene.add(flag);
+          });
+
+          const seracGeo = new THREE.BoxGeometry(1.1, 1.4, 0.9);
+          SERAC_LAYOUT.forEach((row) => {
+            const mesh = new THREE.Mesh(seracGeo, iceMat);
+            mesh.position.set(row.x, row.h * 0.35, row.z);
+            mesh.scale.set(row.s, row.h / 1.4, row.s * 0.8);
+            mesh.rotation.y = 0.35;
+            mesh.rotation.z = 0.08;
+            scene.add(mesh);
+          });
+          const screwGeo = new THREE.CylinderGeometry(0.04, 0.03, 0.42, 6);
+          SCREW_LAYOUT.forEach((row) => {
+            const mesh = new THREE.Mesh(screwGeo, iceMat);
+            mesh.position.set(row.x, 0.45, row.z);
+            mesh.rotation.z = 0.7;
+            scene.add(mesh);
+          });
+          const lipGeo = new THREE.BoxGeometry(1.8, 0.22, 2.2);
+          LIP_LAYOUT.forEach((row) => {
+            const mesh = new THREE.Mesh(lipGeo, snowMat);
+            mesh.position.set(row.side * 1.15, 0.38, row.z);
+            mesh.scale.set(row.w / 1.8, 1, 1);
+            mesh.rotation.z = row.side * -0.22;
+            scene.add(mesh);
+          });
+          const ropeGeo = new THREE.CylinderGeometry(0.025, 0.025, 18, 5);
+          const rope = new THREE.Mesh(
+            ropeGeo,
+            new THREE.MeshStandardMaterial({ color: 0xc4a070, roughness: 0.55, metalness: 0.12 })
+          );
+          rope.rotation.x = Math.PI / 2;
+          rope.position.set(-0.95, 0.55, -22);
+          scene.add(rope);
+          const ravenGeo = new THREE.ConeGeometry(0.08, 0.28, 4);
+          const ravenMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.7 });
+          const ravens = [];
+          for (let index = 0; index < 3; index += 1) {
+            const bird = new THREE.Mesh(ravenGeo, ravenMat);
+            bird.position.set(-4 + index * 3.2, 3.4, -10 - index * 8);
+            scene.add(bird);
+            ravens.push(bird);
+          }
+
+          const starCount = reducedMotion ? 120 : 340;
+          const starPos = new Float32Array(starCount * 3);
+          for (let index = 0; index < starCount; index += 1) {
+            starPos[index * 3] = (Math.random() - 0.5) * 80;
+            starPos[index * 3 + 1] = 8 + Math.random() * 22;
+            starPos[index * 3 + 2] = -10 - Math.random() * 70;
+          }
+          const starGeo = new THREE.BufferGeometry();
+          starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+          scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({
+            color: 0xe9f7ff, size: 0.16, transparent: true, opacity: 0.8, sizeAttenuation: true,
+          })));
+
+          const flakeGeo = new THREE.SphereGeometry(0.05, 5, 5);
+          const flakeMat = new THREE.MeshBasicMaterial({ color: 0xe9f7ff, transparent: true, opacity: 0.7 });
+          const sparkGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const sparkMat = new THREE.MeshBasicMaterial({ color: 0x9be7ff, transparent: true, opacity: 0.9 });
+          const dripGeo = new THREE.SphereGeometry(0.04, 5, 5);
+          const dripMat = new THREE.MeshBasicMaterial({ color: 0xb8e8ff, transparent: true, opacity: 0.55 });
+          const gustGeo = new THREE.SphereGeometry(0.09, 5, 5);
+          const gustMat = new THREE.MeshBasicMaterial({ color: 0xe9f7ff, transparent: true, opacity: 0.28, depthWrite: false });
+
+          const crackMat = new THREE.MeshBasicMaterial({ color: 0xff6b7a, transparent: true, opacity: 0.0 });
+          const crackMeshes = SEGMENT_LAYOUT.map((row) => {
+            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 0.08), crackMat.clone());
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(row.cornice * 0.9, 0.32, (row.z0 + row.z1) * 0.5);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          return {
+            renderer, scene, camera, voidLight, hutLight,
+            climber, pole: climber.children[2], hut,
+            ridgeMeshes, corniceMeshes, crackMeshes,
+            flakeGeo, flakeMat, flakeMeshes: [],
+            sparkGeo, sparkMat, sparkMeshes: [],
+            dripGeo, dripMat, dripMeshes: [],
+            gustGeo, gustMat, gustMeshes: [],
+            ravens,
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.elapsed;
+          const p = state.player;
+          webgl.climber.position.set(p.x, p.y, p.z);
+          webgl.climber.rotation.y = p.yaw;
+          webgl.pole.rotation.x = 0.35 + state.probe * 0.8;
+          webgl.pole.position.y = 0.15 - state.probe * 0.25;
+          webgl.hutLight.intensity = reducedMotion ? 0.8 : 0.7 + Math.sin(t * 3) * 0.2;
+          webgl.voidLight.position.set(4.5, -3.5, p.z - 8);
+
+          state.segments.forEach((seg, index) => {
+            const ridge = webgl.ridgeMeshes[index];
+            const cornice = webgl.corniceMeshes[index];
+            const crack = webgl.crackMeshes[index];
+            if (!ridge) return;
+            const mid = (seg.z0 + seg.z1) * 0.5;
+            const sag = state.weight * (segmentAt(p.z).id === seg.id ? 0.18 : 0.04);
+            ridge.position.y = ridgeY(mid, 0) - sag * 0.15;
+            cornice.position.y = ridgeY(mid, seg.cornice * 1.2) - 0.05 - sag;
+            cornice.rotation.z = seg.cornice * (-0.28 - sag * 0.4);
+            crack.position.set(seg.cornice * 0.9, 0.28 - sag, mid);
+            crack.material.opacity = clamp(state.cracks * (segmentAt(p.z).id === seg.id ? 0.8 : 0.15), 0, 0.85);
+          });
+
+          while (webgl.flakeMeshes.length < state.flakes.length) {
+            const mesh = new THREE.Mesh(webgl.flakeGeo, webgl.flakeMat);
+            webgl.scene.add(mesh);
+            webgl.flakeMeshes.push(mesh);
+          }
+          webgl.flakeMeshes.forEach((mesh, index) => {
+            const flake = state.flakes[index];
+            if (!flake) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(flake.x, flake.y, flake.z);
+            mesh.scale.setScalar(flake.s / 0.05);
+          });
+
+          while (webgl.sparkMeshes.length < state.sparks.length) {
+            const mesh = new THREE.Mesh(webgl.sparkGeo, webgl.sparkMat.clone());
+            webgl.scene.add(mesh);
+            webgl.sparkMeshes.push(mesh);
+          }
+          webgl.sparkMeshes.forEach((mesh, index) => {
+            const spark = state.sparks[index];
+            if (!spark) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(spark.x, spark.y, spark.z);
+            mesh.material.opacity = clamp(spark.life * 1.7, 0, 1);
+          });
+
+          while (webgl.dripMeshes.length < state.drips.length) {
+            const mesh = new THREE.Mesh(webgl.dripGeo, webgl.dripMat);
+            webgl.scene.add(mesh);
+            webgl.dripMeshes.push(mesh);
+          }
+          webgl.dripMeshes.forEach((mesh, index) => {
+            const drip = state.drips[index];
+            if (!drip) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(drip.x, drip.y, drip.z);
+          });
+
+          while (webgl.gustMeshes.length < state.gusts.length) {
+            const mesh = new THREE.Mesh(webgl.gustGeo, webgl.gustMat.clone());
+            webgl.scene.add(mesh);
+            webgl.gustMeshes.push(mesh);
+          }
+          webgl.gustMeshes.forEach((mesh, index) => {
+            const gust = state.gusts[index];
+            if (!gust) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(gust.x, gust.y, gust.z);
+            mesh.material.opacity = clamp(gust.life * 0.5, 0, 0.4);
+          });
+
+          webgl.ravens.forEach((bird, index) => {
+            const orbit = t * (0.25 + index * 0.05) + index;
+            bird.position.set(
+              Math.sin(orbit) * (5.5 + index),
+              3.2 + Math.sin(t * 1.4 + index) * 0.4,
+              state.player.z - 8 - index * 3 + Math.cos(orbit) * 2
+            );
+            bird.rotation.y = orbit + Math.PI / 2;
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const p = state.player;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.28 : 0;
+          webgl.camera.position.set(p.x * 0.35 + 0.15 + shakeX, p.y + 1.35 + shakeY, p.z + 4.6);
+          webgl.camera.lookAt(p.x * 0.4, p.y + 0.2, p.z - 7.5);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project(x, y, z) {
+          const p = state.player;
+          const dx = x - p.x;
+          const dy = y - p.y;
+          const dz = z - p.z;
+          const depth = Math.max(0.2, Math.min(1.3, 9 / (9 + Math.max(0, -dz) * 0.12)));
+          return { x: VIEW_W / 2 + dx * 52 * depth, y: VIEW_H * 0.58 - dy * 46 * depth - dz * 2.4, depth };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#1a2838");
+          g.addColorStop(0.45, "#0c141c");
+          g.addColorStop(1, "#080c10");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "rgba(8,12,18,0.85)";
+          ctx.fillRect(VIEW_W * 0.58, VIEW_H * 0.42, VIEW_W * 0.42, VIEW_H * 0.58);
+          state.segments.forEach((seg) => {
+            const a = project(-1.1, ridgeY((seg.z0 + seg.z1) * 0.5, 0), (seg.z0 + seg.z1) * 0.5);
+            const b = project(1.1, ridgeY((seg.z0 + seg.z1) * 0.5, 0), (seg.z0 + seg.z1) * 0.5);
+            ctx.strokeStyle = "rgba(216,238,248,0.7)";
+            ctx.lineWidth = 10 * a.depth;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+            const c = project(seg.cornice * 1.4, ridgeY((seg.z0 + seg.z1) * 0.5, 0) - 0.2, (seg.z0 + seg.z1) * 0.5);
+            ctx.fillStyle = "rgba(155,231,255,0.35)";
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          const hut = project(0, 1.1, SHELTER_Z);
+          ctx.fillStyle = COLORS.hut;
+          ctx.fillRect(hut.x - 10, hut.y - 14, 20, 18);
+          ctx.fillStyle = "#6a4030";
+          ctx.fillRect(hut.x - 3, hut.y - 2, 6, 8);
+          SERAC_LAYOUT.forEach((row) => {
+            const s = project(row.x, row.h * 0.4, row.z);
+            ctx.fillStyle = "rgba(155,231,255,0.45)";
+            ctx.fillRect(s.x - 8, s.y - 18, 14, 24);
+          });
+          state.drips.forEach((drip) => {
+            const d = project(drip.x, drip.y, drip.z);
+            ctx.fillStyle = "rgba(184,232,255,0.5)";
+            ctx.fillRect(d.x, d.y, 2, 4);
+          });
+          const me = project(state.player.x, state.player.y, state.player.z);
+          ctx.fillStyle = COLORS.ice;
+          ctx.beginPath();
+          ctx.arc(me.x, me.y, 7, 0, Math.PI * 2);
+          ctx.fill();
+          if (state.probe > 0.1) {
+            ctx.strokeStyle = "rgba(155,231,255,0.8)";
+            ctx.beginPath();
+            ctx.moveTo(me.x + 6, me.y);
+            ctx.lineTo(me.x + 6, me.y + 18);
+            ctx.stroke();
+          }
+          ctx.fillStyle = "rgba(233,247,255,0.72)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const dist = distanceLeft();
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${dist.toFixed(0)} m`;
+          if (meter) meter.style.width = `${clamp(1 - dist / RIDGE_LEN, 0, 1) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = state.weakLabel;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          hud.fillStyle = "rgba(233,247,255,0.14)";
+          hud.fillRect(18, VIEW_H - 52, 160, 8);
+          hud.fillStyle = state.weight > 0.7 ? COLORS.danger : COLORS.ice;
+          hud.fillRect(18, VIEW_H - 52, 160 * clamp(state.weight, 0, 1), 8);
+          hud.fillStyle = "rgba(233,247,255,0.6)";
+          hud.font = "700 11px Trebuchet MS, sans-serif";
+          hud.textAlign = "left";
+          hud.fillText("하중", 18, VIEW_H - 58);
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.ice;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(155,231,255,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.weight > 0.55) {
+            hud.fillStyle = `rgba(255,107,122,${(state.weight - 0.55) * 0.5})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const seg = segmentAt(state.player.z);
+          return JSON.stringify({
+            coordinate_system: "world units; ridge along -z; +x cornice right; +y up",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            distance: Number(distanceLeft().toFixed(2)),
+            weight: Number(state.weight.toFixed(3)),
+            probeLife: Number(state.probeLife.toFixed(2)),
+            player: {
+              x: Number(state.player.x.toFixed(2)),
+              y: Number(state.player.y.toFixed(2)),
+              z: Number(state.player.z.toFixed(2)),
+            },
+            segment: { id: seg.id, cornice: seg.cornice, weak: seg.weak, probed: state.probedSeg === seg.id },
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.dragging = false;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.downT = performance.now();
+          input.ax = 0;
+          input.az = 0;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          if (Math.hypot(dx, dy) > 11) {
+            input.moved = true;
+            input.dragging = true;
+            input.ax = clamp(dx / 95, -1.2, 1.2);
+            input.az = clamp(dy / 95, -1.2, 1.2);
+          }
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          const held = performance.now() - input.downT;
+          if (state.mode === "running" && !input.moved && held < 280) {
+            doProbe(difficultyAt(state.elapsed));
+          }
+          input.holding = false;
+          input.dragging = false;
+          input.ax = 0;
+          input.az = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.holding = false;
+          input.dragging = false;
+          input.ax = 0;
+          input.az = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            doProbe(difficultyAt(state.elapsed));
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.player.z = SHELTER_Z;
+            state.player.x = 0;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.holding = false; input.dragging = false; input.ax = 0; input.az = 0;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

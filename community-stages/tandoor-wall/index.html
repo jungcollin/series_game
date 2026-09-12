@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>탄두르</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #1a0c08; --accent: #ff7a3d; --accent-ink: #1a0c08; --danger: #ff6b7a; --ink: #ffe0cc; --muted: rgba(255,224,204,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">탄두르. 벽을 달군 뒤 난을 붙이고 타기 전에 떼세요. 홀드로 불 키우기, 탭으로 붙이기/떼기. 난 6장을 내면 클리어. 타거나 바닥에 떨어지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 길게 눌러 불을 키우고 짧게 탭해 난을 붙이거나 뗍니다.</p>
+    <main class="stage" aria-label="탄두르 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="탄두르" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">난</p>
+          <p class="hud-value" id="hud-objective">0 / 6</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">48.0</p>
+          <p class="hud-sub" id="hud-sub">벽온 대기</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Tandoor</p>
+          <h1>탄두르</h1>
+          <p class="brief-lead">벽을 달군 뒤 난을 붙이고 타기 전에 떼세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>홀드로 불 키우기, 탭으로 붙이기/떼기</span></li>
+            <li><strong>클리어</strong><span>난 6장을 내면 클리어</span></li>
+            <li><strong>실패</strong><span>타거나 바닥에 떨어지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">가마 실패</p>
+          <h2>난이 무너졌다</h2>
+          <p class="brief-lead" id="fail-detail">타거나 바닥에 떨어지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">출하</p>
+          <h2>난 여섯 장</h2>
+          <p class="brief-lead">달군 벽에 붙여 제때 떼어냈습니다.</p>
+          <p class="hud-sub" id="clear-stat">난 6장을 내면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 48;
+        const GRACE = 5.2;
+        const GOAL = 6;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "tandoor-wall",
+          title: "탄두르",
+          description: "벽을 달군 뒤 난을 붙이고 타기 전에 떼세요.",
+          creator: "collin",
+          genre: "3D tandoor baking",
+          clearCondition: "난 6장을 내면 클리어",
+          failCondition: "타거나 바닥에 떨어지면 실패",
+          controls: "홀드로 불 키우기, 탭으로 붙이기/떼기",
+        };
+        const COLORS = {
+          bg: "#1a0c08",
+          ink: "#ffe0cc",
+          ember: "#ff7a3d",
+          dough: "#e8c090",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          burned: "난이 타서 검게 눌었습니다",
+          dropped: "난이 바닥에 떨어졌습니다",
+          time_limit: "제한 시간 48초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const SLOTS = [0.35, 1.25, 2.15, 3.2, 4.1, 5.05];
+        const CAM2D = {
+          eye: { x: 0.15, y: 4.35, z: 0.55 },
+          right: { x: 0.98, y: 0, z: -0.18 },
+          up: { x: -0.04, y: 0.22, z: -0.97 },
+          fwd: { x: -0.17, y: -0.97, z: -0.16 },
+          focal: 620,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          fire: 0.22,
+          wall: 0.38,
+          baked: 0,
+          naan: null,
+          doughReady: true,
+          peelT: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          slotIndex: 0,
+          holdTime: 0,
+          hotspot: 0,
+          blister: 0,
+        };
+        const input = {
+          holding: false, downX: 0, downY: 0, pointerId: null, fireKey: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            slapMin: 0.4 + phase * 0.04,
+            cookLo: 0.42 + phase * 0.05,
+            cookHi: 0.86 - phase * 0.04,
+            cookRate: 0.28 + phase * 0.07,
+            fireGain: 0.42 + phase * 0.08,
+            fireDecay: 0.18 + phase * 0.05,
+            wallLag: 1.6 + phase * 0.2,
+            overshoot: phase >= 3 ? 0.12 : phase >= 2 ? 0.05 : 0,
+            burnMul: 1 + (phase - 1) * 0.35,
+          };
+        }
+
+        function naanWorld(slot, cook) {
+          const a = SLOTS[slot % SLOTS.length];
+          const r = 0.92;
+          return {
+            x: Math.cos(a) * r,
+            y: 0.55 + cook * 0.08,
+            z: Math.sin(a) * r,
+            a,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(5, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const angle = (Math.PI * 2 * i) / amount + randRange(-0.25, 0.25);
+            const speed = randRange(0.4, 1.9);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * speed,
+              vy: randRange(0.5, 2.6),
+              vz: Math.sin(angle) * speed,
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.03, 0.09),
+            });
+          }
+          if (state.particles.length > 70) state.particles.splice(0, state.particles.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "slap") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(50, now + 0.08);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+              osc.start(now); osc.stop(now + 0.1);
+            } else if (kind === "peel") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(640, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "warn") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(80, now + 0.1);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(440, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.22);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.2);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.23);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.fire = 0.22;
+          state.wall = 0.38;
+          state.baked = 0;
+          state.naan = null;
+          state.doughReady = true;
+          state.peelT = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "벽을 달구세요";
+          state.messageTime = 1.3;
+          state.failReason = "";
+          state.slotIndex = 0;
+          state.holdTime = 0;
+          state.hotspot = 0.4;
+          state.blister = 0;
+          input.holding = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          resumeAudio();
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          state.flash = 0.65;
+          playSfx("clear");
+          burst(0, 1.2, 0, 24, "ember");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.18 : 0.7;
+          playSfx("fail");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function slapOrPeel() {
+          if (state.mode !== "running") return;
+          const params = difficultyAt(state.elapsed);
+          if (state.naan) {
+            const cook = state.naan.cook;
+            const p = naanWorld(state.naan.slot, cook);
+            if (cook < params.cookLo) {
+              failStage("dropped");
+              burst(p.x, 0.15, p.z, 12, "dough");
+              return;
+            }
+            if (cook > params.cookHi) {
+              failStage("burned");
+              burst(p.x, p.y, p.z, 14, "ember");
+              return;
+            }
+            state.baked += 1;
+            state.flash = 0.4;
+            playSfx("peel");
+            burst(p.x, p.y + 0.2, p.z, 10, "dough");
+            state.message = `난 ${state.baked}/${GOAL}`;
+            state.messageTime = 0.7;
+            state.naan = null;
+            state.doughReady = true;
+            state.peelT = 0.35;
+            if (state.baked >= GOAL) clearStage();
+            return;
+          }
+          if (!state.doughReady) return;
+          if (state.wall < params.slapMin) {
+            failStage("dropped");
+            burst(0, 0.12, 0, 14, "dough");
+            return;
+          }
+          state.naan = { slot: state.slotIndex % SLOTS.length, cook: 0, age: 0 };
+          state.slotIndex += 1;
+          state.doughReady = false;
+          playSfx("slap");
+          const p = naanWorld(state.naan.slot, 0);
+          burst(p.x, p.y, p.z, 8, "ember");
+          state.message = "붙임";
+          state.messageTime = 0.45;
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy += (particle.kind === "ember" ? 1.1 : -2.2) * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function updateOven(dt, params) {
+          const holding = input.holding || input.fireKey;
+          if (holding) {
+            state.holdTime += dt;
+            state.fire = clamp(state.fire + params.fireGain * dt, 0, 1);
+            if (params.overshoot && state.fire > 0.82) {
+              state.fire = clamp(state.fire + params.overshoot * dt, 0, 1);
+            }
+          } else {
+            state.holdTime = 0;
+            state.fire = clamp(state.fire - params.fireDecay * dt, 0, 1);
+          }
+          const lag = 1 - Math.exp(-params.wallLag * dt);
+          state.wall = lerp(state.wall, state.fire * 0.92 + 0.08, lag);
+          state.hotspot += dt * (0.35 + params.phase * 0.2);
+          if (state.naan) {
+            const heat = clamp((state.wall - 0.3) / 0.55, 0.15, 1.6);
+            const slotAng = SLOTS[state.naan.slot % SLOTS.length];
+            const hotAlign = 0.65 + 0.35 * Math.cos(slotAng - state.hotspot);
+            const wallMul = state.wall > 0.78 ? params.burnMul : 1;
+            state.naan.cook += dt * params.cookRate * heat * hotAlign * wallMul;
+            state.naan.age += dt;
+            if (hotAlign > 1.05 && state.wall > 0.7) state.blister += dt;
+            else state.blister = Math.max(0, state.blister - dt * 0.4);
+            if (state.naan.cook > params.cookHi * 0.92 && state.messageTime <= 0) {
+              state.message = "타기 직전";
+              state.messageTime = 0.45;
+              playSfx("warn");
+            }
+            if (state.elapsed > GRACE && state.naan.cook >= 1.02) failStage("burned");
+          } else {
+            state.doughReady = true;
+            state.blister = Math.max(0, state.blister - dt);
+          }
+          state.peelT = Math.max(0, state.peelT - dt);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.5);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") {
+            updateParticles(dt);
+            return;
+          }
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateOven(dt, params);
+          if (state.mode !== "running") return;
+          if (!reducedMotion && state.fire > 0.2 && Math.random() < dt * 10) {
+            burst(randRange(-0.2, 0.2), 0.2, randRange(-0.2, 0.2), 1, "ember");
+          }
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `난 ${state.baked} / ${GOAL} · 벽온 ${Math.round(state.wall * 100)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 난 ${GOAL}장`;
+          }
+        }
+
+        function stdMat(color, extra) {
+          return new THREE.MeshStandardMaterial(Object.assign({ color, roughness: 0.62, metalness: 0.08 }, extra || {}));
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x1a0c08, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a0c08);
+          scene.fog = new THREE.Fog(0x1a0c08, 5.5, 14);
+
+          const camera = new THREE.PerspectiveCamera(50, VIEW_W / VIEW_H, 0.08, 30);
+          camera.position.set(0.15, 4.35, 0.55);
+
+          scene.add(new THREE.AmbientLight(0x3a1810, 0.4));
+          scene.add(new THREE.HemisphereLight(0xffc090, 0x1a0c08, 0.42));
+          const sun = new THREE.DirectionalLight(0xffd0a0, 0.4);
+          sun.position.set(2.5, 6, 3);
+          scene.add(sun);
+          const pitLight = new THREE.PointLight(0xff7a3d, 1.4, 6.5);
+          pitLight.position.set(0, 0.35, 0);
+          scene.add(pitLight);
+          const rimLight = new THREE.PointLight(0xffc090, 0.45, 7);
+          rimLight.position.set(1.4, 2.8, 1.6);
+          scene.add(rimLight);
+
+          const clayMat = stdMat(0xb56a3a, { roughness: 0.78 });
+          const darkClay = stdMat(0x6a3218, { roughness: 0.86 });
+          const stoneMat = stdMat(0x3a2a20, { roughness: 0.92 });
+          const brassMat = stdMat(0xc4a056, { metalness: 0.72, roughness: 0.32, emissive: 0x3a2a08, emissiveIntensity: 0.12 });
+          const doughMat = stdMat(0xe8c090, { roughness: 0.7 });
+          const emberMat = stdMat(0xff4a18, { emissive: 0xff2a00, emissiveIntensity: 0.8, roughness: 0.45 });
+
+          const ground = new THREE.Mesh(new THREE.CircleGeometry(7.5, 28), stoneMat);
+          ground.rotation.x = -Math.PI / 2;
+          ground.position.y = -0.35;
+          scene.add(ground);
+
+          const courtyard = new THREE.Mesh(new THREE.CylinderGeometry(3.4, 3.6, 0.18, 16), stdMat(0x5a3a28, { roughness: 0.9 }));
+          courtyard.position.y = -0.22;
+          scene.add(courtyard);
+
+          const oven = new THREE.Group();
+          const outer = new THREE.Mesh(new THREE.CylinderGeometry(1.35, 1.55, 1.85, 24, 1, true), clayMat);
+          outer.position.y = 0.7;
+          oven.add(outer);
+          const inner = new THREE.Mesh(
+            new THREE.CylinderGeometry(1.12, 1.22, 1.7, 24, 1, true),
+            new THREE.MeshStandardMaterial({
+              color: 0xff6a22, emissive: 0xff3a10, emissiveIntensity: 0.55, roughness: 0.5, side: THREE.BackSide,
+            })
+          );
+          inner.position.y = 0.72;
+          oven.add(inner);
+          const lip = new THREE.Mesh(new THREE.TorusGeometry(1.22, 0.12, 8, 24), clayMat);
+          lip.rotation.x = Math.PI / 2;
+          lip.position.y = 1.62;
+          oven.add(lip);
+          const base = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.7, 0.28, 20), darkClay);
+          base.position.y = -0.12;
+          oven.add(base);
+          scene.add(oven);
+
+          const floor = new THREE.Mesh(new THREE.CircleGeometry(1.15, 20), emberMat);
+          floor.rotation.x = -Math.PI / 2;
+          floor.position.y = -0.02;
+          scene.add(floor);
+          const coalGeo = new THREE.DodecahedronGeometry(0.09, 0);
+          const coals = [];
+          for (let i = 0; i < 14; i += 1) {
+            const coal = new THREE.Mesh(coalGeo, emberMat);
+            const a = (i / 14) * Math.PI * 2;
+            coal.position.set(Math.cos(a) * 0.45, 0.06, Math.sin(a) * 0.45);
+            coal.scale.setScalar(0.7 + (i % 3) * 0.2);
+            scene.add(coal);
+            coals.push(coal);
+          }
+
+          const naanGeo = new THREE.CylinderGeometry(0.22, 0.24, 0.035, 12);
+          const naanMesh = new THREE.Mesh(naanGeo, doughMat);
+          naanMesh.visible = false;
+          scene.add(naanMesh);
+          const doneNaan = [];
+          for (let i = 0; i < 6; i += 1) {
+            const disc = new THREE.Mesh(naanGeo, doughMat.clone());
+            disc.visible = false;
+            scene.add(disc);
+            doneNaan.push(disc);
+          }
+
+          const peel = new THREE.Group();
+          const board = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.03, 0.85), stdMat(0x6a4428));
+          board.position.z = 0.2;
+          peel.add(board);
+          const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.7, 6), stdMat(0x4a3018));
+          handle.rotation.x = Math.PI / 2;
+          handle.position.z = 0.85;
+          peel.add(handle);
+          peel.position.set(1.15, 0.95, 1.35);
+          peel.rotation.x = -0.55;
+          scene.add(peel);
+          const doughBall = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8), doughMat);
+          doughBall.scale.set(1.3, 0.45, 1.3);
+          doughBall.position.set(1.15, 0.98, 1.15);
+          scene.add(doughBall);
+
+          const postGeo = new THREE.CylinderGeometry(0.07, 0.09, 2.4, 8);
+          const woodMat = stdMat(0x4a301c, { roughness: 0.84 });
+          [[-2.4, 0.85, -1.6], [2.5, 0.85, -1.4], [-2.2, 0.85, 2.2], [2.3, 0.85, 2.1]].forEach((p) => {
+            const post = new THREE.Mesh(postGeo, woodMat);
+            post.position.set(p[0], p[1], p[2]);
+            scene.add(post);
+          });
+          const canopy = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.08, 4.2), stdMat(0x6a3a22, { roughness: 0.8 }));
+          canopy.position.set(0.1, 2.12, 0.3);
+          canopy.rotation.y = 0.08;
+          scene.add(canopy);
+
+          const bowlGeo = new THREE.CylinderGeometry(0.16, 0.12, 0.12, 10);
+          [[1.85, -0.08, 0.55, 0xc45a28], [2.15, -0.08, 0.85, 0x3a6a28], [1.65, -0.08, 0.95, 0xc4a056]].forEach((row) => {
+            const bowl = new THREE.Mesh(bowlGeo, brassMat);
+            bowl.position.set(row[0], row[1], row[2]);
+            scene.add(bowl);
+            const spice = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.03, 10), stdMat(row[3]));
+            spice.position.set(row[0], row[1] + 0.06, row[2]);
+            scene.add(spice);
+          });
+
+          const pot = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 10), brassMat);
+          pot.position.set(-1.85, 0.05, 1.15);
+          scene.add(pot);
+          const potNeck = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.1, 0.16, 8), brassMat);
+          potNeck.position.set(-1.85, 0.28, 1.15);
+          scene.add(potNeck);
+
+          const board2 = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.04, 0.45), woodMat);
+          board2.position.set(-1.7, -0.12, 0.35);
+          scene.add(board2);
+          for (let i = 0; i < 3; i += 1) {
+            const ball = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), doughMat);
+            ball.position.set(-1.85 + i * 0.16, -0.04, 0.35);
+            scene.add(ball);
+          }
+          const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.55, 6), woodMat);
+          pin.rotation.z = 1.2;
+          pin.position.set(-1.55, -0.02, 0.5);
+          scene.add(pin);
+
+          const tongs = new THREE.Group();
+          const rodMat = stdMat(0x4a4640, { metalness: 0.7, roughness: 0.35 });
+          const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.018, 0.9, 6), rodMat);
+          rod.rotation.x = 0.9;
+          tongs.add(rod);
+          tongs.position.set(0.95, 1.15, 0.85);
+          scene.add(tongs);
+
+          const garlic = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), stdMat(0xf0e0c8));
+          garlic.position.set(-1.1, 1.55, 1.55);
+          scene.add(garlic);
+          const string = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.4, 5), woodMat);
+          string.position.set(-1.1, 1.75, 1.55);
+          scene.add(string);
+
+          const tileGeo = new THREE.BoxGeometry(0.42, 0.05, 0.42);
+          for (let i = 0; i < 8; i += 1) {
+            const tile = new THREE.Mesh(tileGeo, i % 2 ? darkClay : clayMat);
+            tile.position.set(-2.6 + (i % 4) * 0.46, -0.32, 2.15 + Math.floor(i / 4) * 0.46);
+            scene.add(tile);
+          }
+
+          const yardWall = new THREE.Mesh(new THREE.BoxGeometry(7.2, 1.6, 0.22), darkClay);
+          yardWall.position.set(0.1, 0.45, -2.55);
+          scene.add(yardWall);
+          const arch = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.08, 8, 16, Math.PI), clayMat);
+          arch.position.set(0.15, 0.85, -2.42);
+          arch.rotation.x = Math.PI;
+          scene.add(arch);
+          const jarGeo = new THREE.CylinderGeometry(0.16, 0.2, 0.42, 10);
+          [[-2.8, -0.02, -1.1], [-2.55, -0.02, -0.7], [2.7, -0.02, -1.2]].forEach((p, i) => {
+            const jar = new THREE.Mesh(jarGeo, i === 2 ? brassMat : clayMat);
+            jar.position.set(p[0], p[1], p[2]);
+            scene.add(jar);
+            const lid = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), darkClay);
+            lid.scale.y = 0.45;
+            lid.position.set(p[0], p[1] + 0.24, p[2]);
+            scene.add(lid);
+          });
+          const woodPile = new THREE.Group();
+          const logLong = new THREE.CylinderGeometry(0.05, 0.06, 0.7, 6);
+          for (let i = 0; i < 7; i += 1) {
+            const log = new THREE.Mesh(logLong, woodMat);
+            log.rotation.z = Math.PI / 2;
+            log.rotation.y = (i % 2) * 0.2;
+            log.position.set(2.35 + (i % 3) * 0.08, -0.18 + Math.floor(i / 3) * 0.1, 1.65 + (i % 2) * 0.08);
+            woodPile.add(log);
+          }
+          scene.add(woodPile);
+          const rack = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.06, 0.28), woodMat);
+          rack.position.set(-2.05, 0.55, 1.85);
+          scene.add(rack);
+          const rackPost = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.7, 0.06), woodMat);
+          rackPost.position.set(-2.4, 0.2, 1.85);
+          scene.add(rackPost);
+          const onionGeo = new THREE.SphereGeometry(0.07, 8, 8);
+          for (let i = 0; i < 5; i += 1) {
+            const onion = new THREE.Mesh(onionGeo, stdMat(i % 2 ? 0xc45a28 : 0xd8b060));
+            onion.position.set(-2.3 + i * 0.12, 0.62, 1.85);
+            scene.add(onion);
+          }
+          const ashRing = new THREE.Mesh(
+            new THREE.RingGeometry(1.55, 1.85, 20),
+            stdMat(0x2a1a12, { roughness: 0.95 })
+          );
+          ashRing.rotation.x = -Math.PI / 2;
+          ashRing.position.y = -0.18;
+          scene.add(ashRing);
+          const mouthGlow = new THREE.Mesh(
+            new THREE.RingGeometry(0.95, 1.18, 22),
+            new THREE.MeshBasicMaterial({
+              color: 0xff7a3d, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false,
+            })
+          );
+          mouthGlow.rotation.x = -Math.PI / 2;
+          mouthGlow.position.y = 1.58;
+          scene.add(mouthGlow);
+          const chimney = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 0.55, 8), clayMat);
+          chimney.position.set(-0.85, 1.85, -0.85);
+          scene.add(chimney);
+
+          const smoke = new THREE.Mesh(
+            new THREE.ConeGeometry(0.35, 1.1, 10, 1, true),
+            new THREE.MeshBasicMaterial({
+              color: 0xffc090, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide,
+            })
+          );
+          smoke.position.y = 2.15;
+          scene.add(smoke);
+
+          const particleGeo = new THREE.SphereGeometry(0.04, 6, 6);
+          const sparkMat = new THREE.MeshBasicMaterial({
+            color: 0xff7a3d, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          return {
+            renderer, scene, camera, inner, pitLight, floor, coals, naanMesh, doneNaan,
+            peel, doughBall, smoke, emberMat, doughMat, particleGeo, sparkMat, mouthGlow,
+            particleMeshes: [], look: new THREE.Vector3(), proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const glow = 0.25 + state.wall * 0.9;
+          webgl.inner.material.emissiveIntensity = glow;
+          webgl.emberMat.emissiveIntensity = 0.4 + state.fire * 0.9;
+          webgl.pitLight.intensity = 0.6 + state.fire * 1.5;
+          webgl.floor.material.emissiveIntensity = 0.3 + state.fire * 0.8;
+          webgl.coals.forEach((coal, i) => {
+            const pulse = reducedMotion ? 1 : 0.85 + Math.sin(state.elapsed * 7 + i) * 0.15;
+            coal.scale.setScalar((0.7 + (i % 3) * 0.2) * pulse);
+          });
+          if (state.naan) {
+            const p = naanWorld(state.naan.slot, state.naan.cook);
+            webgl.naanMesh.visible = true;
+            webgl.naanMesh.position.set(p.x, p.y, p.z);
+            webgl.naanMesh.lookAt(0, p.y, 0);
+            webgl.naanMesh.rotateX(Math.PI / 2);
+            const toast = clamp(state.naan.cook, 0, 1);
+            webgl.naanMesh.material.color.setRGB(lerp(0.91, 0.25, toast), lerp(0.75, 0.12, toast), lerp(0.56, 0.05, toast));
+          } else {
+            webgl.naanMesh.visible = false;
+          }
+          webgl.doneNaan.forEach((mesh, i) => {
+            const show = i < state.baked;
+            mesh.visible = show;
+            if (!show) return;
+            mesh.position.set(-1.55 + (i % 3) * 0.22, -0.08, 1.55 + Math.floor(i / 3) * 0.22);
+            mesh.rotation.x = 0.1;
+            mesh.material.color.setHex(0xc47a38);
+          });
+          webgl.doughBall.visible = state.doughReady && !state.naan;
+          webgl.peel.rotation.x = -0.55 - state.peelT * 0.8;
+          webgl.peel.position.y = 0.95 + state.peelT * 0.2;
+          webgl.smoke.material.opacity = 0.06 + state.fire * 0.16;
+          webgl.smoke.scale.setScalar(0.8 + state.fire * 0.5);
+          if (!reducedMotion) webgl.smoke.rotation.y = state.elapsed * 0.4;
+          if (webgl.mouthGlow) webgl.mouthGlow.material.opacity = 0.08 + state.wall * 0.28;
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.sparkMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.04);
+            mesh.material.color.setHex(particle.kind === "dough" ? 0xe8c090 : 0xff7a3d);
+            mesh.material.opacity = clamp(particle.life * 1.6, 0, 1);
+            mesh.material.transparent = true;
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.25 : 0;
+          const shakeZ = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.25 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.2) * 0.08;
+          webgl.camera.position.set(0.15 + sway + shakeX, 4.35, 0.55 + shakeZ);
+          webgl.look.set(0, 0.45, 0);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.5 };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createRadialGradient(VIEW_W * 0.5, VIEW_H * 0.48, 20, VIEW_W * 0.5, VIEW_H * 0.48, VIEW_H * 0.7);
+          g.addColorStop(0, "#ff6a22");
+          g.addColorStop(0.35, "#8a3210");
+          g.addColorStop(1, "#1a0c08");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.strokeStyle = "#b56a3a";
+          ctx.lineWidth = 28;
+          ctx.beginPath();
+          ctx.arc(VIEW_W * 0.5, VIEW_H * 0.5, Math.min(VIEW_W, VIEW_H) * 0.32, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.strokeStyle = "#6a3218";
+          ctx.lineWidth = 10;
+          ctx.beginPath();
+          ctx.arc(VIEW_W * 0.5, VIEW_H * 0.5, Math.min(VIEW_W, VIEW_H) * 0.36, 0, Math.PI * 2);
+          ctx.stroke();
+          const coals = 10;
+          for (let i = 0; i < coals; i += 1) {
+            const a = (i / coals) * Math.PI * 2 + state.elapsed * 0.1;
+            const p = projectToScreen(Math.cos(a) * 0.45, 0.06, Math.sin(a) * 0.45);
+            ctx.fillStyle = `rgba(255,74,24,${0.5 + state.fire * 0.4})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          if (state.naan) {
+            const p = naanWorld(state.naan.slot, state.naan.cook);
+            const s = projectToScreen(p.x, p.y, p.z);
+            const toast = clamp(state.naan.cook, 0, 1);
+            ctx.fillStyle = `rgb(${Math.round(lerp(232, 60, toast))},${Math.round(lerp(192, 40, toast))},${Math.round(lerp(144, 20, toast))})`;
+            ctx.beginPath();
+            ctx.ellipse(s.x, s.y, 28, 16, p.a, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          const params = difficultyAt(state.elapsed);
+          ctx.fillStyle = "rgba(0,0,0,0.35)";
+          ctx.fillRect(24, VIEW_H * 0.2, 18, 180);
+          ctx.fillStyle = "rgba(255,122,61,0.28)";
+          const lo = VIEW_H * 0.2 + (1 - params.cookHi) * 180;
+          ctx.fillRect(24, lo, 18, (params.cookHi - params.cookLo) * 180);
+          ctx.fillStyle = COLORS.ember;
+          ctx.fillRect(20, VIEW_H * 0.2 + (1 - state.wall) * 180 - 3, 26, 6);
+          if (state.naan) {
+            ctx.fillStyle = "#ffe0cc";
+            ctx.fillRect(48, VIEW_H * 0.2 + (1 - state.naan.cook) * 180 - 3, 10, 6);
+          }
+          ctx.fillStyle = "#6a4428";
+          const peel = projectToScreen(1.15, 0.95, 1.35);
+          ctx.fillRect(peel.x - 8, peel.y, 70, 10);
+          if (state.doughReady && !state.naan) {
+            ctx.fillStyle = COLORS.dough;
+            ctx.beginPath();
+            ctx.arc(peel.x + 18, peel.y, 12, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.5, 0, 1);
+            ctx.fillStyle = particle.kind === "dough" ? COLORS.dough : COLORS.ember;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "#5a3a28";
+          ctx.fillRect(0, VIEW_H * 0.82, VIEW_W, VIEW_H * 0.18);
+          ctx.fillStyle = "#4a301c";
+          ctx.fillRect(VIEW_W * 0.72, VIEW_H * 0.12, 18, VIEW_H * 0.5);
+          ctx.fillRect(VIEW_W * 0.12, VIEW_H * 0.18, 14, VIEW_H * 0.45);
+          ctx.fillStyle = "rgba(196,160,86,0.55)";
+          ctx.beginPath();
+          ctx.arc(VIEW_W * 0.18, VIEW_H * 0.72, 16, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#c45a28";
+          for (let i = 0; i < state.baked; i += 1) {
+            ctx.beginPath();
+            ctx.ellipse(70 + i * 28, VIEW_H * 0.88, 12, 7, -0.3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.fillStyle = "rgba(255,224,204,0.62)";
+          ctx.font = "700 12px sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.baked} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.baked / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          const params = difficultyAt(state.elapsed);
+          let hint = `벽온 ${Math.round(state.wall * 100)}`;
+          if (state.naan) {
+            const ready = state.naan.cook >= params.cookLo && state.naan.cook <= params.cookHi;
+            hint += ready ? " · 떼세요" : " · 굽는 중";
+          } else {
+            hint += state.wall >= params.slapMin ? " · 붙이세요" : " · 달구는 중";
+          }
+          if (sub) sub.textContent = hint;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.includes("타") ? COLORS.danger : COLORS.ember;
+            hud.font = "900 28px sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 104);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,122,61,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.naan) {
+            const params = difficultyAt(state.elapsed);
+            const cx = VIEW_W / 2;
+            const y = VIEW_H - 36;
+            hud.fillStyle = "rgba(0,0,0,0.4)";
+            hud.fillRect(cx - 90, y, 180, 8);
+            hud.fillStyle = "rgba(255,122,61,0.35)";
+            hud.fillRect(cx - 90 + params.cookLo * 180, y, (params.cookHi - params.cookLo) * 180, 8);
+            hud.fillStyle = COLORS.ink;
+            hud.fillRect(cx - 90 + clamp(state.naan.cook, 0, 1) * 180 - 2, y - 3, 4, 14);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const p = state.naan ? naanWorld(state.naan.slot, state.naan.cook) : null;
+          return JSON.stringify({
+            coordinate_system: "world units; oven origin; +y up; camera into tandoor mouth",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            fire: Number(state.fire.toFixed(3)),
+            wall: Number(state.wall.toFixed(3)),
+            baked: state.baked,
+            naan: state.naan ? { slot: state.naan.slot, cook: Number(state.naan.cook.toFixed(3)), x: p.x, y: p.y, z: p.z } : null,
+            slapMin: params.slapMin,
+            cookWindow: [params.cookLo, params.cookHi],
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            mouthDist: Number(dist3(0, 4.35, 0.55, 0, 0.4, 0).toFixed(2)),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          state.holdTime = 0;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          event.preventDefault();
+        }
+        function onPointerUp(event) {
+          const held = state.holdTime;
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running") {
+            input.holding = false;
+            if (held < 0.16) slapOrPeel();
+          }
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.holding = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            slapOrPeel();
+            return;
+          }
+          if (event.code === "ArrowUp" || event.code === "KeyW") {
+            event.preventDefault();
+            input.fireKey = true;
+          }
+        }
+        function onKeyUp(event) {
+          if (event.code === "ArrowUp" || event.code === "KeyW") input.fireKey = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator, genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.baked = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          slap() { slapOrPeel(); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => { input.holding = false; input.fireKey = false; });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

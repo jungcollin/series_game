@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>망원 추적</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #0c1018; --accent: #b08cff; --accent-ink: #0c1018; --danger: #ff6b7a; --ink: #eef0ff; --muted: rgba(238,240,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">망원 추적. 적경·적위로 혜성을 추적하며 구름 사이를 찍으세요. 드래그로 적경·적위, 탭으로 노출. 선명한 노출 5장을 얻으면 클리어. 시야를 잃거나 구름만 찍으면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 드래그해 적경과 적위를 맞추고 짧게 탭해 노출합니다.</p>
+    <main class="stage" aria-label="망원 추적 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="망원 추적" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">추적</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">노출 0 / 5</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Telescope Track</p>
+          <h1>망원 추적</h1>
+          <p class="brief-lead">적경·적위로 혜성을 추적하며 구름 사이를 찍으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 적경·적위, 탭으로 노출</span></li>
+            <li><strong>클리어</strong><span>선명한 노출 5장을 얻으면 클리어</span></li>
+            <li><strong>실패</strong><span>시야를 잃거나 구름만 찍으면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">관측 실패</p>
+          <h2>시야가 끊겼다</h2>
+          <p class="brief-lead" id="fail-detail">시야를 잃거나 구름만 찍으면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">건판 확보</p>
+          <h2>혜성 포착</h2>
+          <p class="brief-lead">구름 사이로 선명한 노출 다섯 장을 얻었습니다.</p>
+          <p class="hud-sub" id="clear-stat">선명한 노출 5장을 얻으면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const GOAL_PLATES = 5;
+        const FOV = 0.62;
+        const SHUTTER_COOL = 1.15;
+        const GRACE = 5.2;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "telescope-slew",
+          title: "망원 추적",
+          description: "적경·적위로 혜성을 추적하며 구름 사이를 찍으세요.",
+          creator: "collin",
+          genre: "3D equatorial mount",
+          clearCondition: "선명한 노출 5장을 얻으면 클리어",
+          failCondition: "시야를 잃거나 구름만 찍으면 실패",
+          controls: "드래그로 적경·적위, 탭으로 노출",
+        };
+        const COLORS = {
+          bg: "#0c1018",
+          ink: "#eef0ff",
+          accent: "#b08cff",
+          brass: "#c4a056",
+          steel: "#8a96b0",
+          danger: "#ff6b7a",
+          comet: "#d4f0ff",
+          cloud: "#6a7388",
+        };
+        const FAIL_COPY = {
+          lost_target: "추적 오차가 커져 시야에서 혜성이 사라졌습니다",
+          cloudy_plate: "구름만 담긴 건판을 찍었습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const STAR_SEEDS = [
+          [0.12, 0.41, 0.9], [-0.22, 0.18, 0.7], [0.41, -0.12, 0.8],
+          [-0.48, 0.33, 0.6], [0.08, -0.36, 0.85], [0.55, 0.22, 0.5],
+          [-0.31, -0.28, 0.75], [0.27, 0.52, 0.65], [-0.61, 0.05, 0.55],
+          [0.19, 0.08, 1.0], [-0.09, 0.57, 0.45], [0.63, -0.19, 0.6],
+          [-0.17, -0.49, 0.7], [0.36, 0.31, 0.8], [-0.52, -0.14, 0.5],
+          [0.02, 0.24, 0.95], [0.47, 0.47, 0.4], [-0.38, 0.51, 0.55],
+          [0.58, 0.02, 0.7], [-0.26, 0.02, 0.9], [0.14, -0.22, 0.6],
+          [-0.44, -0.41, 0.5], [0.31, -0.48, 0.65], [-0.05, -0.08, 0.8],
+          [0.71, 0.14, 0.35], [-0.68, 0.28, 0.4], [0.09, 0.66, 0.5],
+          [-0.13, 0.39, 0.75], [0.22, -0.61, 0.45], [-0.57, 0.44, 0.35],
+        ];
+        const DOME_RIBS = [-1.15, -0.82, -0.49, -0.16, 0.16, 0.49, 0.82, 1.15];
+        const FLOOR_TILES = [
+          [-2.4, -1.8], [-0.8, -1.8], [0.8, -1.8], [2.4, -1.8],
+          [-2.4, 0.0], [-0.8, 0.0], [0.8, 0.0], [2.4, 0.0],
+          [-2.4, 1.8], [-0.8, 1.8], [0.8, 1.8], [2.4, 1.8],
+        ];
+        const CABLE_RUNS = [
+          { x: -1.55, y: 0.22, z: 1.1, rot: 0.4, len: 2.4 },
+          { x: 1.72, y: 0.18, z: 0.6, rot: -0.55, len: 1.9 },
+          { x: -0.4, y: 0.12, z: 1.8, rot: 0.1, len: 1.4 },
+        ];
+        const CONSOLE_KNOBS = [
+          [-0.22, 0.08], [-0.04, 0.08], [0.14, 0.08], [0.32, 0.08],
+          [-0.22, -0.06], [0.14, -0.06], [0.32, -0.06],
+        ];
+        const CAM2D = {
+          eye: { x: 0.2, y: 1.42, z: 3.55 },
+          right: { x: 0.999, y: 0, z: -0.04 },
+          up: { x: 0.01, y: 0.98, z: 0.2 },
+          fwd: { x: -0.04, y: 0.2, z: -0.979 },
+          focal: 520,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+        function wrapAng(v) {
+          let a = v;
+          while (a > Math.PI) a -= Math.PI * 2;
+          while (a < -Math.PI) a += Math.PI * 2;
+          return a;
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          mount: { ra: 0, dec: 0.18 },
+          comet: { ra: 0.04, dec: 0.17, tail: 0 },
+          pe: 0,
+          wind: 0,
+          tracking: 0.92,
+          lostTimer: 0,
+          plates: 0,
+          cloudyShots: 0,
+          shutter: 0,
+          exposing: 0,
+          cloudCover: 0,
+          clouds: [],
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          slitGlow: 0.4,
+          wormAngle: 0,
+          lastSfx: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, downX: 0, downY: 0, baseRa: 0, baseDec: 0,
+          pointerId: null, moved: false, downAt: 0,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            cometSpeed: 0.034 + difficulty * 0.055 + (phase >= 3 ? 0.02 : 0),
+            peAmp: 0.045 + difficulty * 0.085 + (phase >= 2 ? 0.03 : 0),
+            peFreq: 1.15 + difficulty * 0.9,
+            windAmp: phase >= 3 ? 0.055 + difficulty * 0.04 : 0.012,
+            cloudRate: 0.22 + difficulty * 0.38 + (phase >= 2 ? 0.12 : 0),
+            cloudSpan: 0.42 + difficulty * 0.22,
+            lostLimit: 2.35 - difficulty * 0.35,
+            trackNeed: 0.68 + difficulty * 0.06,
+          };
+        }
+
+        function cometAt(t, params) {
+          const drift = t * params.cometSpeed;
+          return {
+            ra: 0.05 * Math.sin(t * 0.13) + drift * 0.55 + 0.03 * Math.sin(t * 0.41),
+            dec: 0.17 + 0.11 * Math.sin(t * 0.09 + 0.6) + 0.04 * Math.sin(t * 0.27),
+          };
+        }
+
+        function pointing(params) {
+          return {
+            ra: state.mount.ra + state.pe,
+            dec: state.mount.dec + state.wind * params.windAmp,
+          };
+        }
+
+        function skyError(params) {
+          const aim = pointing(params);
+          const dra = wrapAng(aim.ra - state.comet.ra);
+          const ddec = aim.dec - state.comet.dec;
+          return Math.hypot(dra, ddec);
+        }
+
+        function cloudCoverAt(ra, dec) {
+          let cover = 0;
+          state.clouds.forEach((cloud) => {
+            const d = Math.hypot(wrapAng(cloud.ra - ra), cloud.dec - dec);
+            if (d < cloud.r) {
+              cover = Math.max(cover, (1 - d / cloud.r) * cloud.opacity);
+            }
+          });
+          return clamp(cover, 0, 1);
+        }
+
+        function spawnCloud(params) {
+          const side = random() < 0.5 ? -1 : 1;
+          state.clouds.push({
+            ra: side * randRange(0.85, 1.35),
+            dec: randRange(-0.35, 0.55),
+            r: randRange(0.18, 0.34) * (0.85 + params.cloudSpan),
+            vra: -side * randRange(0.12, 0.22) * (0.8 + params.difficulty),
+            vdec: randRange(-0.03, 0.03),
+            opacity: randRange(0.45, 0.85),
+            life: randRange(9, 16),
+            wobble: randRange(0, Math.PI * 2),
+          });
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(7, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(0.8, 3.4);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.4, 2.6),
+              vz: Math.sin(angle) * lift,
+              life: randRange(0.28, 0.8),
+              kind,
+              size: randRange(0.03, 0.1),
+            });
+          }
+          if (state.particles.length > 80) state.particles.splice(0, state.particles.length - 80);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "slew") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(140 + Math.abs(state.pe) * 400, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.05);
+              gain.gain.setValueAtTime(0.018, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+              osc.start(now); osc.stop(now + 0.07);
+            } else if (kind === "shutter") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(180, now + 0.07);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+              osc.start(now); osc.stop(now + 0.1);
+            } else if (kind === "plate") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(660, now);
+              osc.frequency.exponentialRampToValueAtTime(1240, now + 0.14);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.2);
+            } else if (kind === "cloud") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(60, now + 0.12);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "boom") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.22);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.mount = { ra: 0, dec: 0.18 };
+          state.comet = { ra: 0.04, dec: 0.17, tail: 0 };
+          state.pe = 0;
+          state.wind = 0;
+          state.tracking = 0.92;
+          state.lostTimer = 0;
+          state.plates = 0;
+          state.cloudyShots = 0;
+          state.shutter = 0;
+          state.exposing = 0;
+          state.cloudCover = 0;
+          state.clouds = [];
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.slitGlow = 0.4;
+          state.wormAngle = 0;
+          state.lastSfx = 0;
+          input.dragging = false;
+          input.moved = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          spawnCloud(difficultyAt(0));
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("plate");
+          state.flash = 0.8;
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function exposePlate() {
+          if (state.mode !== "running" || state.shutter > 0) return;
+          const params = difficultyAt(state.elapsed);
+          state.shutter = SHUTTER_COOL;
+          state.exposing = 0.18;
+          state.flash = 0.55;
+          playSfx("shutter");
+          const error = skyError(params);
+          const cover = cloudCoverAt(state.comet.ra, state.comet.dec);
+          const inView = error < FOV * 0.92;
+          if (cover > 0.58 || (!inView && cover > 0.28)) {
+            state.cloudyShots += 1;
+            state.message = "구름 건판";
+            state.messageTime = 0.9;
+            burst(0, 1.7, -6.2, 14, "cloud");
+            playSfx("cloud");
+            failStage("cloudy_plate");
+            return;
+          }
+          if (!inView || state.tracking < params.trackNeed) {
+            state.message = "초점 흐림";
+            state.messageTime = 0.7;
+            burst(0.2, 1.6, -5.4, 8, "spark");
+            return;
+          }
+          state.plates += 1;
+          state.message = `건판 ${state.plates}/${GOAL_PLATES}`;
+          state.messageTime = 0.85;
+          burst(0, 1.85, -7.2, 20, "plate");
+          playSfx("plate");
+          if (state.plates >= GOAL_PLATES) clearStage();
+        }
+
+        function updateMount(dt, params) {
+          const slew = 0.72 * dt;
+          if (input.left) state.mount.ra -= slew;
+          if (input.right) state.mount.ra += slew;
+          if (input.up) state.mount.dec += slew;
+          if (input.down) state.mount.dec -= slew;
+          state.mount.ra = clamp(state.mount.ra, -1.45, 1.45);
+          state.mount.dec = clamp(state.mount.dec, -0.72, 0.92);
+          state.wormAngle += dt * params.peFreq;
+          state.pe = Math.sin(state.wormAngle) * params.peAmp;
+          state.wind = Math.sin(state.elapsed * 1.7 + 0.4) + 0.45 * Math.sin(state.elapsed * 3.1);
+          const sky = cometAt(state.elapsed, params);
+          state.comet.ra = sky.ra;
+          state.comet.dec = sky.dec;
+          state.comet.tail = 0.55 + 0.25 * Math.sin(state.elapsed * 2.2);
+          const error = skyError(params);
+          state.tracking = clamp(1 - error / FOV, 0, 1);
+          state.cloudCover = cloudCoverAt(state.comet.ra, state.comet.dec);
+          if (state.elapsed > GRACE && error > FOV * 0.98) {
+            state.lostTimer += dt;
+            if (state.lostTimer > params.lostLimit) failStage("lost_target");
+          } else {
+            state.lostTimer = Math.max(0, state.lostTimer - dt * 0.65);
+          }
+        }
+
+        function updateClouds(dt, params) {
+          if (state.clouds.length < (params.phase === 1 ? 2 : params.phase === 2 ? 3 : 4)) {
+            if (random() < params.cloudRate * dt * 1.8) spawnCloud(params);
+          }
+          state.clouds.forEach((cloud) => {
+            cloud.ra += cloud.vra * dt;
+            cloud.dec += cloud.vdec * dt + Math.sin(state.elapsed * 1.2 + cloud.wobble) * 0.01 * dt;
+            cloud.life -= dt;
+            cloud.opacity = clamp(cloud.opacity - dt * 0.01, 0.2, 0.9);
+          });
+          state.clouds = state.clouds.filter((cloud) => cloud.life > 0 && Math.abs(cloud.ra) < 1.7);
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 1.8 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.7);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.exposing = Math.max(0, state.exposing - dt);
+          state.shutter = Math.max(0, state.shutter - dt);
+          state.slitGlow = lerp(state.slitGlow, 0.35 + state.tracking * 0.55, clamp(dt * 4, 0, 1));
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateMount(dt, params);
+          if (state.mode !== "running") return;
+          updateClouds(dt, params);
+          updateParticles(dt);
+          if (input.dragging && state.elapsed - state.lastSfx > 0.08) {
+            state.lastSfx = state.elapsed;
+            playSfx("slew");
+          }
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `건판 ${state.plates} / ${GOAL_PLATES} · 추적 ${Math.round(state.tracking * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 건판 ${state.plates}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x0c1018, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x0c1018);
+          scene.fog = new THREE.Fog(0x0c1018, 7, 28);
+
+          const camera = new THREE.PerspectiveCamera(48, VIEW_W / VIEW_H, 0.08, 80);
+          camera.position.set(0.22, 1.42, 3.55);
+          camera.lookAt(0, 1.62, -6.2);
+
+          scene.add(new THREE.AmbientLight(0x1a2238, 0.48));
+          scene.add(new THREE.HemisphereLight(0xb08cff, 0x101018, 0.32));
+          const key = new THREE.DirectionalLight(0xeef0ff, 0.55);
+          key.position.set(4.2, 8.5, 5.5);
+          scene.add(key);
+          const slitLamp = new THREE.PointLight(0xb08cff, 1.15, 16);
+          slitLamp.position.set(0, 3.4, -5.2);
+          scene.add(slitLamp);
+          const consoleLamp = new THREE.PointLight(0xc4a056, 0.7, 8);
+          consoleLamp.position.set(1.6, 1.1, 1.4);
+          scene.add(consoleLamp);
+
+          const boxG = new THREE.BoxGeometry(1, 1, 1);
+          const sphG = new THREE.SphereGeometry(1, 18, 14);
+          const cylG = new THREE.CylinderGeometry(1, 1, 1, 14);
+          const coneG = new THREE.ConeGeometry(1, 1, 10);
+          const torusG = new THREE.TorusGeometry(1, 0.08, 8, 20);
+          const paint = {
+            dome: new THREE.MeshStandardMaterial({ color: 0x161c2a, roughness: 0.88, metalness: 0.08, side: THREE.DoubleSide }),
+            rib: new THREE.MeshStandardMaterial({ color: 0x2a3348, roughness: 0.62, metalness: 0.22 }),
+            floor: new THREE.MeshStandardMaterial({ color: 0x12161f, roughness: 0.9, metalness: 0.12 }),
+            tile: new THREE.MeshStandardMaterial({ color: 0x1b2230, roughness: 0.7, metalness: 0.18 }),
+            brass: new THREE.MeshStandardMaterial({ color: 0xc4a056, roughness: 0.34, metalness: 0.72, emissive: 0x3a2a10, emissiveIntensity: 0.18 }),
+            steel: new THREE.MeshStandardMaterial({ color: 0x8a96b0, roughness: 0.38, metalness: 0.68 }),
+            tube: new THREE.MeshStandardMaterial({ color: 0x2c3344, roughness: 0.48, metalness: 0.42 }),
+            black: new THREE.MeshStandardMaterial({ color: 0x0a0c12, roughness: 0.55, metalness: 0.2 }),
+            wood: new THREE.MeshStandardMaterial({ color: 0x4a3824, roughness: 0.82, metalness: 0.08 }),
+            glow: new THREE.MeshStandardMaterial({ color: 0xb08cff, roughness: 0.3, metalness: 0.2, emissive: 0xb08cff, emissiveIntensity: 0.7 }),
+            comet: new THREE.MeshStandardMaterial({ color: 0xd4f0ff, roughness: 0.22, metalness: 0.15, emissive: 0x88c8ff, emissiveIntensity: 0.9 }),
+            cloud: new THREE.MeshStandardMaterial({ color: 0x6a7388, roughness: 1, metalness: 0, transparent: true, opacity: 0.35, depthWrite: false }),
+          };
+
+          const floor = new THREE.Mesh(new THREE.CircleGeometry(7.4, 28), paint.floor);
+          floor.rotation.x = -Math.PI / 2;
+          scene.add(floor);
+          FLOOR_TILES.forEach((xy, index) => {
+            const tile = new THREE.Mesh(boxG, paint.tile);
+            tile.scale.set(1.35, 0.05, 1.35);
+            tile.position.set(xy[0], 0.03, xy[1]);
+            tile.rotation.y = index * 0.08;
+            scene.add(tile);
+          });
+
+          const dome = new THREE.Mesh(new THREE.SphereGeometry(9.4, 28, 16, 0, Math.PI * 2, 0, Math.PI * 0.52), paint.dome);
+          dome.position.y = 0.2;
+          scene.add(dome);
+          DOME_RIBS.forEach((angle, index) => {
+            const rib = new THREE.Mesh(cylG, paint.rib);
+            rib.scale.set(0.07, 7.2, 0.07);
+            rib.position.set(Math.sin(angle) * 8.6, 3.6, -Math.cos(angle) * 2.4 - 3.1);
+            rib.rotation.z = -angle * 0.42;
+            rib.rotation.x = 0.18 + index * 0.01;
+            scene.add(rib);
+          });
+          const slitLeft = new THREE.Mesh(boxG, paint.rib);
+          slitLeft.scale.set(0.22, 6.8, 1.4);
+          slitLeft.position.set(-0.72, 4.1, -8.4);
+          scene.add(slitLeft);
+          const slitRight = new THREE.Mesh(boxG, paint.rib);
+          slitRight.scale.set(0.22, 6.8, 1.4);
+          slitRight.position.set(0.72, 4.1, -8.4);
+          scene.add(slitRight);
+          const slitGlow = new THREE.Mesh(boxG, paint.glow);
+          slitGlow.scale.set(1.05, 6.2, 0.08);
+          slitGlow.position.set(0, 4.2, -8.55);
+          scene.add(slitGlow);
+
+          const pier = new THREE.Mesh(cylG, paint.steel);
+          pier.scale.set(0.42, 1.05, 0.42);
+          pier.position.set(0, 0.55, 0.15);
+          scene.add(pier);
+          const pierCap = new THREE.Mesh(boxG, paint.brass);
+          pierCap.scale.set(0.7, 0.12, 0.7);
+          pierCap.position.set(0, 1.12, 0.15);
+          scene.add(pierCap);
+
+          const mount = new THREE.Group();
+          const polar = new THREE.Mesh(cylG, paint.brass);
+          polar.scale.set(0.12, 1.55, 0.12);
+          polar.rotation.z = 0.62;
+          polar.position.set(-0.35, 1.55, 0.12);
+          mount.add(polar);
+          const raHouse = new THREE.Mesh(boxG, paint.steel);
+          raHouse.scale.set(0.55, 0.38, 0.48);
+          raHouse.position.set(0.05, 1.92, 0.1);
+          mount.add(raHouse);
+          const worm = new THREE.Mesh(torusG, paint.brass);
+          worm.scale.set(0.28, 0.28, 0.28);
+          worm.position.set(0.38, 1.9, 0.1);
+          worm.rotation.y = Math.PI / 2;
+          mount.add(worm);
+          const decHouse = new THREE.Mesh(boxG, paint.steel);
+          decHouse.scale.set(0.34, 0.34, 0.42);
+          decHouse.position.set(0.12, 2.22, -0.15);
+          mount.add(decHouse);
+          const cwShaft = new THREE.Mesh(cylG, paint.steel);
+          cwShaft.scale.set(0.06, 1.4, 0.06);
+          cwShaft.rotation.z = 1.15;
+          cwShaft.position.set(-0.85, 1.55, 0.18);
+          mount.add(cwShaft);
+          const weightA = new THREE.Mesh(cylG, paint.brass);
+          weightA.scale.set(0.18, 0.16, 0.18);
+          weightA.position.set(-1.35, 1.22, 0.2);
+          mount.add(weightA);
+          const weightB = new THREE.Mesh(cylG, paint.brass);
+          weightB.scale.set(0.16, 0.12, 0.16);
+          weightB.position.set(-1.18, 1.34, 0.2);
+          mount.add(weightB);
+          scene.add(mount);
+
+          const ota = new THREE.Group();
+          const tube = new THREE.Mesh(cylG, paint.tube);
+          tube.scale.set(0.28, 3.4, 0.28);
+          tube.rotation.x = Math.PI / 2;
+          tube.position.set(0, 2.28, -1.55);
+          ota.add(tube);
+          const dew = new THREE.Mesh(cylG, paint.black);
+          dew.scale.set(0.32, 0.45, 0.32);
+          dew.rotation.x = Math.PI / 2;
+          dew.position.set(0, 2.28, -3.35);
+          ota.add(dew);
+          const corrector = new THREE.Mesh(new THREE.CircleGeometry(0.26, 16), paint.glow);
+          corrector.position.set(0, 2.28, -3.58);
+          ota.add(corrector);
+          const finder = new THREE.Mesh(cylG, paint.steel);
+          finder.scale.set(0.06, 0.7, 0.06);
+          finder.rotation.x = Math.PI / 2;
+          finder.position.set(0.22, 2.52, -1.4);
+          ota.add(finder);
+          const focuser = new THREE.Mesh(cylG, paint.brass);
+          focuser.scale.set(0.09, 0.35, 0.09);
+          focuser.rotation.x = Math.PI / 2;
+          focuser.position.set(0, 2.28, 0.28);
+          ota.add(focuser);
+          const rings = [-2.4, -1.5, -0.6];
+          rings.forEach((z) => {
+            const ring = new THREE.Mesh(torusG, paint.steel);
+            ring.scale.set(0.3, 0.3, 0.3);
+            ring.position.set(0, 2.28, z);
+            ota.add(ring);
+          });
+          scene.add(ota);
+
+          const ladder = new THREE.Group();
+          [-0.18, 0.18].forEach((x) => {
+            const rail = new THREE.Mesh(cylG, paint.steel);
+            rail.scale.set(0.03, 2.4, 0.03);
+            rail.position.set(x, 1.2, 2.15);
+            rail.rotation.x = -0.25;
+            ladder.add(rail);
+          });
+          for (let step = 0; step < 7; step += 1) {
+            const rung = new THREE.Mesh(boxG, paint.steel);
+            rung.scale.set(0.42, 0.03, 0.05);
+            rung.position.set(0, 0.28 + step * 0.32, 2.35 - step * 0.08);
+            ladder.add(rung);
+          }
+          ladder.position.set(-2.4, 0, 0.4);
+          scene.add(ladder);
+
+          const console = new THREE.Group();
+          const desk = new THREE.Mesh(boxG, paint.wood);
+          desk.scale.set(1.15, 0.08, 0.55);
+          desk.position.set(0, 0.92, 0);
+          console.add(desk);
+          const cabinet = new THREE.Mesh(boxG, paint.wood);
+          cabinet.scale.set(1.05, 0.85, 0.42);
+          cabinet.position.set(0, 0.45, 0.04);
+          console.add(cabinet);
+          const crt = new THREE.Mesh(boxG, paint.black);
+          crt.scale.set(0.42, 0.28, 0.08);
+          crt.position.set(-0.22, 1.14, -0.18);
+          console.add(crt);
+          const crtGlow = new THREE.Mesh(boxG, paint.glow);
+          crtGlow.scale.set(0.36, 0.22, 0.02);
+          crtGlow.position.set(-0.22, 1.14, -0.23);
+          console.add(crtGlow);
+          CONSOLE_KNOBS.forEach((xy) => {
+            const knob = new THREE.Mesh(cylG, paint.brass);
+            knob.scale.set(0.04, 0.05, 0.04);
+            knob.position.set(xy[0], 0.99, xy[1]);
+            console.add(knob);
+          });
+          console.position.set(1.65, 0, 1.35);
+          scene.add(console);
+
+          CABLE_RUNS.forEach((run) => {
+            const cable = new THREE.Mesh(cylG, paint.black);
+            cable.scale.set(0.025, run.len, 0.025);
+            cable.position.set(run.x, run.y, run.z);
+            cable.rotation.z = Math.PI / 2;
+            cable.rotation.y = run.rot;
+            scene.add(cable);
+          });
+
+          const stool = new THREE.Mesh(cylG, paint.wood);
+          stool.scale.set(0.22, 0.08, 0.22);
+          stool.position.set(-1.1, 0.55, 1.5);
+          scene.add(stool);
+          const stoolLeg = new THREE.Mesh(cylG, paint.steel);
+          stoolLeg.scale.set(0.04, 0.5, 0.04);
+          stoolLeg.position.set(-1.1, 0.25, 1.5);
+          scene.add(stoolLeg);
+
+          const ventA = new THREE.Mesh(boxG, paint.rib);
+          ventA.scale.set(0.9, 0.35, 0.08);
+          ventA.position.set(-3.6, 2.2, 1.2);
+          scene.add(ventA);
+          const ventB = new THREE.Mesh(boxG, paint.rib);
+          ventB.scale.set(0.9, 0.35, 0.08);
+          ventB.position.set(3.4, 2.4, 0.6);
+          scene.add(ventB);
+
+          const starCount = reducedMotion ? 160 : 420;
+          const starPos = new Float32Array(starCount * 3);
+          for (let i = 0; i < starCount; i += 1) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.random() * 0.7;
+            const radius = 14 + Math.random() * 10;
+            starPos[i * 3] = Math.cos(theta) * Math.sin(phi) * radius;
+            starPos[i * 3 + 1] = 4 + Math.cos(phi) * radius * 0.7;
+            starPos[i * 3 + 2] = -10 - Math.sin(theta) * Math.sin(phi) * radius * 0.4;
+          }
+          const starGeo = new THREE.BufferGeometry();
+          starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+          const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+            color: 0xeef0ff, size: 0.22, sizeAttenuation: true, transparent: true, opacity: 0.85,
+          }));
+          scene.add(stars);
+
+          const cometCore = new THREE.Mesh(sphG, paint.comet);
+          cometCore.scale.setScalar(0.16);
+          scene.add(cometCore);
+          const tailGeo = new THREE.ConeGeometry(0.12, 1.4, 8);
+          const tailMat = new THREE.MeshBasicMaterial({
+            color: 0x88c8ff, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+          const cometTail = new THREE.Mesh(tailGeo, tailMat);
+          scene.add(cometTail);
+
+          const cloudMeshes = [];
+          for (let i = 0; i < 8; i += 1) {
+            const cloud = new THREE.Mesh(sphG, paint.cloud.clone());
+            cloud.visible = false;
+            scene.add(cloud);
+            cloudMeshes.push(cloud);
+          }
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xb08cff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          return {
+            renderer, scene, camera, paint, boxG, sphG, cylG, coneG,
+            mount, ota, worm, slitGlow, slitLamp, consoleLamp, crtGlow,
+            cometCore, cometTail, cloudMeshes, stars,
+            particleGeo, particleMat, particleMeshes: [],
+            up: new THREE.Vector3(0, 1, 0),
+            look: new THREE.Vector3(),
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function skyToWorld(ra, dec, dist) {
+          return {
+            x: Math.sin(ra) * dist * 0.85,
+            y: 2.4 + dec * 3.4,
+            z: -6.2 - Math.cos(ra * 0.4) * dist * 0.15,
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const params = difficultyAt(state.elapsed);
+          const aim = pointing(params);
+          webgl.ota.rotation.y = -aim.ra * 0.55;
+          webgl.ota.rotation.x = -aim.dec * 0.4;
+          webgl.mount.rotation.y = -state.mount.ra * 0.25;
+          webgl.worm.rotation.z = state.wormAngle;
+          webgl.slitGlow.material.emissiveIntensity = 0.35 + state.slitGlow * 0.8;
+          webgl.slitLamp.intensity = 0.7 + state.tracking * 0.7;
+          webgl.crtGlow.material.emissiveIntensity = 0.4 + state.tracking * 0.8;
+          const cometW = skyToWorld(state.comet.ra, state.comet.dec, 8.5);
+          webgl.cometCore.position.set(cometW.x, cometW.y, cometW.z);
+          webgl.cometCore.scale.setScalar(0.12 + state.tracking * 0.08);
+          webgl.cometTail.position.set(cometW.x - 0.2, cometW.y + 0.05, cometW.z + 0.4);
+          webgl.cometTail.rotation.z = 0.7;
+          webgl.cometTail.rotation.x = 0.4;
+          webgl.cometTail.scale.set(1, state.comet.tail, 1);
+          webgl.cometTail.material.opacity = 0.22 + state.tracking * 0.25;
+          webgl.cloudMeshes.forEach((mesh, index) => {
+            const cloud = state.clouds[index];
+            if (!cloud) { mesh.visible = false; return; }
+            mesh.visible = true;
+            const w = skyToWorld(cloud.ra, cloud.dec, 7.2);
+            mesh.position.set(w.x, w.y, w.z);
+            mesh.scale.setScalar(cloud.r * 4.8);
+            mesh.material.opacity = cloud.opacity * 0.42;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.05);
+            mesh.material.opacity = clamp(particle.life * 1.6, 0, 1);
+            const hex = particle.kind === "cloud" ? 0x6a7388 : particle.kind === "plate" ? 0xd4f0ff : 0xb08cff;
+            mesh.material.color.setHex(hex);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.18 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.14 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.22) * 0.05;
+          webgl.camera.position.set(0.22 + sway + shakeX, 1.42 + shakeY, 3.55);
+          const lookY = 1.62 + state.mount.dec * 0.35;
+          webgl.camera.lookAt(state.mount.ra * 0.8, lookY, -6.2);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.6 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#141a2c");
+          sky.addColorStop(0.45, "#0c1018");
+          sky.addColorStop(1, "#07090e");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "rgba(238,240,255,0.75)";
+          STAR_SEEDS.forEach((star, index) => {
+            const sx = VIEW_W * 0.5 + star[0] * VIEW_W * 0.42 + Math.sin(state.elapsed * 0.2 + index) * 2;
+            const sy = VIEW_H * 0.28 - star[1] * VIEW_H * 0.28;
+            ctx.globalAlpha = 0.25 + star[2] * 0.6;
+            ctx.fillRect(sx, sy, 2, 2);
+          });
+          ctx.globalAlpha = 1;
+          const cometW = skyToWorld(state.comet.ra, state.comet.dec, 8.5);
+          const cometP = projectToScreen(cometW.x, cometW.y, cometW.z);
+          ctx.strokeStyle = "rgba(136,200,255,0.45)";
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(cometP.x, cometP.y);
+          ctx.lineTo(cometP.x - 36, cometP.y + 10);
+          ctx.stroke();
+          ctx.fillStyle = COLORS.comet;
+          ctx.beginPath();
+          ctx.arc(cometP.x, cometP.y, 7 + state.tracking * 4, 0, Math.PI * 2);
+          ctx.fill();
+          state.clouds.forEach((cloud) => {
+            const w = skyToWorld(cloud.ra, cloud.dec, 7.2);
+            const p = projectToScreen(w.x, w.y, w.z);
+            ctx.fillStyle = `rgba(106,115,136,${cloud.opacity * 0.45})`;
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, cloud.r * 140, cloud.r * 70, 0, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.fillStyle = "#161c2a";
+          ctx.beginPath();
+          ctx.moveTo(0, VIEW_H);
+          ctx.quadraticCurveTo(VIEW_W * 0.5, 40, VIEW_W, VIEW_H);
+          ctx.fill();
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.fillStyle = "#000";
+          ctx.fillRect(VIEW_W * 0.5 - 70, 36, 140, VIEW_H * 0.62);
+          ctx.globalCompositeOperation = "source-over";
+          ctx.strokeStyle = "#2a3348";
+          ctx.lineWidth = 18;
+          ctx.strokeRect(VIEW_W * 0.5 - 78, 28, 156, VIEW_H * 0.64);
+          const tube = projectToScreen(0, 2.28, -1.2);
+          ctx.fillStyle = "#2c3344";
+          ctx.fillRect(tube.x - 18, tube.y - 12, 36, VIEW_H * 0.42);
+          ctx.fillStyle = COLORS.brass;
+          ctx.fillRect(VIEW_W * 0.5 - 26, VIEW_H * 0.72, 52, 16);
+          ctx.fillStyle = "#4a3824";
+          ctx.fillRect(VIEW_W * 0.68, VIEW_H * 0.62, 160, 90);
+          ctx.fillStyle = COLORS.accent;
+          ctx.globalAlpha = 0.35 + state.tracking * 0.4;
+          ctx.fillRect(VIEW_W * 0.7, VIEW_H * 0.66, 52, 28);
+          ctx.globalAlpha = 1;
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.5, 0, 1);
+            ctx.fillStyle = particle.kind === "cloud" ? COLORS.cloud : COLORS.accent;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(238,240,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(state.tracking * 100)}%`;
+          if (meter) meter.style.width = `${state.tracking * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `노출 ${state.plates} / ${GOAL_PLATES}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const cx = VIEW_W * 0.5;
+          const cy = VIEW_H * 0.42;
+          hud.save();
+          hud.strokeStyle = state.tracking > 0.7 ? COLORS.accent : COLORS.danger;
+          hud.lineWidth = 1.6;
+          hud.beginPath();
+          hud.arc(cx, cy, 26, 0, Math.PI * 2);
+          hud.stroke();
+          hud.beginPath();
+          hud.moveTo(cx - 34, cy); hud.lineTo(cx - 12, cy);
+          hud.moveTo(cx + 12, cy); hud.lineTo(cx + 34, cy);
+          hud.moveTo(cx, cy - 34); hud.lineTo(cx, cy - 12);
+          hud.moveTo(cx, cy + 12); hud.lineTo(cx, cy + 34);
+          hud.stroke();
+          const params = difficultyAt(state.elapsed);
+          const err = skyError(params);
+          const ox = clamp(wrapAng(pointing(params).ra - state.comet.ra) * 90, -80, 80);
+          const oy = clamp((pointing(params).dec - state.comet.dec) * 90, -60, 60);
+          hud.fillStyle = COLORS.comet;
+          hud.beginPath();
+          hud.arc(cx - ox, cy + oy, 4, 0, Math.PI * 2);
+          hud.fill();
+          hud.restore();
+          if (state.cloudCover > 0.2) {
+            hud.fillStyle = `rgba(106,115,136,${state.cloudCover * 0.18})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.indexOf("구름") >= 0 || state.message.indexOf("흐림") >= 0 ? COLORS.danger : COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(238,240,255,${state.flash * 0.22})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.lostTimer > 0.4) {
+            hud.fillStyle = COLORS.danger;
+            hud.font = "700 13px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("시야 이탈", VIEW_W / 2, VIEW_H - 64);
+          }
+          hud.textAlign = "left";
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const aim = pointing(params);
+          return JSON.stringify({
+            coordinate_system: "equatorial ra/dec; camera in dome along tube -z",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            plates: state.plates,
+            tracking: Number(state.tracking.toFixed(3)),
+            pe: Number(state.pe.toFixed(3)),
+            cloudCover: Number(state.cloudCover.toFixed(3)),
+            mount: { ra: Number(state.mount.ra.toFixed(3)), dec: Number(state.mount.dec.toFixed(3)) },
+            pointing: { ra: Number(aim.ra.toFixed(3)), dec: Number(aim.dec.toFixed(3)) },
+            comet: { ra: Number(state.comet.ra.toFixed(3)), dec: Number(state.comet.dec.toFixed(3)) },
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.baseRa = state.mount.ra;
+          input.baseDec = state.mount.dec;
+          input.pointerId = event.pointerId;
+          input.downAt = state.elapsed;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          if (Math.hypot(dx, dy) > 7) input.moved = true;
+          state.mount.ra = clamp(input.baseRa + dx * 0.0036, -1.45, 1.45);
+          state.mount.dec = clamp(input.baseDec - dy * 0.0032, -0.72, 0.92);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.dragging && !input.moved) {
+            exposePlate();
+          }
+          input.dragging = false;
+          input.moved = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onPointerCancel(event) {
+          ignoreUp = false;
+          input.dragging = false;
+          input.moved = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            exposePlate();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.plates = GOAL_PLATES;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerCancel);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          Object.keys(input).forEach((key) => { if (typeof input[key] === "boolean") input[key] = false; });
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

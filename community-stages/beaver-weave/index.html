@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>비버 댐</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #0c1810; --accent: #7dffb0; --accent-ink: #0c1810; --danger: #ff6b7a; --ink: #e6fff2; --muted: rgba(230,255,242,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">비버 댐. 흐름에 맞춰 가지를 끼워 댐 샘을 막으세요. 드래그로 가지 배치, 탭으로 진흙 메우기. 수위가 목표에 닿으면 클리어. 댐이 터지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 드래그해 가지를 끼우고, 짧게 탭하면 샘을 진흙으로 메웁니다.</p>
+    <main class="stage" aria-label="비버 댐 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="비버 댐" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">수위</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">48.0</p>
+          <p class="hud-sub" id="hud-sub">누수 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Beaver Dam</p>
+          <h1>비버 댐</h1>
+          <p class="brief-lead">흐름에 맞춰 가지를 끼워 댐 샘을 막으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 가지 배치, 탭으로 진흙 메우기</span></li>
+            <li><strong>클리어</strong><span>수위가 목표에 닿으면 클리어</span></li>
+            <li><strong>실패</strong><span>댐이 터지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">댐 붕괴</p>
+          <h2>물길이 터졌다</h2>
+          <p class="brief-lead" id="fail-detail">댐이 터지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">연못 완성</p>
+          <h2>수위가 찼다</h2>
+          <p class="brief-lead">가지와 진흙으로 댐을 막아 목표 수위에 닿았습니다.</p>
+          <p class="hud-sub" id="clear-stat">수위가 목표에 닿으면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 48;
+        const COLS = 7;
+        const ROWS = 4;
+        const TARGET = 0.88;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "beaver-weave",
+          title: "비버 댐",
+          description: "흐름에 맞춰 가지를 끼워 댐 샘을 막으세요.",
+          creator: "collin",
+          genre: "3D beaver dam",
+          clearCondition: "수위가 목표에 닿으면 클리어",
+          failCondition: "댐이 터지면 실패",
+          controls: "드래그로 가지 배치, 탭으로 진흙 메우기",
+        };
+        const COLORS = {
+          bg: "#0c1810",
+          ink: "#e6fff2",
+          accent: "#7dffb0",
+          wood: "#6a4020",
+          mud: "#5a3a22",
+          water: "#1a4a4a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          burst: "샘이 벌어져 댐이 터졌습니다",
+          washout: "끼우지 못한 가지가 떠내려가 무너졌습니다",
+          time_limit: "제한 시간 48초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 0, y: 1.4, z: 7.2 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 1, z: 0 },
+          fwd: { x: 0, y: 0, z: -1 },
+          focal: 430,
+        };
+        const EDDY = [
+          [1, 0], [3, 0], [5, 0],
+          [2, 1], [4, 1],
+          [1, 2], [5, 2],
+          [3, 3],
+        ];
+        const STUMPS = [
+          [-5.4, 2.2], [5.6, 1.6], [-6.1, -1.4], [6.2, -2.1], [-4.8, 4.4],
+        ];
+        const ASPEN = [
+          [-7.2, -3.4], [7.4, -2.8], [-8.0, 1.2], [8.1, 2.4], [-7.6, 5.1], [7.8, 4.6],
+        ];
+        const CATTAILS = [
+          [-4.2, -2.2], [-3.6, -1.6], [3.8, -2.0], [4.4, -1.4], [-2.2, -4.6], [2.4, -4.8],
+        ];
+        const LILIES = [
+          [-1.6, -3.8], [0.4, -4.4], [1.8, -3.2], [-0.8, -2.6],
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        function cellWorld(col, row) {
+          return {
+            x: (col - 3) * 0.95,
+            y: 0.28 + row * 0.62,
+            z: 0.15 + row * 0.08,
+          };
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          water: 0.18,
+          leak: 0,
+          pressure: 0,
+          cells: [],
+          cursor: { col: 3, row: 1 },
+          beaver: { x: 0, y: 0.4, z: 1.4, bob: 0 },
+          particles: [],
+          driftBits: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          mudCool: 0,
+        };
+        const input = {
+          holding: false,
+          downX: 0,
+          downY: 0,
+          pointerX: 0,
+          pointerY: 0,
+          moved: 0,
+          mudKey: false,
+        };
+        let ignoreUp = false;
+
+        function emptyGrid() {
+          const cells = [];
+          for (let row = 0; row < ROWS; row += 1) {
+            for (let col = 0; col < COLS; col += 1) {
+              const bank = col === 0 || col === COLS - 1;
+              cells.push({
+                col, row,
+                kind: bank ? "bank" : "empty",
+                drift: 0,
+                mud: 0,
+                wedge: bank,
+              });
+            }
+          }
+          return cells;
+        }
+
+        function cellAt(col, row) {
+          if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return null;
+          return state.cells[row * COLS + col];
+        }
+
+        function isEddy(col, row, phase) {
+          if (phase <= 1) return true;
+          const hit = EDDY.some((e) => e[0] === col && e[1] === row);
+          if (phase === 2) return hit || row === 0;
+          return hit;
+        }
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            current: 0.55 + (phase - 1) * 0.38 + difficulty * 0.22,
+            fill: 0.078 - (phase - 1) * 0.008,
+            mudHold: 6.4 - (phase - 1) * 1.1,
+            burstNeed: 0.72 + (phase - 1) * 0.04,
+            driftTime: 1.15 - (phase - 1) * 0.18,
+          };
+        }
+
+        function recomputeWedge() {
+          state.cells.forEach((c) => {
+            if (c.kind === "bank") { c.wedge = true; return; }
+            if (c.kind !== "stick" && c.kind !== "mud") { c.wedge = false; return; }
+            const n = [
+              cellAt(c.col - 1, c.row), cellAt(c.col + 1, c.row),
+              cellAt(c.col, c.row - 1), cellAt(c.col, c.row + 1),
+            ];
+            c.wedge = n.some((o) => o && (o.kind === "bank" || ((o.kind === "stick" || o.kind === "mud") && o.wedge)));
+            if (c.row === 0 && (c.kind === "stick" || c.kind === "mud")) c.wedge = true;
+          });
+          for (let pass = 0; pass < 4; pass += 1) {
+            state.cells.forEach((c) => {
+              if (c.kind !== "stick" && c.kind !== "mud") return;
+              const n = [
+                cellAt(c.col - 1, c.row), cellAt(c.col + 1, c.row),
+                cellAt(c.col, c.row - 1), cellAt(c.col, c.row + 1),
+              ];
+              if (n.some((o) => o && o.wedge && (o.kind === "bank" || o.kind === "stick" || o.kind === "mud"))) {
+                c.wedge = true;
+              }
+            });
+          }
+        }
+
+        function leakCells() {
+          const waterRow = state.water * ROWS;
+          return state.cells.filter((c) => {
+            if (c.kind === "bank") return false;
+            if (c.kind === "stick" && c.wedge) return false;
+            if (c.kind === "mud" && c.mud > 0.18) return false;
+            return c.row + 0.35 < waterRow + 0.7;
+          });
+        }
+
+        function sealRatio() {
+          const play = state.cells.filter((c) => c.kind !== "bank");
+          const sealed = play.filter((c) => (c.kind === "stick" && c.wedge) || (c.kind === "mud" && c.mud > 0.2));
+          return sealed.length / Math.max(1, play.length);
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.4, 2.6),
+              vy: randRange(0.3, 2.4),
+              vz: Math.sin(a) * randRange(0.3, 2.2),
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.04, 0.11),
+            });
+          }
+          if (state.particles.length > 70) state.particles.splice(0, state.particles.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "stick") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.08);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "mud") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(110, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.1);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "leak") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(70, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.12);
+              gain.gain.setValueAtTime(0.025, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(392, now);
+              osc.frequency.exponentialRampToValueAtTime(784, now + 0.26);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.3);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.water = 0.18;
+          state.leak = 0;
+          state.pressure = 0;
+          state.cells = emptyGrid();
+          state.cursor = { col: 3, row: 1 };
+          state.beaver = { x: 0, y: 0.4, z: 1.4, bob: 0 };
+          state.particles = [];
+          state.driftBits = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "강턱에 가지를 끼우세요";
+          state.messageTime = 1.6;
+          state.failReason = "";
+          state.mudCool = 0;
+          input.holding = false;
+          hostClearReported = false;
+          hostFailReported = false;
+          reseed((Date.now() ^ 0xbea7) >>> 0);
+          const seed = cellAt(3, 0);
+          if (seed) { seed.kind = "stick"; seed.wedge = true; }
+        }
+
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(0, 1.6, 0.4, 24, "water");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("fail");
+          burst(0, 0.8, 0.2, 28, "bad");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function pointerCell(clientX, clientY) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+          const ny = clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+          const col = clamp(Math.round(nx * (COLS - 1)), 1, COLS - 2);
+          const row = clamp(Math.round((1 - ny) * (ROWS - 1)), 0, ROWS - 1);
+          return { col, row };
+        }
+
+        function placeStick(col, row, params) {
+          const cell = cellAt(col, row);
+          if (!cell || cell.kind === "bank") return;
+          if (cell.kind === "stick" && cell.wedge) return;
+          cell.kind = "stick";
+          cell.drift = 0;
+          cell.mud = 0;
+          recomputeWedge();
+          if (!cell.wedge && !isEddy(col, row, params.phase)) {
+            cell.drift = params.driftTime;
+            state.message = "끼우지 못하면 떠내려갑니다";
+            state.messageTime = 0.7;
+          } else {
+            cell.wedge = true;
+            state.message = "가지 끼움";
+            state.messageTime = 0.45;
+          }
+          const w = cellWorld(col, row);
+          burst(w.x, w.y, w.z, 8, "wood");
+          playSfx("stick");
+        }
+
+        function mudLeak() {
+          if (state.mudCool > 0) return;
+          const leaks = leakCells();
+          if (!leaks.length) {
+            const cell = cellAt(state.cursor.col, state.cursor.row);
+            if (cell && cell.kind === "empty") {
+              cell.kind = "mud";
+              cell.mud = 1;
+              recomputeWedge();
+            } else {
+              return;
+            }
+          } else {
+            let best = leaks[0];
+            let bestD = 99;
+            leaks.forEach((c) => {
+              const d = Math.abs(c.col - state.cursor.col) + Math.abs(c.row - state.cursor.row);
+              if (d < bestD) { bestD = d; best = c; }
+            });
+            best.kind = "mud";
+            best.mud = 1;
+            best.drift = 0;
+            recomputeWedge();
+            const w = cellWorld(best.col, best.row);
+            burst(w.x, w.y, w.z, 10, "mud");
+          }
+          state.mudCool = 0.22;
+          playSfx("mud");
+          state.message = "진흙 메움";
+          state.messageTime = 0.45;
+        }
+
+        function updateFx(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            p.vy -= 2.4 * dt;
+            p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          state.driftBits.forEach((b) => {
+            b.x += b.vx * dt;
+            b.z += b.vz * dt;
+            b.y += Math.sin(b.age * 4) * 0.01;
+            b.age += dt;
+            b.life -= dt;
+          });
+          state.driftBits = state.driftBits.filter((b) => b.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.5);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.mudCool = Math.max(0, state.mudCool - dt);
+          state.beaver.bob += dt * 2.2;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          if (input.holding) {
+            const next = pointerCell(input.pointerX, input.pointerY);
+            state.cursor = next;
+            const w = cellWorld(next.col, next.row);
+            state.beaver.x = lerp(state.beaver.x, w.x, 1 - Math.exp(-dt * 6));
+            state.beaver.y = lerp(state.beaver.y, w.y, 1 - Math.exp(-dt * 6));
+          }
+          recomputeWedge();
+          state.cells.forEach((c) => {
+            if (c.kind === "stick" && !c.wedge && c.drift > 0) {
+              c.drift -= dt * params.current;
+              if (c.drift <= 0) {
+                const w = cellWorld(c.col, c.row);
+                state.driftBits.push({
+                  x: w.x, y: w.y, z: w.z,
+                  vx: randRange(-0.4, 0.4), vz: randRange(1.6, 3.2),
+                  age: 0, life: 1.4,
+                });
+                c.kind = "empty";
+                playSfx("leak");
+                state.message = "가지가 떠내려갔다";
+                state.messageTime = 0.7;
+              }
+            }
+            if (c.kind === "mud") {
+              c.mud -= dt / params.mudHold * params.current;
+              if (c.mud <= 0) {
+                c.kind = "empty";
+                c.mud = 0;
+              }
+            }
+          });
+          const leaks = leakCells();
+          state.leak = clamp(leaks.length / 12, 0, 1);
+          const seal = sealRatio();
+          const rise = params.fill * (0.35 + seal * 1.25) - state.leak * 0.085 * params.current;
+          state.water = clamp(state.water + rise * dt, 0.08, 1);
+          const stress = state.leak * params.current * (0.45 + state.water);
+          if (stress > 0.38) state.pressure += dt;
+          else state.pressure = Math.max(0, state.pressure - dt * 0.45);
+          if (state.elapsed > 5.2 && state.pressure > params.burstNeed && state.water > 0.32) {
+            failStage(seal < 0.28 ? "washout" : "burst");
+            return;
+          }
+          if (state.water >= TARGET) {
+            clearStage();
+            return;
+          }
+          updateFx(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `수위 ${(state.water * 100).toFixed(0)}% · 누수 ${(state.leak * 100).toFixed(0)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 수위 ${(state.water * 100).toFixed(0)}%`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x0c1810, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x0c1810);
+          scene.fog = new THREE.Fog(0x0c1810, 8, 28);
+
+          const camera = new THREE.PerspectiveCamera(52, VIEW_W / VIEW_H, 0.1, 60);
+          camera.position.set(0.4, 1.35, 7.4);
+
+          scene.add(new THREE.AmbientLight(0x1a3a28, 0.5));
+          const hemi = new THREE.HemisphereLight(0x7dffb0, 0x0c1810, 0.42);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xc8e8c0, 0.55);
+          sun.position.set(-6, 8, 5);
+          scene.add(sun);
+          const poolLight = new THREE.PointLight(0x3dffc4, 0.9, 14);
+          poolLight.position.set(0, 1.2, -2.2);
+          scene.add(poolLight);
+
+          const mossMat = new THREE.MeshStandardMaterial({ color: 0x2a4a28, roughness: 0.92, metalness: 0.04 });
+          const bankMat = new THREE.MeshStandardMaterial({ color: 0x3a2a18, roughness: 0.9, metalness: 0.05 });
+          const woodMat = new THREE.MeshStandardMaterial({ color: 0x6a4020, roughness: 0.78, metalness: 0.08 });
+          const stickMat = new THREE.MeshStandardMaterial({ color: 0x8a5a2a, roughness: 0.7, metalness: 0.06, emissive: 0x1a1008, emissiveIntensity: 0.1 });
+          const mudMat = new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.95, metalness: 0.02 });
+          const waterMat = new THREE.MeshStandardMaterial({
+            color: 0x1a4a4a, roughness: 0.28, metalness: 0.22, transparent: true, opacity: 0.72,
+          });
+          const furMat = new THREE.MeshStandardMaterial({ color: 0x4a3a28, roughness: 0.8, metalness: 0.05 });
+          const leafMat = new THREE.MeshStandardMaterial({ color: 0x3a6a32, roughness: 0.86, metalness: 0.04 });
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x4a5248, roughness: 0.88, metalness: 0.1 });
+
+          const bed = new THREE.Mesh(new THREE.PlaneGeometry(22, 18), mossMat);
+          bed.rotation.x = -Math.PI / 2;
+          bed.position.set(0, -0.35, -1);
+          scene.add(bed);
+          const pool = new THREE.Mesh(new THREE.CircleGeometry(5.4, 24), waterMat);
+          pool.rotation.x = -Math.PI / 2;
+          pool.position.set(0, 0.02, -3.4);
+          scene.add(pool);
+          const stream = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.08, 10), waterMat);
+          stream.position.set(0, -0.12, 5.2);
+          scene.add(stream);
+
+          const bankL = new THREE.Mesh(new THREE.BoxGeometry(3.4, 2.6, 12), bankMat);
+          bankL.position.set(-5.3, 0.6, 1);
+          scene.add(bankL);
+          const bankR = bankL.clone();
+          bankR.position.x = 5.3;
+          scene.add(bankR);
+
+          const lodge = new THREE.Group();
+          const dome = new THREE.Mesh(new THREE.SphereGeometry(1.6, 10, 8), woodMat);
+          dome.scale.set(1.2, 0.7, 1.1);
+          dome.position.y = 0.55;
+          lodge.add(dome);
+          lodge.position.set(-3.4, 0, -4.2);
+          scene.add(lodge);
+
+          const trunkGeo = new THREE.CylinderGeometry(0.16, 0.22, 3.4, 6);
+          const canopyGeo = new THREE.SphereGeometry(0.9, 8, 8);
+          ASPEN.forEach((row) => {
+            const t = new THREE.Mesh(trunkGeo, new THREE.MeshStandardMaterial({
+              color: 0xd8d0c0, roughness: 0.7, metalness: 0.05,
+            }));
+            t.position.set(row[0], 1.5, row[1]);
+            scene.add(t);
+            const c = new THREE.Mesh(canopyGeo, leafMat);
+            c.position.set(row[0], 3.2, row[1]);
+            scene.add(c);
+          });
+          const stumpGeo = new THREE.CylinderGeometry(0.28, 0.32, 0.35, 8);
+          STUMPS.forEach((row) => {
+            const s = new THREE.Mesh(stumpGeo, woodMat);
+            s.position.set(row[0], 0.05, row[1]);
+            scene.add(s);
+            const chew = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.2, 6), woodMat);
+            chew.position.set(row[0], 0.28, row[1]);
+            scene.add(chew);
+          });
+          const rockGeo = new THREE.DodecahedronGeometry(0.38, 0);
+          [[-2.4, 3.2], [2.6, 3.6], [-1.6, 5.5], [1.8, 5.8], [0.2, 6.4]].forEach((row) => {
+            const r = new THREE.Mesh(rockGeo, rockMat);
+            r.position.set(row[0], -0.05, row[1]);
+            r.rotation.y = row[0];
+            scene.add(r);
+          });
+          const reedGeo = new THREE.CylinderGeometry(0.02, 0.03, 1.1, 4);
+          const reedMat = new THREE.MeshStandardMaterial({ color: 0x6a8a32, roughness: 0.85, metalness: 0.04 });
+          const headGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.18, 5);
+          const headMat = new THREE.MeshStandardMaterial({ color: 0x4a2a14, roughness: 0.8, metalness: 0.05 });
+          CATTAILS.forEach((row) => {
+            const reed = new THREE.Mesh(reedGeo, reedMat);
+            reed.position.set(row[0], 0.45, row[1]);
+            scene.add(reed);
+            const head = new THREE.Mesh(headGeo, headMat);
+            head.position.set(row[0], 1.05, row[1]);
+            scene.add(head);
+          });
+          const lilyGeo = new THREE.CircleGeometry(0.32, 8);
+          const lilyMat = new THREE.MeshStandardMaterial({ color: 0x2a6a3a, roughness: 0.7, metalness: 0.05 });
+          LILIES.forEach((row) => {
+            const lily = new THREE.Mesh(lilyGeo, lilyMat);
+            lily.rotation.x = -Math.PI / 2;
+            lily.position.set(row[0], 0.06, row[1]);
+            scene.add(lily);
+          });
+          const moon = new THREE.Mesh(
+            new THREE.SphereGeometry(0.7, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xd8ffe8 })
+          );
+          moon.position.set(-6.5, 6.4, -8);
+          scene.add(moon);
+          const fishGeo = new THREE.ConeGeometry(0.08, 0.28, 5);
+          const fishMat = new THREE.MeshStandardMaterial({ color: 0x7dffb0, roughness: 0.4, metalness: 0.2, emissive: 0x103018, emissiveIntensity: 0.2 });
+          const fishes = [];
+          for (let i = 0; i < 5; i += 1) {
+            const f = new THREE.Mesh(fishGeo, fishMat);
+            f.rotation.x = Math.PI / 2;
+            scene.add(f);
+            fishes.push(f);
+          }
+
+          const stickGeo = new THREE.CylinderGeometry(0.07, 0.09, 0.85, 6);
+          const mudGeo = new THREE.BoxGeometry(0.72, 0.28, 0.42);
+          const bankGeo = new THREE.BoxGeometry(0.85, 0.7, 0.55);
+          const cellMeshes = [];
+          for (let row = 0; row < ROWS; row += 1) {
+            for (let col = 0; col < COLS; col += 1) {
+              const g = new THREE.Group();
+              const stick = new THREE.Mesh(stickGeo, stickMat);
+              stick.rotation.z = Math.PI / 2 + (col % 2 ? 0.2 : -0.15);
+              g.add(stick);
+              const mud = new THREE.Mesh(mudGeo, mudMat);
+              g.add(mud);
+              const bank = new THREE.Mesh(bankGeo, bankMat);
+              g.add(bank);
+              scene.add(g);
+              cellMeshes.push({ root: g, stick, mud, bank });
+            }
+          }
+
+          const beaver = new THREE.Group();
+          const body = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), furMat);
+          body.scale.set(1.15, 0.8, 1.5);
+          body.position.y = 0.22;
+          beaver.add(body);
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), furMat);
+          head.position.set(0, 0.28, 0.32);
+          beaver.add(head);
+          const tail = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.04, 0.42), furMat);
+          tail.position.set(0, 0.12, -0.38);
+          beaver.add(tail);
+          const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.04), new THREE.MeshStandardMaterial({
+            color: 0xf0e6c0, roughness: 0.4, metalness: 0.1,
+          }));
+          tooth.position.set(0, 0.2, 0.44);
+          beaver.add(tooth);
+          scene.add(beaver);
+
+          const mistCount = reducedMotion ? 28 : 80;
+          const mistPos = new Float32Array(mistCount * 3);
+          for (let i = 0; i < mistCount; i += 1) {
+            mistPos[i * 3] = randRange(-6, 6);
+            mistPos[i * 3 + 1] = randRange(0.1, 1.8);
+            mistPos[i * 3 + 2] = randRange(-5, 7);
+          }
+          const mistGeo = new THREE.BufferGeometry();
+          mistGeo.setAttribute("position", new THREE.BufferAttribute(mistPos, 3));
+          scene.add(new THREE.Points(mistGeo, new THREE.PointsMaterial({
+            color: 0xa8e0c8, size: 0.08, transparent: true, opacity: 0.22, depthWrite: false,
+          })));
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0x7dffb0, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+          const bitGeo = new THREE.CylinderGeometry(0.04, 0.05, 0.4, 5);
+
+          return {
+            renderer, scene, camera, poolLight, pool, beaver, tail: tail, fishes,
+            cellMeshes, stickMat, mudMat,
+            particleGeo, particleMat, particleMeshes: [],
+            bitGeo, bitMeshes: [],
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          state.cells.forEach((c, index) => {
+            const mesh = webgl.cellMeshes[index];
+            if (!mesh) return;
+            const w = cellWorld(c.col, c.row);
+            mesh.root.position.set(w.x, w.y, w.z);
+            mesh.bank.visible = c.kind === "bank";
+            mesh.stick.visible = c.kind === "stick";
+            mesh.mud.visible = c.kind === "mud";
+            mesh.stick.material.emissiveIntensity = c.wedge ? 0.18 : 0.02;
+            mesh.mud.scale.setScalar(0.7 + c.mud * 0.4);
+          });
+          webgl.beaver.position.set(state.beaver.x, state.beaver.y + Math.sin(state.beaver.bob) * 0.04, 1.35);
+          webgl.tail.rotation.x = Math.sin(state.beaver.bob * 2) * 0.2;
+          webgl.pool.position.y = -0.15 + state.water * 0.55;
+          webgl.poolLight.intensity = 0.6 + state.water * 0.5;
+          if (webgl.fishes) {
+            webgl.fishes.forEach((f, i) => {
+              const t = state.elapsed * (0.4 + i * 0.07) + i;
+              f.position.set(Math.sin(t) * 1.8, 0.05 + state.water * 0.2, -2.4 + Math.cos(t * 0.8) * 1.4);
+              f.rotation.y = t;
+              f.visible = state.water > 0.28;
+            });
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "bad" ? 0xff6b7a : p.kind === "mud" ? 0x5a3a22 : p.kind === "wood" ? 0x8a5a2a : 0x7dffb0);
+            mesh.material.opacity = clamp(p.life * 1.8, 0, 1);
+          });
+          while (webgl.bitMeshes.length < state.driftBits.length) {
+            const mesh = new THREE.Mesh(webgl.bitGeo, webgl.stickMat);
+            webgl.scene.add(mesh);
+            webgl.bitMeshes.push(mesh);
+          }
+          webgl.bitMeshes.forEach((mesh, index) => {
+            const b = state.driftBits[index];
+            if (!b) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(b.x, b.y, b.z);
+            mesh.rotation.z = b.age * 2;
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.4) * 0.1;
+          webgl.camera.position.set(0.35 + sway + shakeX, 1.15 + state.water * 0.35 + shakeY, 7.15);
+          webgl.camera.lookAt(0, 0.85, 0.2);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = -(ez);
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + ex * w, y: VIEW_H * 0.55 - ey * w, visible: depth > 0.8 };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#143024");
+          sky.addColorStop(1, "#0c1810");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#1a4a4a";
+          ctx.fillRect(0, VIEW_H * (0.72 - state.water * 0.22), VIEW_W, VIEW_H);
+          ctx.fillStyle = "#3a2a18";
+          ctx.fillRect(0, VIEW_H * 0.28, 70, VIEW_H);
+          ctx.fillRect(VIEW_W - 70, VIEW_H * 0.28, 70, VIEW_H);
+          state.cells.forEach((c) => {
+            const w = cellWorld(c.col, c.row);
+            const p = projectToScreen(w.x, w.y, w.z);
+            if (c.kind === "bank") ctx.fillStyle = "#3a2a18";
+            else if (c.kind === "stick") ctx.fillStyle = c.wedge ? "#8a5a2a" : "#c4a056";
+            else if (c.kind === "mud") ctx.fillStyle = "#5a3a22";
+            else ctx.fillStyle = "rgba(125,255,176,0.12)";
+            ctx.fillRect(p.x - 16, p.y - 10, 32, 20);
+            if (c.kind === "empty" && leakCells().includes(c)) {
+              ctx.strokeStyle = COLORS.danger;
+              ctx.strokeRect(p.x - 16, p.y - 10, 32, 20);
+            }
+          });
+          const bp = projectToScreen(state.beaver.x, state.beaver.y, 1.35);
+          ctx.fillStyle = "#4a3a28";
+          ctx.beginPath();
+          ctx.ellipse(bp.x, bp.y, 14, 9, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#f0e6c0";
+          ctx.fillRect(bp.x - 3, bp.y + 2, 6, 5);
+          const lodge = projectToScreen(-3.4, 0.8, -4.2);
+          ctx.fillStyle = COLORS.wood;
+          ctx.beginPath();
+          ctx.ellipse(lodge.x, lodge.y, 22, 12, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ASPEN.forEach((row) => {
+            const p = projectToScreen(row[0], 1.6, row[1]);
+            ctx.fillStyle = "#d8d0c0";
+            ctx.fillRect(p.x - 3, p.y - 18, 6, 28);
+            ctx.fillStyle = "#3a6a32";
+            ctx.beginPath();
+            ctx.arc(p.x, p.y - 18, 10, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          CATTAILS.forEach((row) => {
+            const p = projectToScreen(row[0], 0.6, row[1]);
+            ctx.strokeStyle = "#6a8a32";
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y + 8);
+            ctx.lineTo(p.x, p.y - 12);
+            ctx.stroke();
+            ctx.fillStyle = "#4a2a14";
+            ctx.fillRect(p.x - 2, p.y - 16, 4, 6);
+          });
+          LILIES.forEach((row) => {
+            const p = projectToScreen(row[0], 0.1, row[1]);
+            ctx.fillStyle = "#2a6a3a";
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, 7, 4, 0, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          const moon = projectToScreen(-6.5, 6.4, -8);
+          ctx.fillStyle = "rgba(216,255,232,0.85)";
+          ctx.beginPath();
+          ctx.arc(moon.x, moon.y, 10, 0, Math.PI * 2);
+          ctx.fill();
+          state.driftBits.forEach((b) => {
+            const p = projectToScreen(b.x, b.y, b.z);
+            ctx.fillStyle = "#8a5a2a";
+            ctx.fillRect(p.x, p.y, 10, 3);
+          });
+          ctx.fillStyle = "rgba(230,255,242,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(state.water / TARGET * 100)}%`;
+          if (meter) meter.style.width = `${clamp(state.water / TARGET, 0, 1) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `누수 ${(state.leak * 100).toFixed(0)}%`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const cur = cellWorld(state.cursor.col, state.cursor.row);
+          const p = projectToScreen(cur.x, cur.y, cur.z);
+          hud.strokeStyle = COLORS.accent;
+          hud.lineWidth = 2;
+          hud.strokeRect(p.x - 18, p.y - 12, 36, 24);
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "800 22px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 86);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(125,255,176,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.pressure > 0.35) {
+            hud.fillStyle = `rgba(255,107,122,${Math.min(0.22, state.pressure * 0.12)})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; dam face; +y up; camera at water level",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            score: Number(state.water.toFixed(3)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+            water: Number(state.water.toFixed(3)),
+            leak: Number(state.leak.toFixed(3)),
+            seal: Number(sealRatio().toFixed(3)),
+            cursor: state.cursor,
+          });
+        }
+
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerX = event.clientX;
+          input.pointerY = event.clientY;
+          input.moved = 0;
+          state.cursor = pointerCell(event.clientX, event.clientY);
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          input.pointerX = event.clientX;
+          input.pointerY = event.clientY;
+          input.moved = Math.max(input.moved, Math.hypot(event.clientX - input.downX, event.clientY - input.downY));
+          if (input.moved > 14) {
+            const cell = pointerCell(event.clientX, event.clientY);
+            placeStick(cell.col, cell.row, difficultyAt(state.elapsed));
+          }
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            return;
+          }
+          if (state.mode === "running" && input.holding) {
+            const d = Math.hypot(event.clientX - input.downX, event.clientY - input.downY);
+            if (d < 12) mudLeak();
+          }
+          input.holding = false;
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            mudLeak();
+          }
+          if (event.code === "ArrowLeft") state.cursor.col = clamp(state.cursor.col - 1, 1, COLS - 2);
+          if (event.code === "ArrowRight") state.cursor.col = clamp(state.cursor.col + 1, 1, COLS - 2);
+          if (event.code === "ArrowUp") state.cursor.row = clamp(state.cursor.row + 1, 0, ROWS - 1);
+          if (event.code === "ArrowDown") state.cursor.row = clamp(state.cursor.row - 1, 0, ROWS - 1);
+          if (event.code === "KeyF" && state.mode === "running") {
+            placeStick(state.cursor.col, state.cursor.row, difficultyAt(state.elapsed));
+          }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id, title: META.title, creator: META.creator,
+          genre: META.genre, clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let i = 0; i < steps; i += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.water = TARGET;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        window.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

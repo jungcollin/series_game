@@ -1,0 +1,1166 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>옥내 호스</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #140808; --accent: #ff6b3d; --accent-ink: #1a0806; --danger: #ff6b7a; --ink: #ffe4d4; --muted: rgba(255,228,212,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">옥내 호스. 꺾임을 풀고 주수로 화실을 제압하세요. 드래그로 전진, 탭으로 꺾임 해소, 홀드로 주수. 발화실을 끄면 클리어. 꺾임으로 압이 죽거나 플래시오버가 나면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 드래그해 전진하고 짧게 탭해 꺾임을 풀며 길게 눌러 주수합니다.</p>
+    <main class="stage" aria-label="옥내 호스 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="옥내 호스" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">주수</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">꺾임 0</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Interior Hose</p>
+          <h1>옥내 호스</h1>
+          <p class="brief-lead">꺾임을 풀고 주수로 화실을 제압하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 전진, 탭으로 꺾임 해소, 홀드로 주수</span></li>
+            <li><strong>클리어</strong><span>발화실을 끄면 클리어</span></li>
+            <li><strong>실패</strong><span>꺾임으로 압이 죽거나 플래시오버가 나면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">제압 실패</p>
+          <h2>복도가 먹혔다</h2>
+          <p class="brief-lead" id="fail-detail">꺾임으로 압이 죽거나 플래시오버가 나면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">진압</p>
+          <h2>화실 제압</h2>
+          <p class="brief-lead">꺾임을 풀고 발화실을 껐습니다.</p>
+          <p class="hud-sub" id="clear-stat">발화실을 끄면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const FIRE_Z = -26.5;
+        const TAP_MS = 210;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "fire-hose",
+          title: "옥내 호스",
+          description: "꺾임을 풀고 주수로 화실을 제압하세요.",
+          creator: "collin",
+          genre: "3D hose advance",
+          clearCondition: "발화실을 끄면 클리어",
+          failCondition: "꺾임으로 압이 죽거나 플래시오버가 나면 실패",
+          controls: "드래그로 전진, 탭으로 꺾임 해소, 홀드로 주수",
+        };
+        const COLORS = {
+          bg: "#140808",
+          ink: "#ffe4d4",
+          ember: "#ff6b3d",
+          smoke: "#6a5850",
+          hose: "#c45a3a",
+          brass: "#d4a056",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          kink_dead: "호스 꺾임으로 주수 압이 죽었습니다",
+          flashover: "천장 가스가 플래시오버로 터졌습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const DOOR_Z = [-4.5, -9.5, -14.5, -19.5];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          team: { x: 0, y: 0, z: 0.6, yaw: 0, speed: 0 },
+          pressure: 1,
+          ceiling: 0.12,
+          douse: 0,
+          kinks: [],
+          spray: false,
+          particles: [],
+          droplets: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          walkAcc: 0,
+          kinkSeq: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false, space: false,
+          dragging: false, walk: 0, strafe: 0, holding: false,
+          downAt: 0, downX: 0, downY: 0, moved: false, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            walkSpeed: 2.35 + (phase === 1 ? 0.15 : 0),
+            kinkEvery: phase === 1 ? 5.4 : phase === 2 ? 3.6 : 2.4,
+            kinkCost: phase >= 3 ? 0.28 : 0.2,
+            heatIdle: phase === 1 ? 0.012 : phase === 2 ? 0.02 : 0.032,
+            heatFire: phase === 1 ? 0.045 : phase === 2 ? 0.07 : 0.1,
+            sprayCool: phase >= 3 ? 0.085 : 0.11,
+            douseRate: phase >= 3 ? 0.22 : 0.28,
+            telegraph: phase >= 2,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.5, 2.6),
+              vy: randRange(0.4, 2.8),
+              vz: Math.sin(angle) * randRange(0.5, 2.2),
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.04, 0.12),
+            });
+          }
+          if (state.particles.length > 80) state.particles.splice(0, state.particles.length - 80);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "spray") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.08);
+              gain.gain.setValueAtTime(0.025, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "unkink") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(420, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "warn") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(160, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.12);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(360, now);
+              osc.frequency.exponentialRampToValueAtTime(920, now + 0.24);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.29);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(24, now + 0.3);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.33);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.team = { x: 0, y: 0, z: 0.6, yaw: 0, speed: 0 };
+          state.pressure = 1;
+          state.ceiling = 0.12;
+          state.douse = 0;
+          state.kinks = [];
+          state.spray = false;
+          state.particles = [];
+          state.droplets = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "호스를 펴고 화실로 전진";
+          state.messageTime = 1.5;
+          state.failReason = "";
+          state.walkAcc = 0;
+          state.kinkSeq = 0;
+          input.walk = 0;
+          input.strafe = 0;
+          input.holding = false;
+          input.dragging = false;
+          reseed((Date.now() ^ 0xc3c3) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(0, 1.2, FIRE_Z, 24, "ember");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.18 : 0.86;
+          state.flash = 0.8;
+          playSfx("boom");
+          burst(state.team.x, 1.4, state.team.z, 28, "ember");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function spawnKink() {
+          if (state.kinks.length >= 4) return;
+          const behind = state.team.z + randRange(1.4, 4.2);
+          state.kinks.push({
+            id: (state.kinkSeq += 1),
+            x: randRange(-0.55, 0.55),
+            y: 0.22,
+            z: Math.min(1.2, behind),
+            twist: randRange(0.6, 1.4),
+          });
+          state.message = "호스 꺾임!";
+          state.messageTime = 0.75;
+          playSfx("warn");
+        }
+
+        function unkinkNearest() {
+          if (!state.kinks.length) {
+            state.message = "꺾임이 없습니다";
+            state.messageTime = 0.5;
+            return;
+          }
+          let best = 0;
+          let bestD = Infinity;
+          state.kinks.forEach((kink, index) => {
+            const d = Math.abs(kink.z - state.team.z);
+            if (d < bestD) { bestD = d; best = index; }
+          });
+          const kink = state.kinks[best];
+          burst(kink.x, 0.4, kink.z, 10, "hose");
+          state.kinks.splice(best, 1);
+          state.pressure = clamp(state.pressure + 0.12, 0, 1);
+          state.message = `꺾임 해소 ${state.kinks.length}`;
+          state.messageTime = 0.7;
+          playSfx("unkink");
+        }
+
+        function inFireRoom() {
+          return state.team.z <= FIRE_Z + 3.4;
+        }
+
+        function updateMove(dt, params) {
+          let walk = 0;
+          let strafe = 0;
+          if (input.up) walk += 1;
+          if (input.down) walk -= 0.5;
+          if (input.left) strafe -= 1;
+          if (input.right) strafe += 1;
+          if (input.dragging) {
+            walk += input.walk;
+            strafe += input.strafe;
+          }
+          const spraying = state.spray;
+          walk = clamp(walk, -0.5, spraying ? 0.35 : 1);
+          strafe = clamp(strafe, -1, 1);
+          state.team.speed = walk * params.walkSpeed;
+          state.team.x = clamp(state.team.x + strafe * 1.5 * dt, -0.95, 0.95);
+          state.team.z = clamp(state.team.z + -state.team.speed * dt, FIRE_Z - 0.4, 1.4);
+          state.team.yaw = lerp(state.team.yaw, strafe * 0.2, Math.min(1, dt * 7));
+          if (walk > 0.25) {
+            state.walkAcc += Math.abs(state.team.speed) * dt;
+            if (state.walkAcc > params.kinkEvery) {
+              state.walkAcc = 0;
+              spawnKink();
+            }
+          }
+        }
+
+        function updateHose(dt, params) {
+          const kinkLoad = state.kinks.length * params.kinkCost;
+          const wantSpray = input.holding && (performance.now() - input.downAt > TAP_MS || input.space);
+          state.spray = wantSpray && !input.moved;
+          if (state.spray) {
+            const drain = 0.035 + kinkLoad * 0.22;
+            state.pressure -= drain * dt;
+            if (kinkLoad > 0) {
+              state.pressure -= params.kinkCost * 0.35 * dt;
+              if (state.messageTime <= 0) {
+                state.message = "꺾임 때문에 압이 샌다";
+                state.messageTime = 0.6;
+              }
+            } else {
+              state.pressure = clamp(state.pressure + 0.02 * dt, 0, 1);
+            }
+            for (let index = 0; index < (reducedMotion ? 1 : 3); index += 1) {
+              state.droplets.push({
+                x: state.team.x + randRange(-0.1, 0.1),
+                y: 1.05,
+                z: state.team.z - 0.6,
+                vz: -8 - state.pressure * 6,
+                vy: randRange(0.2, 1.4),
+                life: 0.35,
+              });
+            }
+            if (Math.floor(state.elapsed * 8) !== Math.floor((state.elapsed - dt) * 8)) playSfx("spray");
+          } else {
+            state.pressure = clamp(state.pressure + 0.04 * dt - kinkLoad * 0.015 * dt, 0, 1);
+          }
+          if (state.pressure <= 0) {
+            failStage("kink_dead");
+            return;
+          }
+          let heat = params.heatIdle;
+          if (inFireRoom()) heat = params.heatFire;
+          if (state.spray && state.pressure > 0.25 && state.kinks.length === 0) {
+            heat -= params.sprayCool;
+          }
+          state.ceiling = clamp(state.ceiling + heat * dt, 0, 1.15);
+          if (state.ceiling >= 1) {
+            failStage("flashover");
+            return;
+          }
+          if (inFireRoom() && state.spray && state.kinks.length === 0 && state.pressure > 0.28) {
+            state.douse = clamp(state.douse + params.douseRate * state.pressure * dt, 0, 1);
+            if (state.douse >= 1) clearStage();
+          } else if (!inFireRoom()) {
+            state.douse = clamp(state.douse - 0.04 * dt, 0, 1);
+          }
+          state.kinks.forEach((kink) => {
+            kink.z = lerp(kink.z, state.team.z + 2.2, Math.min(1, dt * 0.8));
+            kink.twist += dt * 2;
+          });
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 2.2 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+          state.droplets.forEach((drop) => {
+            drop.z += drop.vz * dt;
+            drop.y += drop.vy * dt;
+            drop.life -= dt;
+          });
+          state.droplets = state.droplets.filter((drop) => drop.life > 0);
+          if (state.droplets.length > 90) state.droplets.splice(0, state.droplets.length - 90);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.2);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateMove(dt, params);
+          if (state.mode !== "running") return;
+          updateHose(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `주수 ${Math.round(state.douse * 100)}% · 꺾임 ${state.kinks.length} · 압 ${Math.round(state.pressure * 100)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 꺾임 잔여 ${state.kinks.length}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x140808, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x140808);
+          scene.fog = new THREE.Fog(0x2a1410, 5, 22);
+
+          const camera = new THREE.PerspectiveCamera(62, VIEW_W / VIEW_H, 0.12, 70);
+          camera.position.set(0, 1.55, 4.2);
+
+          scene.add(new THREE.AmbientLight(0x4a2018, 0.4));
+          const hemi = new THREE.HemisphereLight(0xffb080, 0x180808, 0.45);
+          scene.add(hemi);
+          const dir = new THREE.DirectionalLight(0xffc090, 0.25);
+          dir.position.set(2, 8, 4);
+          scene.add(dir);
+          const fireLight = new THREE.PointLight(0xff6b3d, 1.4, 14);
+          fireLight.position.set(0, 1.6, FIRE_Z);
+          scene.add(fireLight);
+          const helmetLight = new THREE.PointLight(0xffe4d4, 0.9, 8);
+          helmetLight.position.set(0, 1.5, 1);
+          scene.add(helmetLight);
+
+          const wallMat = new THREE.MeshStandardMaterial({
+            color: 0x4a2a22, roughness: 0.86, metalness: 0.06, emissive: 0x180808, emissiveIntensity: 0.18,
+          });
+          const floorMat = new THREE.MeshStandardMaterial({
+            color: 0x2a1a14, roughness: 0.9, metalness: 0.08, emissive: 0x100808, emissiveIntensity: 0.12,
+          });
+          const ceilMat = new THREE.MeshStandardMaterial({
+            color: 0x3a241c, roughness: 0.8, metalness: 0.05, emissive: 0x2a1008, emissiveIntensity: 0.22,
+          });
+          const doorMat = new THREE.MeshStandardMaterial({
+            color: 0x6a3a28, roughness: 0.7, metalness: 0.08, emissive: 0x1a0c08, emissiveIntensity: 0.15,
+          });
+          const hoseMat = new THREE.MeshStandardMaterial({
+            color: 0xc45a3a, roughness: 0.45, metalness: 0.2, emissive: 0x3a1208, emissiveIntensity: 0.3,
+          });
+          const brassMat = new THREE.MeshStandardMaterial({
+            color: 0xd4a056, roughness: 0.35, metalness: 0.65, emissive: 0x3a2808, emissiveIntensity: 0.28,
+          });
+          const gearMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3a38, roughness: 0.55, metalness: 0.4, emissive: 0x101010, emissiveIntensity: 0.16,
+          });
+          const emberMat = new THREE.MeshStandardMaterial({
+            color: 0xff6b3d, roughness: 0.4, metalness: 0.1, emissive: 0xff3a10, emissiveIntensity: 0.85,
+          });
+          const smokeMat = new THREE.MeshBasicMaterial({
+            color: 0xff8a50, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide,
+          });
+
+          const floor = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.12, 34), floorMat);
+          floor.position.set(0, -0.06, -14);
+          scene.add(floor);
+          const ceil = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.12, 34), ceilMat);
+          ceil.position.set(0, 2.62, -14);
+          scene.add(ceil);
+          const wallL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.7, 34), wallMat);
+          wallL.position.set(-2.05, 1.3, -14);
+          const wallR = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.7, 34), wallMat);
+          wallR.position.set(2.05, 1.3, -14);
+          scene.add(wallL, wallR);
+
+          const baseGeo = new THREE.BoxGeometry(0.35, 0.08, 34);
+          const baseL = new THREE.Mesh(baseGeo, doorMat);
+          baseL.position.set(-1.85, 0.08, -14);
+          const baseR = new THREE.Mesh(baseGeo, doorMat);
+          baseR.position.set(1.85, 0.08, -14);
+          scene.add(baseL, baseR);
+
+          const doorGeo = new THREE.BoxGeometry(0.08, 2.05, 0.85);
+          const frameGeo = new THREE.BoxGeometry(0.12, 2.2, 1.05);
+          const doors = [];
+          DOOR_Z.forEach((z, index) => {
+            const side = index % 2 ? 1 : -1;
+            const frame = new THREE.Mesh(frameGeo, brassMat);
+            frame.position.set(side * 1.95, 1.1, z);
+            const door = new THREE.Mesh(doorGeo, doorMat);
+            door.position.set(side * 1.88, 1.05, z);
+            scene.add(frame, door);
+            doors.push(door);
+          });
+
+          const picGeo = new THREE.PlaneGeometry(0.5, 0.38);
+          const picMat = new THREE.MeshStandardMaterial({
+            color: 0xd4b080, roughness: 0.6, metalness: 0.05, emissive: 0x2a1808, emissiveIntensity: 0.12,
+          });
+          for (let index = 0; index < 6; index += 1) {
+            const pic = new THREE.Mesh(picGeo, picMat);
+            pic.position.set(index % 2 ? 1.94 : -1.94, 1.7, -2 - index * 4);
+            pic.rotation.y = index % 2 ? -Math.PI / 2 : Math.PI / 2;
+            scene.add(pic);
+          }
+
+          const smoke = new THREE.Mesh(new THREE.PlaneGeometry(3.8, 18, 8, 10), smokeMat);
+          smoke.rotation.x = Math.PI / 2;
+          smoke.position.set(0, 2.35, -12);
+          scene.add(smoke);
+
+          const hoseSegGeo = new THREE.CylinderGeometry(0.08, 0.08, 1.05, 8);
+          const hoseSegs = [];
+          for (let index = 0; index < 18; index += 1) {
+            const seg = new THREE.Mesh(hoseSegGeo, hoseMat);
+            scene.add(seg);
+            hoseSegs.push(seg);
+          }
+          const nozzle = new THREE.Group();
+          const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 0.55, 8), brassMat);
+          pipe.rotation.x = Math.PI / 2;
+          const grip = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.22, 0.12), gearMat);
+          grip.position.set(0, -0.12, 0.05);
+          nozzle.add(pipe, grip);
+          scene.add(nozzle);
+
+          const bunkerMat = new THREE.MeshStandardMaterial({
+            color: 0x4a2a18, roughness: 0.7, metalness: 0.12, emissive: 0x1a0c08, emissiveIntensity: 0.2,
+          });
+          const team = new THREE.Group();
+          const body = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.8, 8), bunkerMat);
+          body.position.y = 0.9;
+          const helm = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), brassMat);
+          helm.position.y = 1.4;
+          const pack = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.4, 0.16), gearMat);
+          pack.position.set(0, 0.95, 0.22);
+          team.add(body, helm, pack);
+          scene.add(team);
+          const partner = team.clone();
+          partner.position.set(-0.55, 0, 0.7);
+          scene.add(partner);
+
+          const kinkGeo = new THREE.TorusGeometry(0.22, 0.07, 6, 12);
+          const kinkMeshes = [];
+          for (let index = 0; index < 4; index += 1) {
+            const mesh = new THREE.Mesh(kinkGeo, hoseMat);
+            mesh.visible = false;
+            scene.add(mesh);
+            kinkMeshes.push(mesh);
+          }
+
+          const fireRoom = new THREE.Group();
+          const back = new THREE.Mesh(new THREE.BoxGeometry(4.2, 2.7, 0.2), wallMat);
+          back.position.z = -2.2;
+          const flameGeo = new THREE.ConeGeometry(0.35, 1.1, 6);
+          const flames = [];
+          for (let index = 0; index < 7; index += 1) {
+            const flame = new THREE.Mesh(flameGeo, emberMat);
+            flame.position.set(-1.4 + index * 0.45, 0.6, -1.4);
+            fireRoom.add(flame);
+            flames.push(flame);
+          }
+          const sofa = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.55, 0.7), doorMat);
+          sofa.position.set(-0.8, 0.3, -0.8);
+          const table = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.7), gearMat);
+          table.position.set(0.9, 0.22, -1.0);
+          fireRoom.add(back, sofa, table);
+          fireRoom.position.z = FIRE_Z - 0.2;
+          scene.add(fireRoom);
+
+          const dropGeo = new THREE.SphereGeometry(0.05, 5, 5);
+          const dropMat = new THREE.MeshBasicMaterial({
+            color: 0x9ad4ff, transparent: true, opacity: 0.7, depthWrite: false,
+          });
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xff6b3d, transparent: true, opacity: 0.85, depthWrite: false,
+          });
+
+          const emberCount = reducedMotion ? 40 : 120;
+          const emberPos = new Float32Array(emberCount * 3);
+          for (let index = 0; index < emberCount; index += 1) {
+            emberPos[index * 3] = (Math.random() - 0.5) * 3;
+            emberPos[index * 3 + 1] = 0.2 + Math.random() * 2.2;
+            emberPos[index * 3 + 2] = FIRE_Z + Math.random() * 4;
+          }
+          const emberGeo = new THREE.BufferGeometry();
+          emberGeo.setAttribute("position", new THREE.BufferAttribute(emberPos, 3));
+          const embers = new THREE.Points(emberGeo, new THREE.PointsMaterial({
+            color: 0xff6b3d, size: 0.08, transparent: true, opacity: 0.7, sizeAttenuation: true,
+          }));
+          scene.add(embers);
+
+          return {
+            renderer, scene, camera, fireLight, helmetLight, smoke, ceil,
+            hoseSegs, nozzle, team, partner, kinkMeshes, flames, fireRoom,
+            dropGeo, dropMat, dropMeshes: [], particleGeo, particleMat, particleMeshes: [],
+            embers, look: new THREE.Vector3(),
+          };
+        }
+
+        function hosePoint(index, total) {
+          const u = index / Math.max(1, total - 1);
+          const z = lerp(state.team.z + 0.2, 1.6, u);
+          let x = state.team.x * (1 - u) * 0.4;
+          let y = 0.18;
+          state.kinks.forEach((kink, k) => {
+            const influence = Math.exp(-Math.abs(z - kink.z) * 2.2);
+            x += Math.sin(kink.twist + k) * 0.35 * influence;
+            y += 0.22 * influence;
+          });
+          return { x, y, z };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.elapsed;
+          const p = state.team;
+          webgl.team.position.set(p.x, 0, p.z);
+          webgl.team.rotation.y = p.yaw;
+          webgl.partner.position.set(p.x - 0.55, 0, p.z + 0.55);
+          webgl.nozzle.position.set(p.x + 0.18, 1.05, p.z - 0.35);
+          webgl.nozzle.rotation.x = state.spray ? -0.35 : -0.08;
+          webgl.helmetLight.position.set(p.x, 1.55, p.z + 0.2);
+          webgl.fireLight.intensity = reducedMotion ? 1.1 : 1.2 + Math.sin(t * 9) * 0.35 * (1 - state.douse);
+          webgl.fireLight.color.setHex(state.ceiling > 0.62 ? 0xff4020 : 0xff6b3d);
+          const smokeHex = state.ceiling > 0.7 ? 0xff4020 : state.ceiling > 0.4 ? 0xff8a50 : 0x6a5850;
+          webgl.smoke.material.color.setHex(smokeHex);
+          webgl.smoke.material.opacity = 0.08 + state.ceiling * 0.28;
+          webgl.smoke.position.z = p.z - 8;
+          webgl.ceil.material.emissiveIntensity = 0.15 + state.ceiling * 0.7;
+
+          const total = webgl.hoseSegs.length;
+          for (let index = 0; index < total; index += 1) {
+            const a = hosePoint(index, total);
+            const b = hosePoint(Math.min(total - 1, index + 1), total);
+            const seg = webgl.hoseSegs[index];
+            seg.position.set((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);
+            seg.lookAt(b.x, b.y, b.z);
+            seg.rotateX(Math.PI / 2);
+          }
+
+          webgl.kinkMeshes.forEach((mesh, index) => {
+            const kink = state.kinks[index];
+            if (!kink) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(kink.x, 0.28, kink.z);
+            mesh.rotation.y = kink.twist;
+            mesh.rotation.x = Math.PI / 2;
+          });
+          webgl.flames.forEach((flame, index) => {
+            const live = 1 - state.douse;
+            flame.scale.y = (reducedMotion ? 1 : 0.85 + Math.sin(t * 8 + index) * 0.25) * live;
+            flame.visible = live > 0.05;
+            flame.material.emissiveIntensity = 0.5 + live * 0.6;
+          });
+
+          while (webgl.dropMeshes.length < state.droplets.length) {
+            const mesh = new THREE.Mesh(webgl.dropGeo, webgl.dropMat.clone());
+            webgl.scene.add(mesh);
+            webgl.dropMeshes.push(mesh);
+          }
+          webgl.dropMeshes.forEach((mesh, index) => {
+            const drop = state.droplets[index];
+            if (!drop) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(drop.x, drop.y, drop.z);
+            mesh.material.opacity = clamp(drop.life * 2, 0, 0.8);
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.material.color.setHex(particle.kind === "hose" ? 0xc45a3a : 0xff6b3d);
+            mesh.material.opacity = clamp(particle.life * 1.6, 0, 1);
+          });
+          const pos = webgl.embers.geometry.attributes.position;
+          for (let index = 0; index < pos.count; index += 1) {
+            let y = pos.getY(index) + dtSafe() * (0.4 + (index % 5) * 0.1);
+            if (y > 2.5) y = 0.15;
+            pos.setY(index, y);
+          }
+          pos.needsUpdate = true;
+          webgl.embers.material.opacity = 0.25 + (1 - state.douse) * 0.5;
+        }
+
+        function dtSafe() { return FIXED_DT; }
+
+        function renderScene() {
+          if (!webgl) return;
+          const p = state.team;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          webgl.camera.position.set(p.x * 0.4 + shakeX, 1.52 + shakeY, p.z + 3.9);
+          webgl.look.set(p.x * 0.2, 1.15, p.z - 6);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return {
+              x: (v.x * 0.5 + 0.5) * VIEW_W,
+              y: (-v.y * 0.5 + 0.5) * VIEW_H,
+              visible: v.z < 1,
+            };
+          }
+          const rel = z - state.team.z;
+          return {
+            x: VIEW_W * 0.5 + (x - state.team.x) * 80,
+            y: VIEW_H * 0.55 - y * 50 - rel * 9,
+            visible: rel > -20 && rel < 6,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const heat = state.ceiling;
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, heat > 0.6 ? "#ff4020" : "#4a2018");
+          sky.addColorStop(0.45, "#140808");
+          sky.addColorStop(1, "#080404");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = `rgba(255,107,61,${0.05 + heat * 0.22})`;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H * 0.28);
+          ctx.fillStyle = "#2a1a14";
+          ctx.fillRect(0, VIEW_H * 0.72, VIEW_W, VIEW_H * 0.28);
+          ctx.fillStyle = "#4a2a22";
+          ctx.fillRect(0, 0, 48, VIEW_H);
+          ctx.fillRect(VIEW_W - 48, 0, 48, VIEW_H);
+
+          DOOR_Z.forEach((z) => {
+            const p = projectToScreen(-1.8, 1.1, z);
+            ctx.fillStyle = "#6a3a28";
+            ctx.fillRect(p.x - 12, p.y - 40, 24, 70);
+          });
+          const fire = projectToScreen(0, 1, FIRE_Z);
+          ctx.fillStyle = `rgba(255,80,30,${0.4 + (1 - state.douse) * 0.5})`;
+          ctx.beginPath();
+          ctx.moveTo(fire.x, fire.y + 20);
+          ctx.lineTo(fire.x - 28, fire.y + 20);
+          ctx.lineTo(fire.x, fire.y - 40 * (1 - state.douse));
+          ctx.lineTo(fire.x + 28, fire.y + 20);
+          ctx.fill();
+
+          ctx.strokeStyle = COLORS.hose;
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          for (let index = 0; index < 12; index += 1) {
+            const pt = hosePoint(index, 12);
+            const p = projectToScreen(pt.x, pt.y, pt.z);
+            if (index === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+          }
+          ctx.stroke();
+          state.kinks.forEach((kink) => {
+            const p = projectToScreen(kink.x, 0.3, kink.z);
+            ctx.strokeStyle = COLORS.ember;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+            ctx.stroke();
+          });
+          const team = projectToScreen(state.team.x, 0.9, state.team.z);
+          ctx.fillStyle = "#4a2a18";
+          ctx.fillRect(team.x - 10, team.y - 24, 20, 36);
+          ctx.fillStyle = COLORS.brass;
+          ctx.beginPath();
+          ctx.arc(team.x, team.y - 28, 6, 0, Math.PI * 2);
+          ctx.fill();
+          if (state.spray) {
+            ctx.strokeStyle = "rgba(154,212,255,0.7)";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(team.x + 8, team.y - 8);
+            ctx.lineTo(team.x + 8, team.y - 8);
+            const jet = projectToScreen(state.team.x, 1.1, state.team.z - 3);
+            ctx.lineTo(jet.x, jet.y);
+            ctx.stroke();
+          }
+          ctx.fillStyle = "rgba(255,228,212,0.72)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          const douse = Math.round(state.douse * 100);
+          if (objective) objective.textContent = `${douse}%`;
+          if (meter) meter.style.width = `${douse}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const press = Math.round(state.pressure * 100);
+            const mode = state.spray ? "주수 중" : (state.kinks.length ? "탭 · 꺾임 해소" : "드래그로 전진");
+            sub.textContent = `꺾임 ${state.kinks.length} · 압 ${press}% · ${mode}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const params = difficultyAt(state.elapsed);
+          if (params.telegraph && state.ceiling > 0.55) {
+            hud.strokeStyle = `rgba(255,107,61,${0.3 + state.ceiling * 0.5})`;
+            hud.lineWidth = 6;
+            hud.strokeRect(8, 8, VIEW_W - 16, VIEW_H - 16);
+            hud.fillStyle = "rgba(255,80,30,0.06)";
+            hud.fillRect(0, 0, VIEW_W, VIEW_H * 0.2);
+            hud.fillStyle = COLORS.ember;
+            hud.font = "800 16px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("천장 가스 · 플래시오버 임박", VIEW_W / 2, 36);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.kinks.length ? COLORS.ember : COLORS.ink;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,107,61,${state.flash * 0.18})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; hall -z to fire room; camera behind nozzle team",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            pressure: Number(state.pressure.toFixed(3)),
+            ceiling: Number(state.ceiling.toFixed(3)),
+            douse: Number(state.douse.toFixed(3)),
+            kinks: state.kinks.length,
+            spray: state.spray,
+            team: {
+              x: Number(state.team.x.toFixed(2)),
+              z: Number(state.team.z.toFixed(2)),
+            },
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function pointerWalk(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = (event.clientX - rect.left) / Math.max(1, rect.width);
+          const ny = (event.clientY - rect.top) / Math.max(1, rect.height);
+          input.strafe = (nx - 0.5) * 1.5;
+          input.walk = clamp((0.62 - ny) * 2.2, -0.4, 1);
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.holding = true;
+          input.moved = false;
+          input.downAt = performance.now();
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          pointerWalk(event);
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          if (Math.hypot(dx, dy) > 12) input.moved = true;
+          pointerWalk(event);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.holding = false;
+            input.walk = 0;
+            input.strafe = 0;
+            state.spray = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.holding && !input.moved) {
+            const held = performance.now() - input.downAt;
+            if (held <= TAP_MS) unkinkNearest();
+          }
+          input.dragging = false;
+          input.holding = false;
+          input.walk = 0;
+          input.strafe = 0;
+          state.spray = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) { input.space = true; input.holding = true; return; }
+            if (state.mode !== "running") { startStage(); return; }
+            input.space = true;
+            input.holding = true;
+            input.downAt = performance.now();
+            input.moved = false;
+            return;
+          }
+          if (event.code === "KeyE") {
+            event.preventDefault();
+            if (state.mode === "running") unkinkNearest();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode === "running" && input.holding && !input.moved) {
+              const held = performance.now() - input.downAt;
+              if (held <= TAP_MS) unkinkNearest();
+            }
+            input.space = false;
+            input.holding = false;
+            state.spray = false;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.douse = 1;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.dragging = false; input.holding = false; input.space = false;
+          input.walk = 0; input.strafe = 0; state.spray = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

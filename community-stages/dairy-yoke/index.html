@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>우유 멍에</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #14180c; --accent: #f0e6c8; --accent-ink: #14180c; --danger: #ff6b7a; --ink: #fff8e8; --muted: rgba(255,248,232,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">우유 멍에. 젖을 짜고 멍에로 나르되 넘치지 않게 걸으세요. 홀드로 착유, 드래그로 보행 균형. 창고까지 두 통을 나르면 클리어. 통이 넘치거나 떨어지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 홀드로 착유하고 드래그로 보행 균형을 맞춥니다.</p>
+    <main class="stage" aria-label="우유 멍에 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="우유 멍에" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">용량</p>
+          <p class="hud-value" id="hud-objective">0 / 2</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">48.0</p>
+          <p class="hud-sub" id="hud-sub">출렁 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Dairy Yoke</p>
+          <h1>우유 멍에</h1>
+          <p class="brief-lead">젖을 짜고 멍에로 나르되 넘치지 않게 걸으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>홀드로 착유, 드래그로 보행 균형</span></li>
+            <li><strong>클리어</strong><span>창고까지 두 통을 나르면 클리어</span></li>
+            <li><strong>실패</strong><span>통이 넘치거나 떨어지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">우유 실패</p>
+          <h2>통이 엎어졌다</h2>
+          <p class="brief-lead" id="fail-detail">통이 넘치거나 떨어지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">창고 도착</p>
+          <h2>두 통을 나르다</h2>
+          <p class="brief-lead">착유한 두 통을 출렁이지 않고 창고까지 옮겼습니다.</p>
+          <p class="hud-sub" id="clear-stat">창고까지 두 통을 나르면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 48;
+        const GOAL = 2;
+        const FILL_OK = 0.78;
+        const FILL_MAX = 0.97;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "dairy-yoke",
+          title: "우유 멍에",
+          description: "젖을 짜고 멍에로 나르되 넘치지 않게 걸으세요.",
+          creator: "collin",
+          genre: "3D milk yoke",
+          clearCondition: "창고까지 두 통을 나르면 클리어",
+          failCondition: "통이 넘치거나 떨어지면 실패",
+          controls: "홀드로 착유, 드래그로 보행 균형",
+        };
+        const COLORS = {
+          bg: "#14180c",
+          ink: "#fff8e8",
+          accent: "#f0e6c8",
+          milk: "#f7f1dc",
+          grass: "#3a5a28",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          overflow: "우유가 통 밖으로 넘쳤습니다",
+          drop: "멍에가 기울어 통이 떨어졌습니다",
+          time_limit: "제한 시간 48초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 2.4, y: 3.2, z: 6.4 },
+          right: { x: 0.96, y: 0, z: -0.28 },
+          up: { x: 0.08, y: 0.96, z: 0.26 },
+          fwd: { x: -0.27, y: 0.27, z: -0.92 },
+          focal: 400,
+        };
+        const PATH = [
+          { x: 0.0, z: 0.2, y: 0 },
+          { x: 0.4, z: 5.6, y: 0 },
+          { x: 1.6, z: 10.4, y: 0 },
+          { x: 2.2, z: 15.2, y: 0 },
+          { x: 1.4, z: 19.6, y: 0 },
+        ];
+        const PUDDLES = [
+          { x: 0.5, z: 7.4, r: 0.85 },
+          { x: 1.8, z: 12.2, r: 0.7 },
+          { x: 2.4, z: 16.1, r: 0.9 },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist2(ax, az, bx, bz) { return Math.hypot(ax - bx, az - bz); }
+
+        function pathPoint(u) {
+          const t = clamp(u, 0, 0.9999) * (PATH.length - 1);
+          const i = Math.floor(t);
+          const f = t - i;
+          const a = PATH[i];
+          const b = PATH[i + 1] || PATH[i];
+          return { x: lerp(a.x, b.x, f), z: lerp(a.z, b.z, f), y: 0 };
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          job: "milk",
+          fillL: 0.12,
+          fillR: 0.12,
+          align: 0,
+          cow: 0,
+          kick: 0,
+          sloshL: 0,
+          sloshR: 0,
+          tilt: 0,
+          step: 0,
+          stepSide: 1,
+          path: 0,
+          pos: { x: 0, z: 0.2 },
+          delivered: 0,
+          flash: 0,
+          shake: 0,
+          drips: [],
+          splashes: [],
+          message: "",
+          messageTime: 0,
+          failReason: "",
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          holding: false, dragging: false, milk: false,
+          downX: 0, downY: 0, pointerId: null, steer: 0,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            fillRate: phase === 1 ? 0.11 : phase === 2 ? 0.16 : 0.21,
+            cowAmp: phase === 1 ? 0.18 : phase === 2 ? 0.32 : 0.48,
+            alignNeed: phase === 1 ? 0.42 : phase === 2 ? 0.28 : 0.18,
+            stepRate: phase === 1 ? 1.55 : phase === 2 ? 1.9 : 2.25,
+            sloshKick: phase === 1 ? 0.16 : phase === 2 ? 0.24 : 0.34,
+            damp: phase === 1 ? 1.15 : phase === 2 ? 0.82 : 0.55,
+            puddle: phase === 1 ? 0.08 : phase === 2 ? 0.22 : 0.38,
+            walkSpeed: phase === 1 ? 0.072 : phase === 2 ? 0.09 : 0.11,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          const bag = kind === "drip" ? state.drips : state.splashes;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            bag.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.2, 1.6),
+              vy: randRange(0.4, 2.2),
+              vz: Math.sin(a) * randRange(0.2, 1.6),
+              life: randRange(0.28, 0.75),
+              kind,
+              size: randRange(0.03, 0.08),
+            });
+          }
+          if (bag.length > 56) bag.splice(0, bag.length - 56);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "milk") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(280, now + 0.06);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+              osc.start(now); osc.stop(now + 0.08);
+            } else if (kind === "lift") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(520, now + 0.12);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "step") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(60, now + 0.05);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+              osc.start(now); osc.stop(now + 0.07);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(460, now);
+              osc.frequency.exponentialRampToValueAtTime(1180, now + 0.26);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(150, now);
+              osc.frequency.exponentialRampToValueAtTime(40, now + 0.24);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.28);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.job = "milk";
+          state.fillL = 0.12;
+          state.fillR = 0.12;
+          state.align = 0;
+          state.cow = 0;
+          state.kick = 0;
+          state.sloshL = 0;
+          state.sloshR = 0;
+          state.tilt = 0;
+          state.step = 0;
+          state.stepSide = 1;
+          state.path = 0;
+          state.pos = { x: 0, z: 0.2 };
+          state.delivered = 0;
+          state.flash = 0;
+          state.shake = 0;
+          state.drips = [];
+          state.splashes = [];
+          state.message = "홀드로 착유";
+          state.messageTime = 1.1;
+          state.failReason = "";
+          reseed((Date.now() ^ 0xda14) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          state.delivered = GOAL;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.68;
+          playSfx("boom");
+          burst(state.pos.x, 0.8, state.pos.z, 18, "splash");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function filledCount() {
+          return (state.fillL >= FILL_OK ? 1 : 0) + (state.fillR >= FILL_OK ? 1 : 0);
+        }
+
+        function updateMilk(dt, params) {
+          state.cow = Math.sin(state.elapsed * (0.7 + params.phase * 0.25)) * params.cowAmp;
+          if (state.kick > 0) {
+            state.cow += Math.sin(state.kick * 22) * 0.28;
+            state.kick = Math.max(0, state.kick - dt);
+          } else if (params.phase >= 3 && state.elapsed > 8 && random() < 0.004) {
+            state.kick = 0.45;
+            state.message = "소가 몸을 튼다";
+            state.messageTime = 0.55;
+          }
+          let steer = input.steer;
+          if (input.left) steer -= 1;
+          if (input.right) steer += 1;
+          state.align = clamp(state.align + steer * 1.8 * dt, -1, 1);
+          const aligned = Math.abs(state.align - state.cow) < params.alignNeed;
+          const milking = input.holding || input.milk;
+          if (milking) {
+            const rate = params.fillRate * (aligned ? 1 : 0.22);
+            const bias = clamp(state.align - state.cow, -0.6, 0.6);
+            state.fillL = clamp(state.fillL + rate * dt * (1 - bias * 0.7), 0, 1.12);
+            state.fillR = clamp(state.fillR + rate * dt * (1 + bias * 0.7), 0, 1.12);
+            if (aligned && random() < 0.12) {
+              burst(-0.22 + state.align * 0.1, 0.55, 0.15, 2, "drip");
+              playSfx("milk");
+            }
+            if (!aligned && random() < 0.08) burst(state.align * 0.4, 0.2, 0.2, 3, "splash");
+          }
+          if (state.fillL > FILL_MAX || state.fillR > FILL_MAX) {
+            failStage("overflow");
+            return;
+          }
+          if (state.fillL >= FILL_OK && state.fillR >= FILL_OK) {
+            state.job = "walk";
+            state.message = "멍에를 메고 걷는다";
+            state.messageTime = 1;
+            playSfx("lift");
+            state.flash = 0.4;
+          }
+        }
+
+        function updateWalk(dt, params) {
+          let steer = input.steer;
+          if (input.left) steer -= 1;
+          if (input.right) steer += 1;
+          steer = clamp(steer, -1.3, 1.3);
+          state.step += dt * params.stepRate;
+          if (state.step >= 1) {
+            state.step -= 1;
+            state.stepSide *= -1;
+            playSfx("step");
+            const match = steer * state.stepSide > 0.25;
+            const uneven = Math.abs(state.fillL - state.fillR);
+            const add = params.sloshKick * (match ? 0.28 : 1) * (1 + uneven * 1.4);
+            if (state.stepSide < 0) state.sloshL += add;
+            else state.sloshR += add;
+          }
+          const damp = params.damp * (1 + Math.abs(steer) * 0.35);
+          state.sloshL = Math.max(0, state.sloshL - dt * damp * 0.55);
+          state.sloshR = Math.max(0, state.sloshR - dt * damp * 0.55);
+          state.tilt = lerp(state.tilt, (state.sloshR - state.sloshL) * 0.55 + (state.fillR - state.fillL) * 0.4 + steer * 0.12, clamp(dt * 6, 0, 1));
+          const p = pathPoint(state.path);
+          let puddleBoost = 0;
+          PUDDLES.forEach((puddle) => {
+            if (dist2(p.x, p.z, puddle.x, puddle.z) < puddle.r) puddleBoost = params.puddle;
+          });
+          if (puddleBoost > 0) {
+            state.sloshL += puddleBoost * dt * 1.4;
+            state.sloshR += puddleBoost * dt * 1.4;
+            if (state.messageTime <= 0) {
+              state.message = "물웅덩이";
+              state.messageTime = 0.4;
+            }
+          }
+          const pace = params.walkSpeed * (1 - Math.min(0.45, Math.abs(state.tilt) * 0.5));
+          state.path = clamp(state.path + pace * dt, 0, 1);
+          const now = pathPoint(state.path);
+          state.pos.x = now.x;
+          state.pos.z = now.z;
+          if (Math.max(state.sloshL, state.sloshR) > 1 || Math.abs(state.tilt) > 0.92) {
+            failStage("drop");
+            return;
+          }
+          if (state.path >= 0.995) {
+            state.delivered = GOAL;
+            clearStage();
+          }
+        }
+
+        function updateFx(dt) {
+          function tick(list, gravity) {
+            list.forEach((p) => {
+              p.x += p.vx * dt;
+              p.y += p.vy * dt;
+              p.z += p.vz * dt;
+              p.vy -= gravity * dt;
+              p.life -= dt;
+            });
+            return list.filter((p) => p.life > 0 && p.y > -0.4);
+          }
+          state.drips = tick(state.drips, 6.2);
+          state.splashes = tick(state.splashes, 8.4);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.7);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (!input.holding && !input.dragging) input.steer *= Math.max(0, 1 - dt * 6);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          if (state.job === "milk") updateMilk(dt, params);
+          else updateWalk(dt, params);
+          if (state.mode !== "running") return;
+          updateFx(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function sloshPct() {
+          return clamp(Math.max(state.sloshL, state.sloshR), 0, 1);
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `용량 L ${(state.fillL * 100).toFixed(0)}% R ${(state.fillR * 100).toFixed(0)}% · 출렁 ${(sloshPct() * 100).toFixed(0)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 두 통 운반`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x14180c, 1);
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x14180c);
+          scene.fog = new THREE.Fog(0x1a2210, 8, 28);
+          const camera = new THREE.PerspectiveCamera(50, VIEW_W / VIEW_H, 0.1, 60);
+          camera.position.set(3.2, 3.4, 6.8);
+          scene.add(new THREE.AmbientLight(0x3a4a28, 0.48));
+          const hemi = new THREE.HemisphereLight(0xf0e6c8, 0x1a2010, 0.5);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xfff0c8, 0.58);
+          sun.position.set(-6, 12, 4);
+          scene.add(sun);
+          const stallLamp = new THREE.PointLight(0xffd080, 1.05, 12);
+          stallLamp.position.set(-0.4, 2.6, 0.4);
+          scene.add(stallLamp);
+          const pathLamp = new THREE.PointLight(0xf0e6c8, 0.7, 14);
+          pathLamp.position.set(2.2, 2.4, 12);
+          scene.add(pathLamp);
+
+          const geo = {
+            box: new THREE.BoxGeometry(1, 1, 1),
+            cyl: new THREE.CylinderGeometry(0.5, 0.5, 1, 12),
+            sphere: new THREE.SphereGeometry(0.5, 12, 10),
+            cone: new THREE.ConeGeometry(0.5, 1, 8),
+            plane: new THREE.PlaneGeometry(1, 1),
+          };
+          const mats = {
+            grass: new THREE.MeshStandardMaterial({ color: 0x3a5a28, roughness: 0.92, metalness: 0.03 }),
+            dirt: new THREE.MeshStandardMaterial({ color: 0x5a4a30, roughness: 0.88, metalness: 0.04 }),
+            cobble: new THREE.MeshStandardMaterial({ color: 0x6a6658, roughness: 0.82, metalness: 0.06 }),
+            wood: new THREE.MeshStandardMaterial({ color: 0x6a4a28, roughness: 0.84, metalness: 0.05 }),
+            dark: new THREE.MeshStandardMaterial({ color: 0x3a2a18, roughness: 0.8, metalness: 0.05 }),
+            hide: new THREE.MeshStandardMaterial({ color: 0xc8b090, roughness: 0.7, metalness: 0.04, emissive: 0x201808, emissiveIntensity: 0.06 }),
+            spot: new THREE.MeshStandardMaterial({ color: 0x3a2a20, roughness: 0.72, metalness: 0.04 }),
+            milk: new THREE.MeshStandardMaterial({
+              color: 0xf7f1dc, roughness: 0.35, metalness: 0.08, emissive: 0x403820, emissiveIntensity: 0.12,
+            }),
+            tin: new THREE.MeshStandardMaterial({
+              color: 0xb8b0a0, roughness: 0.32, metalness: 0.55, emissive: 0x181814, emissiveIntensity: 0.08,
+            }),
+            yoke: new THREE.MeshStandardMaterial({ color: 0x8a6238, roughness: 0.65, metalness: 0.08 }),
+            stone: new THREE.MeshStandardMaterial({ color: 0x7a7464, roughness: 0.8, metalness: 0.07 }),
+            thatch: new THREE.MeshStandardMaterial({ color: 0x8a6a32, roughness: 0.86, metalness: 0.04 }),
+            lamp: new THREE.MeshStandardMaterial({ color: 0xf0e6c8, roughness: 0.3, metalness: 0.2, emissive: 0xa08040, emissiveIntensity: 0.5 }),
+            cloth: new THREE.MeshStandardMaterial({ color: 0x4a5a38, roughness: 0.75, metalness: 0.04 }),
+          };
+
+          const ground = new THREE.Mesh(new THREE.CircleGeometry(28, 28), mats.grass);
+          ground.rotation.x = -Math.PI / 2;
+          scene.add(ground);
+          const stallFloor = new THREE.Mesh(geo.box, mats.dirt);
+          stallFloor.scale.set(4.4, 0.08, 4.2);
+          stallFloor.position.set(0, 0.02, 0.2);
+          scene.add(stallFloor);
+          const pathMesh = new THREE.Mesh(geo.box, mats.cobble);
+          pathMesh.scale.set(2.4, 0.06, 20);
+          pathMesh.position.set(1.1, 0.03, 10);
+          scene.add(pathMesh);
+
+          const barnWall = new THREE.Mesh(geo.box, mats.wood);
+          barnWall.scale.set(6.4, 3.4, 0.22);
+          barnWall.position.set(0, 1.7, -2.1);
+          scene.add(barnWall);
+          const barnSide = new THREE.Mesh(geo.box, mats.wood);
+          barnSide.scale.set(0.22, 3.4, 4.6);
+          barnSide.position.set(-2.3, 1.7, 0);
+          scene.add(barnSide);
+          const beam = new THREE.Mesh(geo.box, mats.dark);
+          beam.scale.set(5.6, 0.16, 0.16);
+          beam.position.set(0, 3.05, -0.2);
+          scene.add(beam);
+          const stanchionGeo = new THREE.BoxGeometry(0.12, 1.5, 0.12);
+          for (let i = 0; i < 4; i += 1) {
+            const s = new THREE.Mesh(stanchionGeo, mats.wood);
+            s.position.set(-1.3 + i * 0.7, 0.85, -1.15);
+            scene.add(s);
+          }
+          const manger = new THREE.Mesh(geo.box, mats.wood);
+          manger.scale.set(2.6, 0.35, 0.45);
+          manger.position.set(-0.2, 0.4, -1.35);
+          scene.add(manger);
+          const hay = new THREE.Mesh(geo.sphere, mats.thatch);
+          hay.scale.set(1.1, 0.4, 0.55);
+          hay.position.set(-0.2, 0.55, -1.35);
+          scene.add(hay);
+
+          const cow = new THREE.Group();
+          const body = new THREE.Mesh(geo.sphere, mats.hide);
+          body.scale.set(2.2, 1.15, 1.05);
+          body.position.set(-0.15, 1.15, -0.35);
+          cow.add(body);
+          const hip = new THREE.Mesh(geo.sphere, mats.hide);
+          hip.scale.set(1.05, 1.05, 1.0);
+          hip.position.set(0.85, 1.12, -0.32);
+          cow.add(hip);
+          const head = new THREE.Mesh(geo.sphere, mats.hide);
+          head.scale.set(0.55, 0.5, 0.7);
+          head.position.set(-1.35, 1.35, -0.2);
+          cow.add(head);
+          const snout = new THREE.Mesh(geo.sphere, mats.hide);
+          snout.scale.set(0.28, 0.22, 0.32);
+          snout.position.set(-1.7, 1.22, -0.15);
+          cow.add(snout);
+          const hornL = new THREE.Mesh(geo.cone, mats.thatch);
+          hornL.scale.set(0.12, 0.28, 0.12);
+          hornL.position.set(-1.28, 1.7, 0.05);
+          cow.add(hornL);
+          const hornR = hornL.clone();
+          hornR.position.z = -0.45;
+          cow.add(hornR);
+          const udder = new THREE.Mesh(geo.sphere, mats.hide);
+          udder.scale.set(0.55, 0.4, 0.45);
+          udder.position.set(0.15, 0.62, -0.15);
+          cow.add(udder);
+          const teatGeo = new THREE.CylinderGeometry(0.04, 0.035, 0.16, 6);
+          [[-0.08, 0.42, -0.05], [0.1, 0.42, -0.05], [-0.08, 0.42, -0.22], [0.1, 0.42, -0.22]].forEach((row) => {
+            const t = new THREE.Mesh(teatGeo, mats.hide);
+            t.position.set(row[0], row[1], row[2]);
+            cow.add(t);
+          });
+          const spot = new THREE.Mesh(geo.sphere, mats.spot);
+          spot.scale.set(0.45, 0.35, 0.3);
+          spot.position.set(0.35, 1.35, 0.15);
+          cow.add(spot);
+          const tail = new THREE.Mesh(geo.cyl, mats.spot);
+          tail.scale.set(0.06, 0.9, 0.06);
+          tail.position.set(1.35, 1.15, -0.2);
+          tail.rotation.z = 0.5;
+          cow.add(tail);
+          [[-0.7, 0.45, 0.15], [-0.7, 0.45, -0.55], [0.75, 0.45, 0.15], [0.75, 0.45, -0.55]].forEach((row) => {
+            const leg = new THREE.Mesh(geo.cyl, mats.hide);
+            leg.scale.set(0.16, 0.9, 0.16);
+            leg.position.set(row[0], row[1], row[2]);
+            cow.add(leg);
+          });
+          scene.add(cow);
+
+          const stool = new THREE.Mesh(geo.cyl, mats.wood);
+          stool.scale.set(0.5, 0.32, 0.5);
+          stool.position.set(0.15, 0.18, 0.55);
+          scene.add(stool);
+
+          const pailL = new THREE.Group();
+          const tinL = new THREE.Mesh(geo.cyl, mats.tin);
+          tinL.scale.set(0.38, 0.42, 0.38);
+          pailL.add(tinL);
+          const milkL = new THREE.Mesh(geo.cyl, mats.milk);
+          milkL.scale.set(0.32, 0.2, 0.32);
+          milkL.position.y = 0.02;
+          pailL.add(milkL);
+          pailL.position.set(-0.55, 0.28, 0.35);
+          scene.add(pailL);
+          const pailR = pailL.clone();
+          pailR.position.set(0.55, 0.28, 0.35);
+          scene.add(pailR);
+
+          const farmer = new THREE.Group();
+          const torso = new THREE.Mesh(geo.box, mats.cloth);
+          torso.scale.set(0.42, 0.7, 0.28);
+          torso.position.y = 0.95;
+          farmer.add(torso);
+          const headF = new THREE.Mesh(geo.sphere, mats.hide);
+          headF.scale.set(0.28, 0.3, 0.28);
+          headF.position.y = 1.42;
+          farmer.add(headF);
+          const armL = new THREE.Mesh(geo.box, mats.cloth);
+          armL.scale.set(0.12, 0.5, 0.12);
+          armL.position.set(-0.32, 0.95, 0.05);
+          farmer.add(armL);
+          const armR = armL.clone();
+          armR.position.x = 0.32;
+          farmer.add(armR);
+          farmer.position.set(0.1, 0, 0.85);
+          scene.add(farmer);
+
+          const yoke = new THREE.Group();
+          const bar = new THREE.Mesh(geo.box, mats.yoke);
+          bar.scale.set(1.7, 0.08, 0.12);
+          yoke.add(bar);
+          const neck = new THREE.Mesh(geo.box, mats.yoke);
+          neck.scale.set(0.35, 0.08, 0.28);
+          neck.position.z = 0.12;
+          yoke.add(neck);
+          yoke.position.set(0.1, 1.35, 0.7);
+          scene.add(yoke);
+
+          const dairy = new THREE.Group();
+          const house = new THREE.Mesh(geo.box, mats.stone);
+          house.scale.set(4.2, 2.6, 3.4);
+          house.position.y = 1.3;
+          dairy.add(house);
+          const roof = new THREE.Mesh(geo.cone, mats.thatch);
+          roof.scale.set(3.4, 1.6, 2.8);
+          roof.position.y = 3.15;
+          dairy.add(roof);
+          const door = new THREE.Mesh(geo.box, mats.dark);
+          door.scale.set(0.9, 1.5, 0.1);
+          door.position.set(0, 0.75, 1.75);
+          dairy.add(door);
+          const win = new THREE.Mesh(geo.box, mats.lamp);
+          win.scale.set(0.7, 0.55, 0.08);
+          win.position.set(-1.2, 1.5, 1.72);
+          dairy.add(win);
+          dairy.position.set(1.4, 0, 21.2);
+          scene.add(dairy);
+
+          const trough = new THREE.Mesh(geo.box, mats.stone);
+          trough.scale.set(2.2, 0.35, 0.55);
+          trough.position.set(1.4, 0.25, 18.8);
+          scene.add(trough);
+          const canGeo = new THREE.CylinderGeometry(0.18, 0.2, 0.5, 10);
+          [[0.6, 0.35, 18.6], [1.0, 0.35, 18.7], [1.9, 0.35, 18.55]].forEach((row) => {
+            const c = new THREE.Mesh(canGeo, mats.tin);
+            c.position.set(row[0], row[1], row[2]);
+            scene.add(c);
+          });
+
+          const fenceGeo = new THREE.BoxGeometry(0.08, 0.7, 0.08);
+          const railGeo = new THREE.BoxGeometry(2.2, 0.06, 0.06);
+          for (let i = 0; i < 8; i += 1) {
+            const fx = -1.4;
+            const fz = 3 + i * 2.1;
+            const p1 = new THREE.Mesh(fenceGeo, mats.wood);
+            p1.position.set(fx, 0.4, fz);
+            scene.add(p1);
+            const p2 = new THREE.Mesh(fenceGeo, mats.wood);
+            p2.position.set(fx + 3.8, 0.4, fz);
+            scene.add(p2);
+            const r = new THREE.Mesh(railGeo, mats.wood);
+            r.position.set(fx, 0.55, fz);
+            scene.add(r);
+          }
+
+          const lampPosts = [[-1.6, 4.2], [3.2, 9.5], [0.2, 14.8], [3.4, 18.4]];
+          lampPosts.forEach((row) => {
+            const pole = new THREE.Mesh(geo.cyl, mats.wood);
+            pole.scale.set(0.08, 1.8, 0.08);
+            pole.position.set(row[0], 0.9, row[1]);
+            scene.add(pole);
+            const bulb = new THREE.Mesh(geo.sphere, mats.lamp);
+            bulb.scale.set(0.22, 0.22, 0.22);
+            bulb.position.set(row[0], 1.85, row[1]);
+            scene.add(bulb);
+          });
+
+          PUDDLES.forEach((puddle) => {
+            const m = new THREE.Mesh(new THREE.CircleGeometry(puddle.r, 12), new THREE.MeshStandardMaterial({
+              color: 0x3a5a48, roughness: 0.25, metalness: 0.2, transparent: true, opacity: 0.55,
+            }));
+            m.rotation.x = -Math.PI / 2;
+            m.position.set(puddle.x, 0.045, puddle.z);
+            scene.add(m);
+          });
+
+          const treePos = [[-4.2, 6], [5.1, 8.2], [-3.6, 13], [5.4, 16], [-2.8, 19]];
+          treePos.forEach((row) => {
+            const tr = new THREE.Mesh(geo.cyl, mats.wood);
+            tr.scale.set(0.16, 1.2, 0.16);
+            tr.position.set(row[0], 0.6, row[1]);
+            scene.add(tr);
+            const leaf = new THREE.Mesh(geo.sphere, mats.grass);
+            leaf.scale.set(1.1, 0.9, 1.1);
+            leaf.position.set(row[0], 1.6, row[1]);
+            scene.add(leaf);
+          });
+
+          const cat = new THREE.Mesh(geo.sphere, mats.spot);
+          cat.scale.set(0.28, 0.16, 0.2);
+          cat.position.set(-1.5, 0.18, 1.3);
+          scene.add(cat);
+          const crate = new THREE.Mesh(geo.box, mats.wood);
+          crate.scale.set(0.5, 0.32, 0.4);
+          crate.position.set(1.6, 0.18, 1.1);
+          scene.add(crate);
+
+          const moteCount = reducedMotion ? 50 : 140;
+          const motePos = new Float32Array(moteCount * 3);
+          for (let i = 0; i < moteCount; i += 1) {
+            motePos[i * 3] = randRange(-5, 6);
+            motePos[i * 3 + 1] = randRange(0.2, 3.5);
+            motePos[i * 3 + 2] = randRange(-2, 22);
+          }
+          const moteGeo = new THREE.BufferGeometry();
+          moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+          const motes = new THREE.Points(moteGeo, new THREE.PointsMaterial({
+            color: 0xf0e6c8, size: 0.05, transparent: true, opacity: 0.25, depthWrite: false,
+          }));
+          scene.add(motes);
+
+          const particleGeo = new THREE.SphereGeometry(0.035, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xf7f1dc, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, stallLamp, pathLamp, cow, udder: cow.children[5], farmer, yoke,
+            pailL, pailR, milkL: pailL.children[1], milkR: pailR.children[1], dairy,
+            particleGeo, particleMat, particleMeshes: [], proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const milking = state.job === "milk";
+          webgl.cow.rotation.y = state.cow * 0.35;
+          webgl.cow.position.x = state.cow * 0.15;
+          webgl.farmer.visible = true;
+          if (milking) {
+            webgl.farmer.position.set(0.1 + state.align * 0.25, 0, 0.85);
+            webgl.farmer.rotation.x = 0.35;
+            webgl.yoke.visible = false;
+            webgl.pailL.position.set(-0.35 + state.align * 0.12, 0.28, 0.38);
+            webgl.pailR.position.set(0.35 + state.align * 0.12, 0.28, 0.38);
+            webgl.pailL.rotation.z = 0;
+            webgl.pailR.rotation.z = 0;
+          } else {
+            webgl.farmer.position.set(state.pos.x, Math.abs(Math.sin(state.step * Math.PI)) * 0.06, state.pos.z);
+            webgl.farmer.rotation.x = 0;
+            webgl.farmer.rotation.z = state.tilt * 0.25;
+            webgl.yoke.visible = true;
+            webgl.yoke.position.set(state.pos.x, 1.38 + Math.abs(Math.sin(state.step * Math.PI)) * 0.05, state.pos.z - 0.05);
+            webgl.yoke.rotation.z = state.tilt;
+            webgl.pailL.position.set(state.pos.x - 0.72, 0.72 - state.sloshL * 0.08, state.pos.z);
+            webgl.pailR.position.set(state.pos.x + 0.72, 0.72 - state.sloshR * 0.08, state.pos.z);
+            webgl.pailL.rotation.z = 0.15 + state.tilt * 0.6 + state.sloshL * 0.3;
+            webgl.pailR.rotation.z = -0.15 + state.tilt * 0.6 - state.sloshR * 0.3;
+          }
+          webgl.milkL.scale.set(0.32, 0.08 + state.fillL * 0.28, 0.32);
+          webgl.milkR.scale.set(0.32, 0.08 + state.fillR * 0.28, 0.32);
+          webgl.milkL.position.y = -0.12 + state.fillL * 0.14;
+          webgl.milkR.position.y = -0.12 + state.fillR * 0.14;
+          webgl.stallLamp.intensity = milking ? 1.15 : 0.55;
+          webgl.pathLamp.position.set(state.pos.x + 1.4, 2.4, state.pos.z + 3);
+          const fx = state.drips.concat(state.splashes);
+          while (webgl.particleMeshes.length < fx.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, i) => {
+            const p = fx[i];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "splash" ? 0x9aa080 : 0xf7f1dc);
+            mesh.material.opacity = clamp(p.life * 1.7, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.16 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.25) * 0.08;
+          const look = state.job === "milk"
+            ? { x: 0.1, y: 0.7, z: 0.1 }
+            : { x: state.pos.x, y: 0.9, z: state.pos.z };
+          const cam = state.job === "milk"
+            ? { x: 2.6 + sway, y: 2.4, z: 3.6 }
+            : { x: state.pos.x + 3.1 + sway, y: 2.8, z: state.pos.z + 4.4 };
+          webgl.camera.position.set(cam.x + shakeX, cam.y + shakeY, cam.z);
+          webgl.camera.lookAt(look.x, look.y, look.z);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x, ey = y - CAM2D.eye.y, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.8 };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#3a4a28");
+          g.addColorStop(1, "#14180c");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#3a5a28";
+          ctx.fillRect(0, VIEW_H * 0.55, VIEW_W, VIEW_H * 0.45);
+          ctx.fillStyle = "#6a6658";
+          ctx.fillRect(VIEW_W * 0.38, VIEW_H * 0.58, 90, VIEW_H * 0.4);
+          const cow = projectToScreen(-0.2, 1.1, -0.3);
+          ctx.fillStyle = "#c8b090";
+          ctx.beginPath();
+          ctx.ellipse(cow.x, cow.y, 70, 36, 0, 0, Math.PI * 2);
+          ctx.fill();
+          const farmer = projectToScreen(state.job === "milk" ? 0.2 : state.pos.x, 1, state.job === "milk" ? 0.8 : state.pos.z);
+          ctx.fillStyle = "#4a5a38";
+          ctx.fillRect(farmer.x - 10, farmer.y - 40, 20, 50);
+          const pl = projectToScreen(state.job === "milk" ? -0.4 : state.pos.x - 0.7, 0.5, state.job === "milk" ? 0.4 : state.pos.z);
+          const pr = projectToScreen(state.job === "milk" ? 0.4 : state.pos.x + 0.7, 0.5, state.job === "milk" ? 0.4 : state.pos.z);
+          ctx.fillStyle = "#b8b0a0";
+          ctx.fillRect(pl.x - 12, pl.y - 18, 24, 28);
+          ctx.fillRect(pr.x - 12, pr.y - 18, 24, 28);
+          ctx.fillStyle = COLORS.milk;
+          ctx.fillRect(pl.x - 9, pl.y - 10 + (1 - state.fillL) * 16, 18, state.fillL * 20);
+          ctx.fillRect(pr.x - 9, pr.y - 10 + (1 - state.fillR) * 16, 18, state.fillR * 20);
+          const dairy = projectToScreen(1.4, 1.4, 21);
+          ctx.fillStyle = "#7a7464";
+          ctx.fillRect(dairy.x - 30, dairy.y - 24, 60, 40);
+          ctx.fillStyle = "#8a6a32";
+          ctx.beginPath();
+          ctx.moveTo(dairy.x, dairy.y - 48);
+          ctx.lineTo(dairy.x - 36, dairy.y - 20);
+          ctx.lineTo(dairy.x + 36, dairy.y - 20);
+          ctx.fill();
+          ctx.fillStyle = "rgba(255,248,232,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.job === "walk" ? filledCount() : filledCount()} / ${GOAL}`;
+          const prog = state.job === "milk"
+            ? (state.fillL + state.fillR) / 2
+            : 0.5 + state.path * 0.5;
+          if (meter) meter.style.width = `${clamp(prog, 0, 1) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            sub.textContent = state.job === "milk"
+              ? `착유 L ${(state.fillL * 100).toFixed(0)}% R ${(state.fillR * 100).toFixed(0)}%`
+              : `출렁 ${(sloshPct() * 100).toFixed(0)}% · 창고 ${(state.path * 100).toFixed(0)}%`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          hud.save();
+          hud.textAlign = "center";
+          if (state.messageTime > 0) {
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.fillStyle = state.message.includes("웅덩") || state.message.includes("튼다") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+          }
+          hud.restore();
+          hud.fillStyle = "rgba(20,24,12,0.5)";
+          hud.fillRect(18, VIEW_H * 0.3, 10, 110);
+          hud.fillRect(32, VIEW_H * 0.3, 10, 110);
+          hud.fillStyle = COLORS.milk;
+          hud.fillRect(18, VIEW_H * 0.3 + (1 - clamp(state.fillL, 0, 1)) * 110, 10, clamp(state.fillL, 0, 1) * 110);
+          hud.fillRect(32, VIEW_H * 0.3 + (1 - clamp(state.fillR, 0, 1)) * 110, 10, clamp(state.fillR, 0, 1) * 110);
+          if (state.job === "walk") {
+            hud.fillStyle = "rgba(20,24,12,0.5)";
+            hud.fillRect(VIEW_W - 34, VIEW_H * 0.3, 12, 110);
+            hud.fillStyle = sloshPct() > 0.7 ? COLORS.danger : COLORS.accent;
+            hud.fillRect(VIEW_W - 34, VIEW_H * 0.3 + (1 - sloshPct()) * 110, 12, sloshPct() * 110);
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(240,230,200,${state.flash * 0.12})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; stall origin; path +z to dairy; +y up",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            job: state.job,
+            fillL: Number(state.fillL.toFixed(3)),
+            fillR: Number(state.fillR.toFixed(3)),
+            sloshL: Number(state.sloshL.toFixed(3)),
+            sloshR: Number(state.sloshR.toFixed(3)),
+            tilt: Number(state.tilt.toFixed(3)),
+            path: Number(state.path.toFixed(3)),
+            delivered: state.delivered,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.dragging = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          if (Math.abs(dx) > 8) input.dragging = true;
+          input.steer = clamp(dx / 120, -1.3, 1.3);
+        }
+        function onPointerUp(event) {
+          ignoreUp = false;
+          input.holding = false;
+          input.dragging = false;
+          input.steer = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            input.milk = true;
+            if (state.mode !== "running") startStage();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.milk = false;
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.fillL = 0.85;
+            state.fillR = 0.85;
+            state.delivered = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.holding = false;
+          input.milk = false;
+          input.steer = 0;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

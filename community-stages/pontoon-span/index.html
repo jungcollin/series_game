@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>부교</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #07141c; --accent: #7ec8ff; --accent-ink: #07141c; --danger: #ff6b7a; --ink: #e8f4ff; --muted: rgba(232,244,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">부교. 흐름 속에 부함을 잇고 핀을 박아 부교를 완성하세요. 드래그로 부함, 탭으로 핀. 맞은편까지 잇고 짐수레가 건너면 클리어. 부함이 떠내려가거나 핀이 빠지면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 부함을 드래그해 슬롯에 맞추고 짧게 탭해 핀을 박습니다.</p>
+    <main class="stage" aria-label="부교 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="부교" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">경간</p>
+          <p class="hud-value" id="hud-objective">0 / 4</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">유속 0.00</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Pontoon Span</p>
+          <h1>부교</h1>
+          <p class="brief-lead">흐름 속에 부함을 잇고 핀을 박아 부교를 완성하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 부함, 탭으로 핀</span></li>
+            <li><strong>클리어</strong><span>맞은편까지 잇고 짐수레가 건너면 클리어</span></li>
+            <li><strong>실패</strong><span>부함이 떠내려가거나 핀이 빠지면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">경간이 끊기다</p>
+          <h2>부교가 떠내려갔다</h2>
+          <p class="brief-lead" id="fail-detail">부함이 떠내려가거나 핀이 빠지면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">강 건너</p>
+          <h2>짐수레가 건넜다</h2>
+          <p class="brief-lead">맞은편 제방까지 부함을 잇고 짐수레를 보냈습니다.</p>
+          <p class="hud-sub" id="clear-stat">맞은편까지 잇고 짐수레가 건너면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const GOAL = 4;
+        const DRIFT_LIMIT = 8.4;
+        const NEAR_Z = 6.4;
+        const FAR_Z = -7.2;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "pontoon-span",
+          title: "부교",
+          description: "흐름 속에 부함을 잇고 핀을 박아 부교를 완성하세요.",
+          creator: "collin",
+          genre: "3D pontoon bridge",
+          clearCondition: "맞은편까지 잇고 짐수레가 건너면 클리어",
+          failCondition: "부함이 떠내려가거나 핀이 빠지면 실패",
+          controls: "드래그로 부함, 탭으로 핀",
+        };
+        const COLORS = {
+          bg: "#07141c",
+          ink: "#e8f4ff",
+          accent: "#7ec8ff",
+          timber: "#c4a06a",
+          water: "#1a4a68",
+          danger: "#ff6b7a",
+          moss: "#3a6a52",
+        };
+        const FAIL_COPY = {
+          drifted: "부함이 하류로 떠내려갔습니다",
+          pin_pop: "핀이 빠지고 경간이 갈라졌습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const SLOTS = [
+          { x: 0.05, z: 3.15 },
+          { x: -0.08, z: 0.35 },
+          { x: 0.12, z: -2.45 },
+          { x: -0.04, z: -5.25 },
+        ];
+        const EDDY = [
+          { x: -2.4, z: 1.8, r: 2.6, spin: 0.9 },
+          { x: 2.8, z: -1.2, r: 2.2, spin: -0.75 },
+          { x: -1.6, z: -4.1, r: 2.4, spin: 0.65 },
+        ];
+        const CAM2D = {
+          eye: { x: 5.6, y: 4.8, z: 10.4 },
+          right: { x: 0.907, y: 0, z: -0.422 },
+          up: { x: -0.132, y: 0.95, z: -0.284 },
+          fwd: { x: -0.4, y: -0.312, z: -0.862 },
+          focal: 390,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+        function dist2(ax, az, bx, bz) { return Math.hypot(ax - bx, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          pontoons: [],
+          active: 0,
+          cart: { progress: 0, running: false, x: 0, y: 0.55, z: NEAR_Z },
+          surge: 0,
+          surgeTimer: 6.5,
+          particles: [],
+          foam: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          currentNow: 0.28,
+          pinHint: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, moved: false, downX: 0, downY: 0,
+          pointerId: null, worldX: 0, worldZ: 0,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            current: phase === 1 ? 0.32 : phase === 2 ? 0.72 : 1.18,
+            pinRadius: phase === 1 ? 0.92 : phase === 2 ? 0.58 : 0.4,
+            pinSpeed: phase === 1 ? 1.15 : phase === 2 ? 0.72 : 0.48,
+            surgeEvery: phase === 1 ? 99 : phase === 2 ? 7.2 : 4.4,
+            surgeAmp: phase === 1 ? 0 : phase === 2 ? 0.55 : 1.05,
+            stress: phase === 1 ? 0.04 : phase === 2 ? 0.16 : 0.32,
+            eddy: phase === 1 ? 0.35 : phase === 2 ? 0.7 : 1.05,
+          };
+        }
+
+        function flowAt(x, z, t, params) {
+          let vx = params.current + state.surge;
+          let vz = 0;
+          EDDY.forEach((eddy) => {
+            const dx = x - eddy.x;
+            const dz = z - eddy.z;
+            const d = Math.hypot(dx, dz) + 0.08;
+            if (d < eddy.r * 1.6) {
+              const w = Math.exp(-((d * d) / (eddy.r * eddy.r))) * eddy.spin * params.eddy;
+              vx += -dz * w * 0.45;
+              vz += dx * w * 0.45;
+            }
+          });
+          vx += Math.sin(t * 1.15 + z * 0.35) * 0.12 * params.phase;
+          vz += Math.cos(t * 0.8 + x * 0.4) * 0.08 * params.phase;
+          return { vx, vz };
+        }
+
+        function spawnPontoons() {
+          state.pontoons = SLOTS.map((slot, index) => ({
+            id: index,
+            x: index === 0 ? slot.x - 0.15 : -3.2 + index * 0.15,
+            y: 0.12,
+            z: index === 0 ? NEAR_Z - 0.55 : NEAR_Z - 0.2,
+            vx: 0,
+            vz: 0,
+            yaw: randRange(-0.08, 0.08),
+            bob: randRange(0, Math.PI * 2),
+            pinned: false,
+            decked: false,
+            deck: 0,
+            integrity: 1,
+            slotX: slot.x,
+            slotZ: slot.z,
+            pinX: slot.x,
+            pinZ: slot.z,
+          }));
+          state.active = 0;
+        }
+
+        function activePontoon() {
+          return state.pontoons[state.active] || null;
+        }
+
+        function pinWindow(pontoon, params) {
+          if (!pontoon || pontoon.pinned) return { ok: false, dist: 99, speed: 99 };
+          const dist = dist2(pontoon.x, pontoon.z, pontoon.slotX, pontoon.slotZ);
+          const speed = Math.hypot(pontoon.vx, pontoon.vz);
+          return {
+            ok: dist <= params.pinRadius && speed <= params.pinSpeed,
+            dist,
+            speed,
+            align: clamp(1 - dist / Math.max(0.2, params.pinRadius), 0, 1),
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.6, 2.8),
+              vy: randRange(0.8, 3.4),
+              vz: Math.sin(angle) * randRange(0.6, 2.8),
+              life: randRange(0.28, 0.72),
+              kind,
+              size: randRange(0.05, 0.12),
+            });
+          }
+          if (state.particles.length > 72) state.particles.splice(0, state.particles.length - 72);
+        }
+
+        function spawnFoam() {
+          if (reducedMotion && state.foam.length > 16) return;
+          const x = randRange(-7, 7);
+          const z = randRange(FAR_Z, NEAR_Z);
+          state.foam.push({
+            x, y: 0.04, z,
+            vx: state.currentNow * 0.8,
+            vz: randRange(-0.1, 0.1),
+            life: randRange(0.8, 1.8),
+            size: randRange(0.08, 0.2),
+          });
+          if (state.foam.length > 48) state.foam.splice(0, state.foam.length - 48);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "pin") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(220, now);
+              osc.frequency.exponentialRampToValueAtTime(520, now + 0.08);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "deck") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(340, now + 0.12);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+              osc.start(now); osc.stop(now + 0.17);
+            } else if (kind === "cart") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.18);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+              osc.start(now); osc.stop(now + 0.21);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.28);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.33);
+            } else if (kind === "warn") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(310, now);
+              osc.frequency.exponentialRampToValueAtTime(190, now + 0.1);
+              gain.gain.setValueAtTime(0.028, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(160, now);
+              osc.frequency.exponentialRampToValueAtTime(42, now + 0.28);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.31);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.cart = { progress: 0, running: false, x: 0.1, y: 0.62, z: NEAR_Z - 0.4 };
+          state.surge = 0;
+          state.surgeTimer = 6.2;
+          state.particles = [];
+          state.foam = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.currentNow = 0.28;
+          state.pinHint = 0;
+          input.dragging = false;
+          input.moved = false;
+          reseed((Date.now() ^ 0xa5a5) >>> 0);
+          spawnPontoons();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("boom");
+          const boat = activePontoon() || state.pontoons[0];
+          if (boat) burst(boat.x, 0.4, boat.z, 18, reason === "pin_pop" ? "timber" : "water");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function tryPin() {
+          if (state.mode !== "running") return false;
+          const pontoon = activePontoon();
+          if (!pontoon || pontoon.pinned) return false;
+          const params = difficultyAt(state.elapsed);
+          const win = pinWindow(pontoon, params);
+          if (!win.ok) {
+            state.message = "핀 창이 아닙니다";
+            state.messageTime = 0.7;
+            state.flash = 0.22;
+            playSfx("warn");
+            return false;
+          }
+          pontoon.pinned = true;
+          pontoon.pinX = pontoon.x;
+          pontoon.pinZ = pontoon.z;
+          pontoon.vx *= 0.12;
+          pontoon.vz *= 0.12;
+          const speedPenalty = clamp(win.speed / Math.max(0.2, params.pinSpeed), 0, 1);
+          const alignBonus = win.align;
+          pontoon.integrity = clamp(0.55 + alignBonus * 0.45 - speedPenalty * 0.28, 0.32, 1);
+          state.flash = 0.45;
+          state.message = `핀 ${state.active + 1}/${GOAL}`;
+          state.messageTime = 0.85;
+          burst(pontoon.x, 0.25, pontoon.z, 14, "timber");
+          playSfx("pin");
+          if (state.active < GOAL - 1) state.active += 1;
+          return true;
+        }
+
+        function pointerToWorld(clientX, clientY) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = (clientX - rect.left) / Math.max(1, rect.width);
+          const ny = (clientY - rect.top) / Math.max(1, rect.height);
+          const x = lerp(-6.2, 6.2, nx);
+          const z = lerp(NEAR_Z - 0.2, FAR_Z + 0.4, ny);
+          return { x, z };
+        }
+
+        function updatePontoons(dt, params) {
+          state.currentNow = params.current + state.surge;
+          state.pontoons.forEach((pontoon, index) => {
+            pontoon.bob += dt * 1.7;
+            pontoon.y = 0.1 + Math.sin(pontoon.bob) * 0.06;
+            if (pontoon.pinned) {
+              const hold = dist2(pontoon.x, pontoon.z, pontoon.pinX, pontoon.pinZ);
+              pontoon.x = lerp(pontoon.x, pontoon.pinX, Math.min(1, dt * 6));
+              pontoon.z = lerp(pontoon.z, pontoon.pinZ, Math.min(1, dt * 6));
+              pontoon.vx *= Math.exp(-8 * dt);
+              pontoon.vz *= Math.exp(-8 * dt);
+              const stress = params.stress * (0.45 + state.surge * 0.9) * (1.15 - pontoon.integrity);
+              const deckShield = pontoon.decked ? 0.28 : 1;
+              pontoon.integrity -= stress * deckShield * dt;
+              if (hold > 0.55) pontoon.integrity -= dt * 0.2;
+              if (pontoon.integrity <= 0) {
+                pontoon.pinned = false;
+                failStage("pin_pop");
+              }
+              if (!pontoon.decked) {
+                pontoon.deck = Math.min(1, pontoon.deck + dt * (0.85 + pontoon.integrity * 0.5));
+                if (pontoon.deck >= 1) {
+                  pontoon.decked = true;
+                  playSfx("deck");
+                  burst(pontoon.x, 0.35, pontoon.z, 8, "timber");
+                }
+              }
+              return;
+            }
+            const flow = flowAt(pontoon.x, pontoon.z, state.elapsed, params);
+            pontoon.vx += flow.vx * dt * 1.35;
+            pontoon.vz += flow.vz * dt * 1.15;
+            const isActive = index === state.active;
+            if (isActive) {
+              let fx = 0;
+              let fz = 0;
+              if (input.left) fx -= 1;
+              if (input.right) fx += 1;
+              if (input.up) fz -= 1;
+              if (input.down) fz += 1;
+              if (input.dragging) {
+                fx += clamp(input.worldX - pontoon.x, -2.4, 2.4) * 1.15;
+                fz += clamp(input.worldZ - pontoon.z, -2.4, 2.4) * 1.15;
+              }
+              pontoon.vx += fx * 5.8 * dt;
+              pontoon.vz += fz * 5.8 * dt;
+            }
+            pontoon.vx *= Math.exp(-1.15 * dt);
+            pontoon.vz *= Math.exp(-1.25 * dt);
+            pontoon.x += pontoon.vx * dt;
+            pontoon.z += pontoon.vz * dt;
+            pontoon.z = clamp(pontoon.z, FAR_Z + 0.4, NEAR_Z - 0.15);
+            pontoon.yaw = lerp(pontoon.yaw, pontoon.vx * 0.08, Math.min(1, dt * 4));
+            if (Math.abs(pontoon.x) > DRIFT_LIMIT) failStage("drifted");
+          });
+        }
+
+        function updateCart(dt) {
+          const ready = state.pontoons.every((pontoon) => pontoon.pinned && pontoon.decked);
+          if (!ready) return;
+          if (!state.cart.running) {
+            state.cart.running = true;
+            state.message = "짐수레 출발";
+            state.messageTime = 0.9;
+            playSfx("cart");
+          }
+          state.cart.progress = Math.min(1, state.cart.progress + dt * 0.22);
+          const span = NEAR_Z - 0.6 - (FAR_Z + 0.5);
+          state.cart.z = lerp(NEAR_Z - 0.6, FAR_Z + 0.5, state.cart.progress);
+          const nearest = state.pontoons.reduce((best, pontoon) => {
+            const d = Math.abs(pontoon.z - state.cart.z);
+            return d < best.d ? { d, pontoon } : best;
+          }, { d: 99, pontoon: state.pontoons[0] });
+          state.cart.x = nearest.pontoon ? lerp(state.cart.x, nearest.pontoon.x, Math.min(1, dt * 4)) : 0;
+          state.cart.y = 0.55 + Math.sin(state.elapsed * 9) * 0.02;
+          if (state.cart.progress >= 1) clearStage();
+        }
+
+        function updateSurge(dt, params) {
+          state.surge = Math.max(0, state.surge - dt * 0.85);
+          state.surgeTimer -= dt;
+          if (state.elapsed < 5.2) return;
+          if (params.surgeAmp <= 0) return;
+          if (state.surgeTimer > 0) return;
+          state.surge = params.surgeAmp;
+          state.surgeTimer = params.surgeEvery + randRange(-0.6, 0.8);
+          state.message = "유속 쇄도";
+          state.messageTime = 0.7;
+          playSfx("warn");
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 4.2 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+          state.foam.forEach((foam) => {
+            foam.x += foam.vx * dt;
+            foam.z += foam.vz * dt;
+            foam.life -= dt;
+          });
+          state.foam = state.foam.filter((foam) => foam.life > 0);
+          if (random() < (reducedMotion ? 0.08 : 0.22)) spawnFoam();
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          const pontoon = activePontoon();
+          const params = difficultyAt(state.elapsed);
+          state.pinHint = pontoon ? pinWindow(pontoon, params).align : 0;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          updateSurge(dt, params);
+          if (state.mode !== "running") return;
+          updatePontoons(dt, params);
+          if (state.mode !== "running") return;
+          updateCart(dt);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          const pinned = state.pontoons.filter((pontoon) => pontoon.pinned).length;
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `경간 ${pinned} / ${GOAL} · 유속 ${state.currentNow.toFixed(2)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 경간 ${GOAL}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x07141c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x07141c);
+          scene.fog = new THREE.Fog(0x0a2430, 14, 46);
+
+          const camera = new THREE.PerspectiveCamera(56, VIEW_W / VIEW_H, 0.1, 90);
+          camera.position.set(5.6, 4.8, 10.4);
+
+          scene.add(new THREE.AmbientLight(0x1a3a4c, 0.52));
+          const hemi = new THREE.HemisphereLight(0x8ec8ff, 0x1a3028, 0.48);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xd8ecff, 0.62);
+          sun.position.set(-8, 16, 6);
+          scene.add(sun);
+          const riverLight = new THREE.PointLight(0x7ec8ff, 1.05, 28);
+          riverLight.position.set(0, 2.2, -1);
+          scene.add(riverLight);
+          const lanternGlow = new THREE.PointLight(0xffc07a, 0.85, 12);
+          lanternGlow.position.set(3.4, 2.6, 7.2);
+          scene.add(lanternGlow);
+
+          const waterGeo = new THREE.PlaneGeometry(28, 22, 18, 14);
+          const waterMat = new THREE.MeshStandardMaterial({
+            color: 0x163a52, roughness: 0.32, metalness: 0.22, emissive: 0x071820, emissiveIntensity: 0.35,
+          });
+          const water = new THREE.Mesh(waterGeo, waterMat);
+          water.rotation.x = -Math.PI / 2;
+          water.position.y = 0;
+          scene.add(water);
+          const waterBase = waterGeo.attributes.position.array.slice();
+
+          const bankMat = new THREE.MeshStandardMaterial({
+            color: 0x3a4a38, roughness: 0.92, metalness: 0.05, emissive: 0x101810, emissiveIntensity: 0.15,
+          });
+          const stoneMat = new THREE.MeshStandardMaterial({
+            color: 0x6a746c, roughness: 0.78, metalness: 0.12, emissive: 0x181c18, emissiveIntensity: 0.12,
+          });
+          const timberMat = new THREE.MeshStandardMaterial({
+            color: 0x8a6238, roughness: 0.7, metalness: 0.08, emissive: 0x2a1808, emissiveIntensity: 0.18,
+          });
+          const mossMat = new THREE.MeshStandardMaterial({
+            color: 0x2f5a40, roughness: 0.88, metalness: 0.04,
+          });
+
+          const nearBank = new THREE.Mesh(new THREE.BoxGeometry(22, 1.6, 5.4), bankMat);
+          nearBank.position.set(0, 0.55, 8.6);
+          scene.add(nearBank);
+          const farBank = new THREE.Mesh(new THREE.BoxGeometry(22, 1.8, 5.8), bankMat);
+          farBank.position.set(0, 0.65, -9.6);
+          scene.add(farBank);
+
+          const abutmentGeo = new THREE.BoxGeometry(3.4, 2.2, 2.4);
+          const nearAbut = new THREE.Mesh(abutmentGeo, stoneMat);
+          nearAbut.position.set(0.2, 1.15, 6.7);
+          scene.add(nearAbut);
+          const farAbut = new THREE.Mesh(abutmentGeo, stoneMat);
+          farAbut.position.set(-0.1, 1.2, -7.6);
+          scene.add(farAbut);
+
+          const cribGeo = new THREE.BoxGeometry(1.1, 0.28, 1.6);
+          const cribs = [];
+          for (let index = 0; index < 8; index += 1) {
+            const crib = new THREE.Mesh(cribGeo, timberMat);
+            const side = index < 4 ? 1 : -1;
+            crib.position.set(side * (2.4 + (index % 2) * 0.7), 0.35 + (index % 3) * 0.28, index < 4 ? 6.1 : -7.1);
+            crib.rotation.y = (index % 2) * 0.18;
+            scene.add(crib);
+            cribs.push(crib);
+          }
+
+          const postGeo = new THREE.CylinderGeometry(0.08, 0.1, 2.4, 6);
+          const posts = [];
+          [[-4.2, 1.4, 7.4], [3.6, 1.4, 7.6], [-3.8, 1.5, -8.4], [4.1, 1.5, -8.2]].forEach((pos) => {
+            const post = new THREE.Mesh(postGeo, timberMat);
+            post.position.set(pos[0], pos[1], pos[2]);
+            scene.add(post);
+            posts.push(post);
+          });
+          const lampGeo = new THREE.SphereGeometry(0.16, 8, 8);
+          const lampMat = new THREE.MeshStandardMaterial({
+            color: 0xffd08a, roughness: 0.3, metalness: 0.2, emissive: 0xffb060, emissiveIntensity: 0.85,
+          });
+          const lamps = posts.map((post) => {
+            const lamp = new THREE.Mesh(lampGeo, lampMat);
+            lamp.position.copy(post.position);
+            lamp.position.y += 1.25;
+            scene.add(lamp);
+            return lamp;
+          });
+
+          const shedMat = new THREE.MeshStandardMaterial({
+            color: 0x6a4a32, roughness: 0.74, metalness: 0.08, emissive: 0x1a1008, emissiveIntensity: 0.12,
+          });
+          const roofMat = new THREE.MeshStandardMaterial({
+            color: 0x3a2a22, roughness: 0.8, metalness: 0.06,
+          });
+          const warehouse = new THREE.Group();
+          const shed = new THREE.Mesh(new THREE.BoxGeometry(3.6, 2.1, 2.4), shedMat);
+          shed.position.y = 1.9;
+          warehouse.add(shed);
+          const roof = new THREE.Mesh(new THREE.ConeGeometry(2.6, 1.1, 4), roofMat);
+          roof.position.y = 3.5;
+          roof.rotation.y = Math.PI / 4;
+          warehouse.add(roof);
+          warehouse.position.set(-5.4, 0.7, 8.4);
+          scene.add(warehouse);
+
+          const ferry = new THREE.Group();
+          const ferryBody = new THREE.Mesh(new THREE.BoxGeometry(2.8, 1.6, 2.2), stoneMat);
+          ferryBody.position.y = 1.6;
+          ferry.add(ferryBody);
+          const ferryRoof = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.18, 2.4), roofMat);
+          ferryRoof.position.y = 2.45;
+          ferry.add(ferryRoof);
+          ferry.position.set(4.8, 0.7, -9.2);
+          scene.add(ferry);
+
+          const willowTrunkGeo = new THREE.CylinderGeometry(0.12, 0.18, 2.8, 6);
+          const willowLeafGeo = new THREE.SphereGeometry(1.15, 8, 6);
+          const willowLeafMat = new THREE.MeshStandardMaterial({
+            color: 0x2a6a44, roughness: 0.9, metalness: 0.04, emissive: 0x0a2010, emissiveIntensity: 0.2,
+          });
+          const willows = [];
+          [[-6.8, 2.1, 7.8], [6.2, 2.1, 8.1], [-7.1, 2.2, -8.6], [6.8, 2.2, -8.8], [-8.2, 2.0, 2.2]].forEach((pos) => {
+            const group = new THREE.Group();
+            const trunk = new THREE.Mesh(willowTrunkGeo, timberMat);
+            trunk.position.y = 0;
+            group.add(trunk);
+            const leaf = new THREE.Mesh(willowLeafGeo, willowLeafMat);
+            leaf.position.y = 1.35;
+            leaf.scale.set(1, 1.15, 0.85);
+            group.add(leaf);
+            group.position.set(pos[0], pos[1], pos[2]);
+            scene.add(group);
+            willows.push(group);
+          });
+
+          const tuftGeo = new THREE.ConeGeometry(0.22, 0.7, 5);
+          const tufts = [];
+          for (let index = 0; index < 18; index += 1) {
+            const tuft = new THREE.Mesh(tuftGeo, mossMat);
+            const near = index < 10;
+            tuft.position.set((index % 9 - 4) * 1.35 + (index % 2) * 0.2, near ? 1.25 : 1.35, near ? 9.4 : -10.4);
+            scene.add(tuft);
+            tufts.push(tuft);
+          }
+
+          const barrelGeo = new THREE.CylinderGeometry(0.42, 0.42, 1.55, 8);
+          const barrelMat = new THREE.MeshStandardMaterial({
+            color: 0xb08a4a, roughness: 0.55, metalness: 0.12, emissive: 0x2a1a08, emissiveIntensity: 0.22,
+          });
+          const frameGeo = new THREE.BoxGeometry(1.7, 0.16, 1.15);
+          const frameMat = new THREE.MeshStandardMaterial({
+            color: 0x6a4a28, roughness: 0.62, metalness: 0.1, emissive: 0x1a1008, emissiveIntensity: 0.16,
+          });
+          const pontoonMeshes = [];
+          for (let index = 0; index < GOAL; index += 1) {
+            const group = new THREE.Group();
+            const left = new THREE.Mesh(barrelGeo, barrelMat);
+            left.rotation.z = Math.PI / 2;
+            left.position.x = -0.55;
+            const right = new THREE.Mesh(barrelGeo, barrelMat);
+            right.rotation.z = Math.PI / 2;
+            right.position.x = 0.55;
+            const frame = new THREE.Mesh(frameGeo, frameMat);
+            frame.position.y = 0.28;
+            group.add(left, right, frame);
+            scene.add(group);
+            pontoonMeshes.push(group);
+          }
+
+          const pinGeo = new THREE.CylinderGeometry(0.05, 0.07, 1.05, 6);
+          const pinMat = new THREE.MeshStandardMaterial({
+            color: 0xc0c8d0, roughness: 0.35, metalness: 0.55, emissive: 0x202428, emissiveIntensity: 0.2,
+          });
+          const pinMeshes = [];
+          for (let index = 0; index < GOAL; index += 1) {
+            const pin = new THREE.Mesh(pinGeo, pinMat);
+            pin.visible = false;
+            scene.add(pin);
+            pinMeshes.push(pin);
+          }
+
+          const plankGeo = new THREE.BoxGeometry(1.55, 0.08, 2.35);
+          const plankMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a06a, roughness: 0.58, metalness: 0.08, emissive: 0x2a1c08, emissiveIntensity: 0.14,
+          });
+          const plankMeshes = [];
+          for (let index = 0; index < GOAL; index += 1) {
+            const plank = new THREE.Mesh(plankGeo, plankMat);
+            plank.visible = false;
+            scene.add(plank);
+            plankMeshes.push(plank);
+          }
+
+          const cart = new THREE.Group();
+          const cartBody = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.42, 0.95), timberMat);
+          cartBody.position.y = 0.28;
+          cart.add(cartBody);
+          const crate = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.38, 0.48), shedMat);
+          crate.position.set(0, 0.62, 0);
+          cart.add(crate);
+          const wheelGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.08, 8);
+          const wheelMat = new THREE.MeshStandardMaterial({ color: 0x2a241c, roughness: 0.7, metalness: 0.15 });
+          [[-0.32, 0.16, 0.32], [0.32, 0.16, 0.32], [-0.32, 0.16, -0.32], [0.32, 0.16, -0.32]].forEach((pos) => {
+            const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+            wheel.rotation.z = Math.PI / 2;
+            wheel.position.set(pos[0], pos[1], pos[2]);
+            cart.add(wheel);
+          });
+          cart.visible = false;
+          scene.add(cart);
+
+          const slotRingGeo = new THREE.TorusGeometry(0.7, 0.03, 6, 18);
+          const slotMat = new THREE.MeshBasicMaterial({
+            color: 0x7ec8ff, transparent: true, opacity: 0.35, depthWrite: false,
+          });
+          const slotRings = SLOTS.map((slot) => {
+            const ring = new THREE.Mesh(slotRingGeo, slotMat.clone());
+            ring.rotation.x = Math.PI / 2;
+            ring.position.set(slot.x, 0.08, slot.z);
+            scene.add(ring);
+            return ring;
+          });
+
+          const particleGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const foamGeo = new THREE.SphereGeometry(0.09, 6, 6);
+          const timberParticleMat = new THREE.MeshBasicMaterial({
+            color: 0xc4a06a, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+          const waterParticleMat = new THREE.MeshBasicMaterial({
+            color: 0x7ec8ff, transparent: true, opacity: 0.7, depthWrite: false,
+          });
+
+          const mistCount = reducedMotion ? 80 : 220;
+          const mistPos = new Float32Array(mistCount * 3);
+          for (let index = 0; index < mistCount; index += 1) {
+            mistPos[index * 3] = (Math.random() - 0.5) * 22;
+            mistPos[index * 3 + 1] = 0.2 + Math.random() * 4.5;
+            mistPos[index * 3 + 2] = (Math.random() - 0.5) * 20;
+          }
+          const mistGeo = new THREE.BufferGeometry();
+          mistGeo.setAttribute("position", new THREE.BufferAttribute(mistPos, 3));
+          const mist = new THREE.Points(mistGeo, new THREE.PointsMaterial({
+            color: 0xb8dcff, size: 0.09, transparent: true, opacity: 0.28, sizeAttenuation: true,
+          }));
+          scene.add(mist);
+
+          return {
+            renderer, scene, camera, water, waterGeo, waterBase, riverLight, lanternGlow, lamps,
+            pontoonMeshes, pinMeshes, plankMeshes, cart, slotRings, willows,
+            particleGeo, foamGeo, timberParticleMat, waterParticleMat,
+            particleMeshes: [], foamMeshes: [], mist,
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.elapsed;
+          const pos = webgl.waterGeo.attributes.position;
+          for (let index = 0; index < pos.count; index += 1) {
+            const bx = webgl.waterBase[index * 3];
+            const by = webgl.waterBase[index * 3 + 1];
+            const wave = reducedMotion ? 0 : Math.sin(t * 1.6 + bx * 0.45 + by * 0.3) * 0.12
+              + Math.sin(t * 0.9 + by * 0.55) * 0.07;
+            pos.setZ(index, wave + state.surge * 0.08);
+          }
+          pos.needsUpdate = true;
+
+          state.pontoons.forEach((pontoon, index) => {
+            const mesh = webgl.pontoonMeshes[index];
+            mesh.position.set(pontoon.x, pontoon.y, pontoon.z);
+            mesh.rotation.y = pontoon.yaw;
+            mesh.rotation.z = pontoon.vx * 0.04;
+            const pin = webgl.pinMeshes[index];
+            pin.visible = pontoon.pinned;
+            pin.position.set(pontoon.pinX + 0.7, 0.45, pontoon.pinZ);
+            pin.scale.y = 0.7 + pontoon.integrity * 0.45;
+            const plank = webgl.plankMeshes[index];
+            plank.visible = pontoon.deck > 0.15;
+            plank.position.set(pontoon.x, 0.38, pontoon.z);
+            plank.scale.set(1, 1, Math.max(0.2, pontoon.deck));
+            const ring = webgl.slotRings[index];
+            const active = index === state.active && !pontoon.pinned;
+            ring.material.opacity = active ? 0.28 + state.pinHint * 0.45 : pontoon.pinned ? 0.08 : 0.16;
+            ring.scale.setScalar(active ? 1 + Math.sin(t * 4) * 0.06 : 1);
+          });
+
+          webgl.cart.visible = state.cart.running || state.cart.progress > 0;
+          webgl.cart.position.set(state.cart.x, state.cart.y, state.cart.z);
+          webgl.cart.rotation.y = 0;
+          webgl.riverLight.intensity = 0.9 + state.surge * 0.4 + Math.sin(t * 2.2) * 0.08;
+          webgl.lanternGlow.intensity = reducedMotion ? 0.7 : 0.7 + Math.sin(t * 5.5) * 0.18;
+          webgl.lamps.forEach((lamp, index) => {
+            lamp.material.emissiveIntensity = 0.7 + Math.sin(t * 4.5 + index) * 0.2;
+          });
+          webgl.willows.forEach((willow, index) => {
+            willow.rotation.z = reducedMotion ? 0 : Math.sin(t * 0.7 + index) * 0.04;
+          });
+
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.timberParticleMat);
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            mesh.visible = Boolean(particle);
+            if (!particle) return;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.material = particle.kind === "water" ? webgl.waterParticleMat : webgl.timberParticleMat;
+            mesh.scale.setScalar(particle.size * 8);
+          });
+          while (webgl.foamMeshes.length < state.foam.length) {
+            const mesh = new THREE.Mesh(webgl.foamGeo, webgl.waterParticleMat);
+            webgl.scene.add(mesh);
+            webgl.foamMeshes.push(mesh);
+          }
+          webgl.foamMeshes.forEach((mesh, index) => {
+            const foam = state.foam[index];
+            mesh.visible = Boolean(foam);
+            if (!foam) return;
+            mesh.position.set(foam.x, foam.y, foam.z);
+            mesh.scale.setScalar(foam.size * 6);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.22 : 0;
+          webgl.camera.position.set(5.6 + shakeX, 4.8 + shakeY, 10.4);
+          webgl.camera.lookAt(0.1, 0.35, -1.4);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project(x, y, z) {
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const rx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const uy = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = Math.max(0.35, -depth);
+          return {
+            x: VIEW_W * 0.5 + (rx * CAM2D.focal) / w,
+            y: VIEW_H * 0.46 - (uy * CAM2D.focal) / w,
+            depth: w,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#14344c");
+          sky.addColorStop(0.45, "#07141c");
+          sky.addColorStop(1, "#0a2430");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+          ctx.fillStyle = "#1a4a38";
+          const far = project(0, 0.6, FAR_Z - 2.2);
+          ctx.fillRect(0, far.y - 20, VIEW_W, 80);
+          ctx.fillStyle = COLORS.water;
+          ctx.fillRect(0, far.y + 36, VIEW_W, VIEW_H);
+
+          ctx.fillStyle = "rgba(126,200,255,0.18)";
+          for (let index = 0; index < 9; index += 1) {
+            const y = (index * 38 + state.elapsed * 26 * state.currentNow) % (VIEW_H * 0.55);
+            ctx.fillRect(0, far.y + 50 + y, VIEW_W, 6);
+          }
+
+          SLOTS.forEach((slot, index) => {
+            const p = project(slot.x, 0.08, slot.z);
+            ctx.strokeStyle = index === state.active ? COLORS.accent : "rgba(126,200,255,0.35)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 16 + (index === state.active ? state.pinHint * 8 : 0), 0, Math.PI * 2);
+            ctx.stroke();
+          });
+
+          state.pontoons.forEach((pontoon, index) => {
+            const p = project(pontoon.x, pontoon.y, pontoon.z);
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(pontoon.yaw);
+            ctx.fillStyle = index === state.active ? "#d4b06a" : COLORS.timber;
+            ctx.fillRect(-22, -10, 44, 20);
+            ctx.fillStyle = "#8a6238";
+            ctx.fillRect(-24, -6, 10, 12);
+            ctx.fillRect(14, -6, 10, 12);
+            if (pontoon.pinned) {
+              ctx.fillStyle = COLORS.accent;
+              ctx.fillRect(16, -18, 4, 22);
+            }
+            if (pontoon.deck > 0.2) {
+              ctx.fillStyle = "rgba(196,160,106,0.85)";
+              ctx.fillRect(-18, -8, 36, 6);
+            }
+            ctx.restore();
+          });
+
+          if (state.cart.running) {
+            const p = project(state.cart.x, state.cart.y, state.cart.z);
+            ctx.fillStyle = "#5a3a22";
+            ctx.fillRect(p.x - 10, p.y - 12, 20, 16);
+            ctx.fillStyle = COLORS.timber;
+            ctx.fillRect(p.x - 7, p.y - 22, 14, 10);
+          }
+
+          const near = project(0, 0.8, NEAR_Z + 1.6);
+          ctx.fillStyle = "#2a3a28";
+          ctx.fillRect(0, near.y, VIEW_W, VIEW_H - near.y);
+          ctx.fillStyle = "#6a746c";
+          ctx.fillRect(VIEW_W * 0.38, near.y - 48, 90, 52);
+
+          state.particles.forEach((particle) => {
+            const p = project(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.8, 0, 1);
+            ctx.fillStyle = particle.kind === "water" ? COLORS.accent : COLORS.timber;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(232,244,255,0.7)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const pinned = state.pontoons.filter((pontoon) => pontoon.pinned).length;
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${pinned} / ${GOAL}`;
+          if (meter) meter.style.width = `${(pinned / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const win = activePontoon() ? pinWindow(activePontoon(), difficultyAt(state.elapsed)) : null;
+            sub.textContent = win && win.ok ? "핀 창 · 탭" : `유속 ${state.currentNow.toFixed(2)}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const pontoon = activePontoon();
+          if (pontoon && !pontoon.pinned) {
+            const p = project(pontoon.slotX, 0.1, pontoon.slotZ);
+            hud.save();
+            hud.strokeStyle = state.pinHint > 0.65 ? COLORS.accent : "rgba(255,107,122,0.55)";
+            hud.setLineDash([5, 5]);
+            hud.beginPath();
+            hud.arc(p.x, p.y, 18, 0, Math.PI * 2);
+            hud.stroke();
+            hud.setLineDash([]);
+            hud.restore();
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.includes("창") || state.message.includes("쇄도") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(126,200,255,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const pontoon = activePontoon();
+          const win = pontoon ? pinWindow(pontoon, params) : null;
+          return JSON.stringify({
+            coordinate_system: "world units; +x downstream; +y up; +z toward near bank",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            current: Number(state.currentNow.toFixed(3)),
+            surge: Number(state.surge.toFixed(3)),
+            pinned: state.pontoons.filter((entry) => entry.pinned).length,
+            decked: state.pontoons.filter((entry) => entry.decked).length,
+            cart: Number(state.cart.progress.toFixed(3)),
+            active: pontoon ? {
+              x: Number(pontoon.x.toFixed(2)),
+              z: Number(pontoon.z.toFixed(2)),
+              speed: Number(Math.hypot(pontoon.vx, pontoon.vz).toFixed(3)),
+              pinOk: Boolean(win && win.ok),
+            } : null,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          const world = pointerToWorld(event.clientX, event.clientY);
+          input.worldX = world.x;
+          input.worldZ = world.z;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          if (Math.hypot(event.clientX - input.downX, event.clientY - input.downY) > 10) input.moved = true;
+          const world = pointerToWorld(event.clientX, event.clientY);
+          input.worldX = world.x;
+          input.worldZ = world.z;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.dragging && !input.moved) tryPin();
+          input.dragging = false;
+          input.moved = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") {
+              startStage();
+              return;
+            }
+            tryPin();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.pontoons.forEach((pontoon) => {
+              pontoon.pinned = true;
+              pontoon.decked = true;
+              pontoon.deck = 1;
+              pontoon.integrity = 1;
+            });
+            state.cart.running = true;
+            state.cart.progress = 1;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+          pin() { tryPin(); render(); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

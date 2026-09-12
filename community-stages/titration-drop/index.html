@@ -1,0 +1,1180 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>적정</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #101418; --accent: #ff6b7a; --accent-ink: #101418; --danger: #ff6b7a; --ink: #fff0f0; --muted: rgba(255,240,240,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">적정. 플라스크를 흔들며 종말점 색에 맞춰 한 방울씩 떨어뜨리세요. 탭으로 방울, 홀드로 스월. 종말점에 정확히 도달하면 클리어. 과량으로 넘어가면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 짧게 탭해 방울을 떨어뜨리고 길게 눌러 플라스크를 스월합니다.</p>
+    <main class="stage" aria-label="적정 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="적정" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">적정치</p>
+          <p class="hud-value" id="hud-objective">0%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">46.0</p>
+          <p class="hud-sub" id="hud-sub">색 대기</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Titration</p>
+          <h1>적정</h1>
+          <p class="brief-lead">플라스크를 흔들며 종말점 색에 맞춰 한 방울씩 떨어뜨리세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 방울, 홀드로 스월</span></li>
+            <li><strong>클리어</strong><span>종말점에 정확히 도달하면 클리어</span></li>
+            <li><strong>실패</strong><span>과량으로 넘어가면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">적정 실패</p>
+          <h2>종말점을 지나쳤다</h2>
+          <p class="brief-lead" id="fail-detail">과량으로 넘어가면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">종말점</p>
+          <h2>마젠타 도달</h2>
+          <p class="brief-lead">혼합을 맞춰 종말점 색에 정확히 닿았습니다.</p>
+          <p class="hud-sub" id="clear-stat">종말점에 정확히 도달하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 46;
+        const ENDPOINT = 1;
+        const CLEAR_LO = 0.968;
+        const CLEAR_HI = 1.032;
+        const OVERSHOOT = 1.085;
+        const GRACE = 5.2;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "titration-drop",
+          title: "적정",
+          description: "플라스크를 흔들며 종말점 색에 맞춰 한 방울씩 떨어뜨리세요.",
+          creator: "collin",
+          genre: "3D titration",
+          clearCondition: "종말점에 정확히 도달하면 클리어",
+          failCondition: "과량으로 넘어가면 실패",
+          controls: "탭으로 방울, 홀드로 스월",
+        };
+        const COLORS = {
+          bg: "#101418",
+          ink: "#fff0f0",
+          accent: "#ff6b7a",
+          glass: "#d8e8f0",
+          brass: "#c4a056",
+          magenta: "#e05090",
+          danger: "#ff6b7a",
+          bench: "#3a2a22",
+        };
+        const FAIL_COPY = {
+          overshoot: "지시약이 과량으로 넘어 짙은 보라가 되었습니다",
+          swirl_spill: "스월이 너무 강해 플라스크가 넘쳤습니다",
+          time_limit: "제한 시간 46초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const BOTTLE_LAYOUT = [
+          { x: -1.85, z: 0.55, h: 0.62, color: 0x2a6a88, cap: 0xc4a056 },
+          { x: -1.45, z: 0.72, h: 0.48, color: 0x88445c, cap: 0x222222 },
+          { x: 1.72, z: 0.48, h: 0.7, color: 0x446068, cap: 0xc4a056 },
+          { x: 2.08, z: 0.7, h: 0.4, color: 0x885544, cap: 0xeee8d8 },
+        ];
+        const PAPER_LAYOUT = [
+          { x: 1.15, z: 0.95, rot: 0.2 },
+          { x: 1.32, z: 1.08, rot: -0.15 },
+          { x: 1.05, z: 1.12, rot: 0.4 },
+        ];
+        const DROP_TRAIL = 10;
+        const CAM2D = {
+          eye: { x: 0.15, y: 1.55, z: 3.4 },
+          right: { x: 0.998, y: 0, z: -0.06 },
+          up: { x: 0.02, y: 0.97, z: 0.24 },
+          fwd: { x: -0.06, y: 0.24, z: -0.969 },
+          focal: 540,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          trueTitrant: 0.08,
+          mixed: 0.06,
+          unmixed: 0.02,
+          apparent: 0.06,
+          swirl: 0,
+          swirlEnergy: 0,
+          flaskAngle: 0,
+          flaskWobble: 0,
+          meniscus: 0.42,
+          drops: [],
+          dropCooldown: 0,
+          holdTime: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          colorName: "담황",
+          buretteLevel: 0.82,
+          drip: 0,
+          clearHold: 0,
+        };
+        const input = {
+          holding: false, dragging: false, pointerId: null,
+          downAt: 0, downX: 0, downY: 0, moved: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            dropSize: phase === 1 ? 0.042 : phase === 2 ? 0.03 : 0.02,
+            mixLag: 0.55 + difficulty * 1.15 + (phase >= 2 ? 0.25 : 0),
+            swirlMix: 1.65 + difficulty * 0.4,
+            spillRate: 0.22 + difficulty * 0.28 + (phase >= 3 ? 0.18 : 0),
+            indicatorLag: 0.35 + difficulty * 0.55,
+            swirlDecay: 1.1 - difficulty * 0.2,
+          };
+        }
+
+        function colorLabel(value) {
+          if (value < 0.22) return "담황";
+          if (value < 0.48) return "주황";
+          if (value < 0.72) return "분홍";
+          if (value < 0.97) return "장미";
+          if (value <= 1.032) return "마젠타";
+          return "진보라";
+        }
+
+        function liquidHex(value) {
+          if (value < 0.25) return 0xf2e0a8;
+          if (value < 0.55) return 0xf0a070;
+          if (value < 0.8) return 0xee7a90;
+          if (value <= 1.032) return 0xe05090;
+          return 0x7a3088;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.25, 0.25);
+            const lift = randRange(0.6, 2.8);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.5, 3.2),
+              vz: Math.sin(angle) * lift * 0.4,
+              life: randRange(0.25, 0.7),
+              kind,
+              size: randRange(0.025, 0.08),
+            });
+          }
+          if (state.particles.length > 70) state.particles.splice(0, state.particles.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "drop") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(880, now);
+              osc.frequency.exponentialRampToValueAtTime(220, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "swirl") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(90 + state.swirl * 80, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.05);
+              gain.gain.setValueAtTime(0.016, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+              osc.start(now); osc.stop(now + 0.07);
+            } else if (kind === "end") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.18);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+              osc.start(now); osc.stop(now + 0.24);
+            } else if (kind === "spill") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(200, now);
+              osc.frequency.exponentialRampToValueAtTime(60, now + 0.16);
+              gain.gain.setValueAtTime(0.045, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.2);
+            } else if (kind === "boom") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(32, now + 0.22);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.25);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.trueTitrant = 0.08;
+          state.mixed = 0.06;
+          state.unmixed = 0.02;
+          state.apparent = 0.06;
+          state.swirl = 0;
+          state.swirlEnergy = 0;
+          state.flaskAngle = 0;
+          state.flaskWobble = 0;
+          state.meniscus = 0.42;
+          state.drops = [];
+          state.dropCooldown = 0;
+          state.holdTime = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.colorName = "담황";
+          state.buretteLevel = 0.82;
+          state.drip = 0;
+          state.clearHold = 0;
+          input.holding = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("end");
+          state.flash = 0.75;
+          burst(0, 1.05, 0.15, 24, "magenta");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.72;
+          playSfx(reason === "swirl_spill" ? "spill" : "boom");
+          burst(0, 1.0, 0.2, 18, "spill");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function addDrop() {
+          if (state.mode !== "running" || state.dropCooldown > 0) return;
+          const params = difficultyAt(state.elapsed);
+          const size = params.dropSize * (0.86 + random() * 0.22);
+          state.trueTitrant += size;
+          state.unmixed += size;
+          state.buretteLevel = clamp(state.buretteLevel - size * 0.18, 0.12, 1);
+          state.dropCooldown = 0.16;
+          state.drip = 0.22;
+          state.drops.push({ y: 2.35, life: 0.28, size });
+          if (state.drops.length > DROP_TRAIL) state.drops.shift();
+          burst(0.02, 1.35, 0.12, 4, "drop");
+          playSfx("drop");
+          state.message = "방울";
+          state.messageTime = 0.28;
+        }
+
+        function updateChemistry(dt, params) {
+          if (input.holding) {
+            state.holdTime += dt;
+            state.swirl = clamp(state.swirl + dt * 2.4, 0, 1);
+            state.swirlEnergy = clamp(state.swirlEnergy + dt * params.spillRate, 0, 1.2);
+            state.flaskAngle += dt * (4.2 + state.swirl * 8.5);
+            if (state.elapsed - (state.lastSwirlSfx || 0) > 0.09) {
+              state.lastSwirlSfx = state.elapsed;
+              playSfx("swirl");
+            }
+          } else {
+            state.holdTime = 0;
+            state.swirl = Math.max(0, state.swirl - dt * params.swirlDecay);
+            state.swirlEnergy = Math.max(0, state.swirlEnergy - dt * 0.35);
+          }
+          const mixRate = 0.12 + state.swirl * params.swirlMix;
+          const transfer = Math.min(state.unmixed, mixRate * dt / Math.max(0.35, params.mixLag * 0.55));
+          state.unmixed -= transfer;
+          state.mixed += transfer;
+          const targetApparent = state.mixed / Math.max(0.001, ENDPOINT);
+          const lag = clamp(dt / (0.18 + params.indicatorLag * (1.15 - state.swirl)), 0, 1);
+          state.apparent = lerp(state.apparent, targetApparent, lag);
+          state.trueTitrant = state.mixed + state.unmixed;
+          state.meniscus = 0.38 + state.trueTitrant * 0.22 + Math.sin(state.flaskAngle) * state.swirl * 0.04;
+          state.flaskWobble = state.swirl * 0.18 + state.swirlEnergy * 0.12;
+          state.colorName = colorLabel(state.apparent);
+          if (state.elapsed > GRACE && state.swirlEnergy >= 1) failStage("swirl_spill");
+          if (state.elapsed > GRACE && state.trueTitrant >= OVERSHOOT) failStage("overshoot");
+          const mixedRatio = state.mixed / ENDPOINT;
+          const wellMixed = state.unmixed < 0.018;
+          if (mixedRatio >= CLEAR_LO && mixedRatio <= CLEAR_HI && wellMixed && Math.abs(state.apparent - mixedRatio) < 0.04) {
+            state.clearHold += dt;
+            if (state.clearHold > 0.55) clearStage();
+          } else {
+            state.clearHold = 0;
+          }
+        }
+
+        function updateDrops(dt) {
+          state.dropCooldown = Math.max(0, state.dropCooldown - dt);
+          state.drip = Math.max(0, state.drip - dt);
+          state.drops.forEach((drop) => {
+            drop.y -= 4.8 * dt;
+            drop.life -= dt;
+          });
+          state.drops = state.drops.filter((drop) => drop.life > 0 && drop.y > 1.05);
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 6.2 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.8);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateChemistry(dt, params);
+          if (state.mode !== "running") return;
+          updateDrops(dt);
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `적정치 ${Math.round(state.apparent * 100)}% · ${state.colorName}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · ${state.colorName}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x101418, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x101418);
+          scene.fog = new THREE.Fog(0x101418, 6, 16);
+
+          const camera = new THREE.PerspectiveCamera(40, VIEW_W / VIEW_H, 0.08, 60);
+          camera.position.set(0.2, 1.58, 3.45);
+          camera.lookAt(0, 1.15, 0);
+
+          scene.add(new THREE.AmbientLight(0x2a2428, 0.5));
+          scene.add(new THREE.HemisphereLight(0xffe8e0, 0x1a1414, 0.35));
+          const key = new THREE.DirectionalLight(0xfff0f0, 0.7);
+          key.position.set(3.5, 6.5, 4.2);
+          scene.add(key);
+          const benchLamp = new THREE.PointLight(0xffc8a0, 0.85, 10);
+          benchLamp.position.set(-1.2, 2.6, 1.4);
+          scene.add(benchLamp);
+          const flaskLamp = new THREE.PointLight(0xff6b7a, 0.55, 5);
+          flaskLamp.position.set(0, 1.4, 0.4);
+          scene.add(flaskLamp);
+
+          const boxG = new THREE.BoxGeometry(1, 1, 1);
+          const cylG = new THREE.CylinderGeometry(1, 1, 1, 16);
+          const sphG = new THREE.SphereGeometry(1, 18, 14);
+          const coneG = new THREE.ConeGeometry(1, 1, 12);
+          const paint = {
+            bench: new THREE.MeshStandardMaterial({ color: 0x3a2a22, roughness: 0.82, metalness: 0.08 }),
+            edge: new THREE.MeshStandardMaterial({ color: 0x241818, roughness: 0.7, metalness: 0.12 }),
+            steel: new THREE.MeshStandardMaterial({ color: 0x8a9098, roughness: 0.32, metalness: 0.74 }),
+            brass: new THREE.MeshStandardMaterial({ color: 0xc4a056, roughness: 0.36, metalness: 0.7 }),
+            glass: new THREE.MeshStandardMaterial({ color: 0xd8e8f0, roughness: 0.12, metalness: 0.18, transparent: true, opacity: 0.28 }),
+            liquid: new THREE.MeshStandardMaterial({ color: 0xf2e0a8, roughness: 0.35, metalness: 0.05, emissive: 0xf2e0a8, emissiveIntensity: 0.25 }),
+            titrant: new THREE.MeshStandardMaterial({ color: 0xff6b7a, roughness: 0.3, metalness: 0.05, emissive: 0xff6b7a, emissiveIntensity: 0.35 }),
+            black: new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.6, metalness: 0.2 }),
+            paper: new THREE.MeshStandardMaterial({ color: 0xf4e8d0, roughness: 0.9, metalness: 0 }),
+            wall: new THREE.MeshStandardMaterial({ color: 0x1a1e22, roughness: 0.92, metalness: 0.04 }),
+            tile: new THREE.MeshStandardMaterial({ color: 0x2a2426, roughness: 0.7, metalness: 0.1 }),
+          };
+
+          const wall = new THREE.Mesh(boxG, paint.wall);
+          wall.scale.set(10, 5, 0.2);
+          wall.position.set(0, 2.2, -2.4);
+          scene.add(wall);
+          const backShelf = new THREE.Mesh(boxG, paint.edge);
+          backShelf.scale.set(4.4, 0.08, 0.45);
+          backShelf.position.set(0, 2.15, -1.85);
+          scene.add(backShelf);
+
+          const bench = new THREE.Mesh(boxG, paint.bench);
+          bench.scale.set(5.2, 0.14, 2.2);
+          bench.position.set(0, 0.62, 0.2);
+          scene.add(bench);
+          const apron = new THREE.Mesh(boxG, paint.edge);
+          apron.scale.set(5.2, 0.55, 0.12);
+          apron.position.set(0, 0.28, 1.28);
+          scene.add(apron);
+          for (let i = -2; i <= 2; i += 1) {
+            const tile = new THREE.Mesh(boxG, paint.tile);
+            tile.scale.set(0.95, 0.02, 0.95);
+            tile.position.set(i * 1.02, 0.7, 0.15);
+            scene.add(tile);
+          }
+
+          const stand = new THREE.Group();
+          const pole = new THREE.Mesh(cylG, paint.steel);
+          pole.scale.set(0.035, 2.4, 0.035);
+          pole.position.set(-0.55, 1.9, -0.15);
+          stand.add(pole);
+          const base = new THREE.Mesh(boxG, paint.steel);
+          base.scale.set(0.7, 0.06, 0.45);
+          base.position.set(-0.35, 0.74, -0.15);
+          stand.add(base);
+          const clampArm = new THREE.Mesh(cylG, paint.steel);
+          clampArm.scale.set(0.025, 0.55, 0.025);
+          clampArm.rotation.z = Math.PI / 2;
+          clampArm.position.set(-0.28, 2.55, -0.15);
+          stand.add(clampArm);
+          const clamp = new THREE.Mesh(boxG, paint.brass);
+          clamp.scale.set(0.16, 0.08, 0.12);
+          clamp.position.set(0, 2.55, -0.15);
+          stand.add(clamp);
+          scene.add(stand);
+
+          const burette = new THREE.Group();
+          const tube = new THREE.Mesh(cylG, paint.glass);
+          tube.scale.set(0.055, 1.55, 0.055);
+          tube.position.set(0, 2.15, 0);
+          burette.add(tube);
+          const reservoir = new THREE.Mesh(cylG, paint.glass);
+          reservoir.scale.set(0.08, 0.22, 0.08);
+          reservoir.position.set(0, 2.95, 0);
+          burette.add(reservoir);
+          const stopcock = new THREE.Mesh(cylG, paint.brass);
+          stopcock.scale.set(0.04, 0.08, 0.04);
+          stopcock.rotation.z = Math.PI / 2;
+          stopcock.position.set(0.08, 1.42, 0);
+          burette.add(stopcock);
+          const tip = new THREE.Mesh(coneG, paint.glass);
+          tip.scale.set(0.03, 0.16, 0.03);
+          tip.position.set(0, 1.3, 0);
+          burette.add(tip);
+          const titrantCol = new THREE.Mesh(cylG, paint.titrant);
+          titrantCol.scale.set(0.04, 1.1, 0.04);
+          titrantCol.position.set(0, 2.05, 0);
+          burette.add(titrantCol);
+          burette.position.set(0, 0, 0.05);
+          scene.add(burette);
+
+          const flask = new THREE.Group();
+          const neck = new THREE.Mesh(cylG, paint.glass);
+          neck.scale.set(0.09, 0.38, 0.09);
+          neck.position.set(0, 1.28, 0);
+          flask.add(neck);
+          const body = new THREE.Mesh(sphG, paint.glass);
+          body.scale.set(0.38, 0.32, 0.38);
+          body.position.set(0, 0.98, 0);
+          flask.add(body);
+          const liquid = new THREE.Mesh(sphG, paint.liquid);
+          liquid.scale.set(0.33, 0.22, 0.33);
+          liquid.position.set(0, 0.9, 0);
+          flask.add(liquid);
+          flask.position.set(0, 0.08, 0.18);
+          scene.add(flask);
+
+          BOTTLE_LAYOUT.forEach((spec) => {
+            const bottle = new THREE.Group();
+            const jar = new THREE.Mesh(cylG, new THREE.MeshStandardMaterial({
+              color: spec.color, roughness: 0.35, metalness: 0.12, transparent: true, opacity: 0.55,
+            }));
+            jar.scale.set(0.12, spec.h, 0.12);
+            jar.position.y = 0.72 + spec.h * 0.5;
+            bottle.add(jar);
+            const cap = new THREE.Mesh(cylG, new THREE.MeshStandardMaterial({ color: spec.cap, roughness: 0.4, metalness: 0.3 }));
+            cap.scale.set(0.08, 0.08, 0.08);
+            cap.position.y = 0.72 + spec.h + 0.05;
+            bottle.add(cap);
+            bottle.position.set(spec.x, 0, spec.z);
+            scene.add(bottle);
+          });
+
+          PAPER_LAYOUT.forEach((spec) => {
+            const paper = new THREE.Mesh(boxG, paint.paper);
+            paper.scale.set(0.22, 0.01, 0.08);
+            paper.position.set(spec.x, 0.72, spec.z);
+            paper.rotation.y = spec.rot;
+            scene.add(paper);
+          });
+
+          const tray = new THREE.Mesh(boxG, paint.steel);
+          tray.scale.set(0.85, 0.04, 0.55);
+          tray.position.set(-1.55, 0.72, 0.15);
+          scene.add(tray);
+          const pipet = new THREE.Mesh(cylG, paint.glass);
+          pipet.scale.set(0.02, 0.55, 0.02);
+          pipet.rotation.z = 1.15;
+          pipet.position.set(-1.45, 0.82, 0.1);
+          scene.add(pipet);
+          const notebook = new THREE.Mesh(boxG, paint.paper);
+          notebook.scale.set(0.7, 0.02, 0.5);
+          notebook.position.set(0.85, 0.72, -0.55);
+          notebook.rotation.y = -0.2;
+          scene.add(notebook);
+          const lampArm = new THREE.Mesh(cylG, paint.black);
+          lampArm.scale.set(0.03, 0.9, 0.03);
+          lampArm.position.set(-1.9, 1.55, 1.15);
+          scene.add(lampArm);
+          const lampHead = new THREE.Mesh(coneG, paint.brass);
+          lampHead.scale.set(0.18, 0.16, 0.18);
+          lampHead.position.set(-1.9, 2.05, 1.15);
+          scene.add(lampHead);
+          const sink = new THREE.Mesh(cylG, paint.steel);
+          sink.scale.set(0.28, 0.08, 0.28);
+          sink.position.set(2.15, 0.7, -0.35);
+          scene.add(sink);
+          const faucet = new THREE.Mesh(cylG, paint.steel);
+          faucet.scale.set(0.03, 0.22, 0.03);
+          faucet.position.set(2.15, 0.92, -0.5);
+          scene.add(faucet);
+          const faucetArm = new THREE.Mesh(cylG, paint.steel);
+          faucetArm.scale.set(0.025, 0.18, 0.025);
+          faucetArm.rotation.z = Math.PI / 2;
+          faucetArm.position.set(2.06, 1.02, -0.5);
+          scene.add(faucetArm);
+          const pHMeter = new THREE.Group();
+          const meterBody = new THREE.Mesh(boxG, paint.black);
+          meterBody.scale.set(0.32, 0.22, 0.18);
+          meterBody.position.set(0, 0.11, 0);
+          pHMeter.add(meterBody);
+          const meterScreen = new THREE.Mesh(boxG, new THREE.MeshStandardMaterial({
+            color: 0x88ffaa, roughness: 0.3, metalness: 0.1, emissive: 0x226644, emissiveIntensity: 0.6,
+          }));
+          meterScreen.scale.set(0.22, 0.12, 0.02);
+          meterScreen.position.set(0, 0.12, 0.1);
+          pHMeter.add(meterScreen);
+          const probe = new THREE.Mesh(cylG, paint.steel);
+          probe.scale.set(0.02, 0.42, 0.02);
+          probe.rotation.z = 0.5;
+          probe.position.set(0.28, 0.02, 0.05);
+          pHMeter.add(probe);
+          pHMeter.position.set(0.85, 0.72, 0.55);
+          scene.add(pHMeter);
+          const rack = new THREE.Group();
+          const rackBase = new THREE.Mesh(boxG, paint.black);
+          rackBase.scale.set(0.7, 0.06, 0.22);
+          rack.add(rackBase);
+          for (let t = 0; t < 5; t += 1) {
+            const test = new THREE.Mesh(cylG, paint.glass);
+            test.scale.set(0.035, 0.28, 0.035);
+            test.position.set(-0.24 + t * 0.12, 0.18, 0);
+            rack.add(test);
+            const fill = new THREE.Mesh(cylG, new THREE.MeshStandardMaterial({
+              color: t === 2 ? 0xe05090 : 0xf2e0a8, roughness: 0.4, metalness: 0.05, emissive: t === 2 ? 0xe05090 : 0x000000, emissiveIntensity: t === 2 ? 0.3 : 0,
+            }));
+            fill.scale.set(0.028, 0.12 + t * 0.02, 0.028);
+            fill.position.set(-0.24 + t * 0.12, 0.1, 0);
+            rack.add(fill);
+          }
+          rack.position.set(-0.95, 0.74, -0.55);
+          scene.add(rack);
+          const wash = new THREE.Mesh(sphG, paint.glass);
+          wash.scale.set(0.14, 0.18, 0.12);
+          wash.position.set(-2.15, 0.92, 0.35);
+          scene.add(wash);
+          const washNozzle = new THREE.Mesh(cylG, paint.black);
+          washNozzle.scale.set(0.015, 0.16, 0.015);
+          washNozzle.rotation.z = 1.1;
+          washNozzle.position.set(-2.02, 1.05, 0.35);
+          scene.add(washNozzle);
+          const windowFrame = new THREE.Mesh(boxG, paint.edge);
+          windowFrame.scale.set(1.6, 1.1, 0.08);
+          windowFrame.position.set(-2.2, 2.55, -2.28);
+          scene.add(windowFrame);
+          const windowPane = new THREE.Mesh(boxG, new THREE.MeshStandardMaterial({
+            color: 0x8899aa, roughness: 0.2, metalness: 0.3, transparent: true, opacity: 0.25, emissive: 0x334455, emissiveIntensity: 0.2,
+          }));
+          windowPane.scale.set(1.4, 0.9, 0.02);
+          windowPane.position.set(-2.2, 2.55, -2.22);
+          scene.add(windowPane);
+          const clock = new THREE.Mesh(cylG, paint.black);
+          clock.scale.set(0.18, 0.04, 0.18);
+          clock.rotation.x = Math.PI / 2;
+          clock.position.set(1.8, 2.7, -2.25);
+          scene.add(clock);
+          const poster = new THREE.Mesh(boxG, paint.paper);
+          poster.scale.set(0.7, 0.9, 0.02);
+          poster.position.set(2.4, 2.4, -2.28);
+          scene.add(poster);
+          const buretteMarks = [];
+          for (let m = 0; m < 9; m += 1) {
+            const mark = new THREE.Mesh(boxG, paint.black);
+            mark.scale.set(0.04, 0.006, 0.006);
+            mark.position.set(0.06, 1.55 + m * 0.14, 0.05);
+            scene.add(mark);
+            buretteMarks.push(mark);
+          }
+          const clampScrew = new THREE.Mesh(cylG, paint.brass);
+          clampScrew.scale.set(0.02, 0.1, 0.02);
+          clampScrew.position.set(0.12, 2.55, -0.15);
+          scene.add(clampScrew);
+          const dripTray = new THREE.Mesh(cylG, paint.black);
+          dripTray.scale.set(0.16, 0.02, 0.16);
+          dripTray.position.set(0, 0.73, 0.18);
+          scene.add(dripTray);
+
+          const dropMesh = new THREE.Mesh(sphG, paint.titrant);
+          dropMesh.scale.setScalar(0.035);
+          dropMesh.visible = false;
+          scene.add(dropMesh);
+
+          const particleGeo = new THREE.SphereGeometry(0.04, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xff6b7a, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, paint, boxG, cylG, sphG,
+            flask, liquid, burette, titrantCol, flaskLamp, dropMesh, stopcock,
+            particleGeo, particleMat, particleMeshes: [],
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          webgl.flask.rotation.z = Math.sin(state.flaskAngle) * state.flaskWobble;
+          webgl.flask.rotation.x = Math.cos(state.flaskAngle * 0.7) * state.flaskWobble * 0.45;
+          const hex = liquidHex(state.apparent);
+          webgl.liquid.material.color.setHex(hex);
+          webgl.liquid.material.emissive.setHex(hex);
+          webgl.liquid.material.emissiveIntensity = 0.2 + state.apparent * 0.55;
+          webgl.liquid.scale.set(0.33, 0.18 + state.meniscus * 0.28, 0.33);
+          webgl.liquid.position.y = 0.86 + state.meniscus * 0.08;
+          webgl.titrantCol.scale.y = 0.35 + state.buretteLevel * 0.9;
+          webgl.titrantCol.position.y = 1.55 + state.buretteLevel * 0.45;
+          webgl.flaskLamp.color.setHex(hex);
+          webgl.flaskLamp.intensity = 0.35 + state.apparent * 0.8;
+          webgl.stopcock.rotation.y = input.holding ? 0.4 : 0;
+          const falling = state.drops[state.drops.length - 1];
+          if (falling) {
+            webgl.dropMesh.visible = true;
+            webgl.dropMesh.position.set(0.01, falling.y, 0.12);
+          } else {
+            webgl.dropMesh.visible = state.drip > 0;
+            if (webgl.dropMesh.visible) webgl.dropMesh.position.set(0.01, 1.22, 0.12);
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.04);
+            mesh.material.opacity = clamp(particle.life * 1.7, 0, 1);
+            mesh.material.color.setHex(particle.kind === "spill" ? 0x7a3088 : hex);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.16 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.12 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.25) * 0.04;
+          webgl.camera.position.set(0.2 + sway + shakeX, 1.58 + shakeY, 3.45);
+          webgl.camera.lookAt(state.flaskWobble * 0.2, 1.15, 0);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.1, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.5 };
+        }
+
+        function drawWorld2D(ctx) {
+          const bg = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          bg.addColorStop(0, "#1a1e22");
+          bg.addColorStop(1, "#101418");
+          ctx.fillStyle = bg;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#3a2a22";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H * 0.38);
+          ctx.fillStyle = "#241818";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, 10);
+          const flask = projectToScreen(0, 1.0, 0.18);
+          ctx.save();
+          ctx.translate(flask.x, flask.y);
+          ctx.rotate(Math.sin(state.flaskAngle) * state.flaskWobble);
+          ctx.fillStyle = `rgba(216,232,240,0.35)`;
+          ctx.beginPath();
+          ctx.ellipse(0, 20, 54, 42, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillRect(-12, -38, 24, 46);
+          const hex = liquidHex(state.apparent);
+          ctx.fillStyle = `#${hex.toString(16).padStart(6, "0")}`;
+          ctx.globalAlpha = 0.8;
+          ctx.beginPath();
+          ctx.ellipse(0, 28, 44, 22 + state.meniscus * 18, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.restore();
+          ctx.strokeStyle = "rgba(216,232,240,0.55)";
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          ctx.moveTo(VIEW_W * 0.5, 40);
+          ctx.lineTo(VIEW_W * 0.5, flask.y - 50);
+          ctx.stroke();
+          ctx.fillStyle = COLORS.accent;
+          ctx.fillRect(VIEW_W * 0.5 - 6, 70, 12, 140 * state.buretteLevel);
+          ctx.fillStyle = COLORS.brass;
+          ctx.fillRect(VIEW_W * 0.5 + 8, flask.y - 70, 22, 8);
+          BOTTLE_LAYOUT.forEach((spec) => {
+            const p = projectToScreen(spec.x, 1.0, spec.z);
+            ctx.fillStyle = `#${spec.color.toString(16).padStart(6, "0")}`;
+            ctx.globalAlpha = 0.55;
+            ctx.fillRect(p.x - 10, p.y - 28, 20, 40);
+            ctx.globalAlpha = 1;
+          });
+          state.drops.forEach((drop) => {
+            const p = projectToScreen(0, drop.y, 0.12);
+            ctx.fillStyle = COLORS.accent;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.5, 0, 1);
+            ctx.fillStyle = COLORS.magenta;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "#2a2426";
+          ctx.fillRect(VIEW_W * 0.08, VIEW_H * 0.58, 90, 18);
+          ctx.fillStyle = "#161616";
+          ctx.fillRect(VIEW_W * 0.72, VIEW_H * 0.52, 70, 40);
+          ctx.fillStyle = "#88ffaa";
+          ctx.fillRect(VIEW_W * 0.74, VIEW_H * 0.54, 42, 18);
+          ctx.fillStyle = "rgba(244,232,208,0.8)";
+          ctx.fillRect(VIEW_W * 0.62, VIEW_H * 0.7, 80, 36);
+          ctx.strokeStyle = "rgba(255,240,240,0.25)";
+          ctx.lineWidth = 1;
+          for (let m = 0; m < 8; m += 1) {
+            ctx.beginPath();
+            ctx.moveTo(VIEW_W * 0.5 + 10, 80 + m * 16);
+            ctx.lineTo(VIEW_W * 0.5 + 22, 80 + m * 16);
+            ctx.stroke();
+          }
+          ctx.fillStyle = "rgba(255,240,240,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${Math.round(state.apparent * 100)}%`;
+          if (meter) meter.style.width = `${clamp(state.apparent, 0, 1) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `색 ${state.colorName}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const x = VIEW_W * 0.5 - 90;
+          const y = VIEW_H - 54;
+          hud.fillStyle = "rgba(16,20,24,0.45)";
+          hud.fillRect(x, y, 180, 14);
+          hud.fillStyle = COLORS.accent;
+          hud.fillRect(x, y, 180 * clamp(state.apparent, 0, 1.15) / 1.15, 14);
+          hud.strokeStyle = "rgba(255,240,240,0.7)";
+          hud.strokeRect(x + 180 * (CLEAR_LO / 1.15), y - 3, 180 * ((CLEAR_HI - CLEAR_LO) / 1.15), 20);
+          const paramsHud = difficultyAt(state.elapsed);
+          hud.fillStyle = "rgba(255,240,240,0.55)";
+          hud.font = "700 11px Trebuchet MS, sans-serif";
+          hud.textAlign = "left";
+          hud.fillText(`P${paramsHud.phase}  혼합 ${Math.round((1 - clamp(state.unmixed * 8, 0, 1)) * 100)}%  스월 ${Math.round(state.swirl * 100)}%`, 18, 28);
+          if (state.unmixed > 0.03) {
+            hud.fillStyle = COLORS.brass;
+            hud.font = "700 12px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("미혼합 방울 — 스월 필요", VIEW_W / 2, VIEW_H - 64);
+          }
+          if (state.swirlEnergy > 0.62) {
+            hud.fillStyle = COLORS.danger;
+            hud.font = "800 13px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("넘침 주의", VIEW_W / 2, 86);
+          }
+          const chartX = VIEW_W - 132;
+          const chartY = 36;
+          const stops = ["담황", "주황", "분홍", "장미", "마젠타"];
+          stops.forEach((label, index) => {
+            const hex = liquidHex(0.12 + index * 0.22);
+            hud.fillStyle = `#${hex.toString(16).padStart(6, "0")}`;
+            hud.fillRect(chartX, chartY + index * 16, 14, 14);
+            hud.fillStyle = "rgba(255,240,240,0.7)";
+            hud.font = "600 10px Trebuchet MS, sans-serif";
+            hud.textAlign = "left";
+            hud.fillText(label, chartX + 20, chartY + 11 + index * 16);
+          });
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.ink;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(224,80,144,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          hud.textAlign = "left";
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "lab bench; flask origin; burette +y",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            trueTitrant: Number(state.trueTitrant.toFixed(3)),
+            mixed: Number(state.mixed.toFixed(3)),
+            unmixed: Number(state.unmixed.toFixed(3)),
+            apparent: Number(state.apparent.toFixed(3)),
+            swirl: Number(state.swirl.toFixed(3)),
+            swirlEnergy: Number(state.swirlEnergy.toFixed(3)),
+            color: state.colorName,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.dragging = true;
+          input.downAt = performance.now();
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.moved = false;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          if (Math.hypot(event.clientX - input.downX, event.clientY - input.downY) > 10) input.moved = true;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          const held = performance.now() - input.downAt;
+          input.holding = false;
+          input.dragging = false;
+          if (state.mode === "running" && held < 220 && !input.moved) addDrop();
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            addDrop();
+            return;
+          }
+          if (event.code === "KeyS" || event.code === "ShiftLeft") {
+            event.preventDefault();
+            input.holding = true;
+          }
+        }
+        function onKeyUp(event) {
+          if (event.code === "KeyS" || event.code === "ShiftLeft") input.holding = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.mixed = 1;
+            state.unmixed = 0;
+            state.trueTitrant = 1;
+            state.apparent = 1;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.holding = false;
+          input.dragging = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

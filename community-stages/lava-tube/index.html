@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>용암 동굴</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #1a0906; --accent: #ff7a3d; --accent-ink: #1a0906; --danger: #ff6b7a; --ink: #ffe8d6; --muted: rgba(255,232,214,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">용암 동굴. 로버 기울기와 열을 관리하며 관을 통과하세요. 드래그로 조향, 홀드로 방열 펼치기. 튜브 끝에 도착하면 클리어. 전복되거나 과열되면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 드래그해 조향하고 가만히 누르면 방열판을 펼칩니다.</p>
+    <main class="stage" aria-label="용암 동굴 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="용암 동굴" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">거리</p>
+          <p class="hud-value" id="hud-objective">0 / 92</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">열 16%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Lava Tube</p>
+          <h1>용암 동굴</h1>
+          <p class="brief-lead">로버 기울기와 열을 관리하며 관을 통과하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 조향, 홀드로 방열 펼치기</span></li>
+            <li><strong>클리어</strong><span>튜브 끝에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>전복되거나 과열되면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">탐사 중단</p>
+          <h2>튜브가 삼켰다</h2>
+          <p class="brief-lead" id="fail-detail">전복되거나 과열되면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">관 통과</p>
+          <h2>출구 도달</h2>
+          <p class="brief-lead">용암관을 빠져나와 햇빛이 닿았습니다.</p>
+          <p class="hud-sub" id="clear-stat">튜브 끝에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const GOAL_Z = 92;
+        const TUBE_R = 3.55;
+        const HALF_LANE = 2.18;
+        const FLIP_ANGLE = 1.22;
+        const HOLD_MS = 160;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "lava-tube",
+          title: "용암 동굴",
+          description: "로버 기울기와 열을 관리하며 관을 통과하세요.",
+          creator: "collin",
+          genre: "3D lava-tube rover",
+          clearCondition: "튜브 끝에 도착하면 클리어",
+          failCondition: "전복되거나 과열되면 실패",
+          controls: "드래그로 조향, 홀드로 방열 펼치기",
+        };
+        const COLORS = {
+          bg: "#1a0906",
+          ink: "#ffe8d6",
+          accent: "#ff7a3d",
+          lava: "#ff4a1a",
+          basalt: "#3a2218",
+          brass: "#c47a3a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          overturn: "로버가 전복되어 캐노피가 바닥에 찍혔습니다",
+          overheat: "방열을 못 해 전지가 과열되었습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const SKYLIGHTS = [
+          { z: 11.5, x: 0.15, r: 1.35 },
+          { z: 24.0, x: -0.4, r: 1.15 },
+          { z: 37.5, x: 0.55, r: 1.4 },
+          { z: 51.0, x: -0.2, r: 1.2 },
+          { z: 64.5, x: 0.35, r: 1.5 },
+          { z: 78.0, x: -0.55, r: 1.25 },
+          { z: 88.5, x: 0.1, r: 1.6 },
+        ];
+        const LAVA_POOLS = [
+          { z: 18.0, x: 0.2, w: 2.4, s: 1.1 },
+          { z: 29.5, x: -0.7, w: 1.8, s: 1.25 },
+          { z: 42.0, x: 0.85, w: 2.2, s: 1.3 },
+          { z: 55.5, x: -0.15, w: 2.6, s: 1.4 },
+          { z: 68.0, x: 0.6, w: 2.0, s: 1.35 },
+          { z: 81.5, x: -0.45, w: 2.3, s: 1.5 },
+        ];
+        const BUMPS = [
+          { z: 8.5, x: 0.9, h: 0.28 },
+          { z: 15.2, x: -1.1, h: 0.34 },
+          { z: 21.8, x: 0.4, h: 0.22 },
+          { z: 33.4, x: -0.8, h: 0.4 },
+          { z: 39.1, x: 1.2, h: 0.3 },
+          { z: 47.6, x: -0.3, h: 0.36 },
+          { z: 58.8, x: 0.95, h: 0.42 },
+          { z: 71.2, x: -1.05, h: 0.38 },
+          { z: 84.0, x: 0.15, h: 0.33 },
+        ];
+        const RIBS = [
+          6, 13, 20, 27, 34, 41, 48, 55, 62, 69, 76, 83, 90,
+        ];
+        const COLUMNS = [
+          { z: 10, x: -2.4, s: 0.9 },
+          { z: 16, x: 2.5, s: 1.1 },
+          { z: 26, x: -2.55, s: 0.85 },
+          { z: 35, x: 2.35, s: 1.2 },
+          { z: 46, x: -2.45, s: 1.0 },
+          { z: 57, x: 2.5, s: 0.95 },
+          { z: 66, x: -2.4, s: 1.15 },
+          { z: 75, x: 2.45, s: 0.88 },
+          { z: 86, x: -2.5, s: 1.05 },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+        function wrapPi(a) {
+          while (a > Math.PI) a -= Math.PI * 2;
+          while (a < -Math.PI) a += Math.PI * 2;
+          return a;
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          rover: {
+            x: 0, y: 0.42, z: 0,
+            yaw: 0, pitch: 0, roll: 0,
+            rollVel: 0, pitchVel: 0,
+            speed: 2.05, heat: 0.16, radiator: 0,
+          },
+          embers: [],
+          sparks: [],
+          flash: 0,
+          shake: 0,
+          warnHeat: 0,
+          warnRoll: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          steamKick: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false, hold: false,
+          dragging: false, holding: false, pointerId: null,
+          steer: 0, pitchIn: 0, downX: 0, downY: 0, downAt: 0, moved: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            bend: phase === 1 ? 0.22 : phase === 2 ? 0.85 : 1.45,
+            camber: phase === 1 ? 0.12 : phase === 2 ? 0.34 : 0.52,
+            heatMul: phase === 1 ? 0.72 : phase === 2 ? 1.05 : 1.38,
+            pitchSoak: phase === 1 ? 0.06 : phase === 2 ? 0.16 : 0.24,
+            radCool: phase === 1 ? 0.22 : phase === 2 ? 0.28 : 0.34,
+            radUnstable: phase === 1 ? 0.18 : phase === 2 ? 0.42 : 0.72,
+            steam: phase === 1 ? 0 : phase === 2 ? 0.35 : 0.85,
+            bumpScale: 0.7 + difficulty * 0.9,
+          };
+        }
+
+        function pathX(z, params) {
+          const p = params || difficultyAt(state.elapsed);
+          return Math.sin(z * 0.033) * p.bend + Math.sin(z * 0.091) * p.bend * 0.38;
+        }
+        function floorCamber(z, params) {
+          const p = params || difficultyAt(state.elapsed);
+          return Math.sin(z * 0.072) * p.camber + Math.sin(z * 0.19) * p.camber * 0.45;
+        }
+        function lavaFactor(x, z) {
+          let best = 0;
+          for (let i = 0; i < LAVA_POOLS.length; i += 1) {
+            const pool = LAVA_POOLS[i];
+            const dz = Math.abs(z - pool.z);
+            const dx = Math.abs(x - pool.x);
+            if (dz < 3.4 && dx < pool.w) {
+              const radial = 1 - clamp(Math.hypot(dz / 3.4, dx / pool.w), 0, 1);
+              best = Math.max(best, radial * pool.s);
+            }
+          }
+          return best;
+        }
+        function skyFactor(x, z) {
+          let best = 0;
+          for (let i = 0; i < SKYLIGHTS.length; i += 1) {
+            const sky = SKYLIGHTS[i];
+            const d = Math.hypot(x - sky.x, z - sky.z);
+            if (d < sky.r + 1.6) best = Math.max(best, 1 - d / (sky.r + 1.6));
+          }
+          return best;
+        }
+        function bumpAt(x, z) {
+          let h = 0;
+          for (let i = 0; i < BUMPS.length; i += 1) {
+            const bump = BUMPS[i];
+            const d = Math.hypot(x - bump.x, z - bump.z);
+            if (d < 1.15) h = Math.max(h, bump.h * (1 - d / 1.15));
+          }
+          return h;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(7, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(0.8, 3.4);
+            state.sparks.push({
+              x, y, z,
+              vx: Math.cos(angle) * lift,
+              vy: randRange(0.5, 3.2),
+              vz: Math.sin(angle) * lift,
+              life: randRange(0.28, 0.8),
+              kind,
+              size: randRange(0.05, 0.13),
+            });
+          }
+          if (state.sparks.length > 72) state.sparks.splice(0, state.sparks.length - 72);
+        }
+
+        function spawnEmber() {
+          if (reducedMotion && state.embers.length > 18) return;
+          const r = state.rover;
+          state.embers.push({
+            x: r.x + randRange(-0.5, 0.5),
+            y: r.y + randRange(0.1, 0.4),
+            z: r.z + randRange(-0.2, 0.6),
+            vy: randRange(0.4, 1.4),
+            life: randRange(0.5, 1.3),
+            size: randRange(0.04, 0.09),
+          });
+          if (state.embers.length > 48) state.embers.splice(0, state.embers.length - 48);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "radiator") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(220, now);
+              osc.frequency.exponentialRampToValueAtTime(410, now + 0.1);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "warn") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.08);
+              gain.gain.setValueAtTime(0.028, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(1180, now + 0.28);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(110, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.28);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.rover = {
+            x: 0, y: 0.42, z: 0,
+            yaw: 0, pitch: 0, roll: 0,
+            rollVel: 0, pitchVel: 0,
+            speed: 2.05, heat: 0.16, radiator: 0,
+          };
+          state.embers = [];
+          state.sparks = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.warnHeat = 0;
+          state.warnRoll = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.steamKick = 0;
+          input.steer = 0;
+          input.pitchIn = 0;
+          input.holding = false;
+          input.dragging = false;
+          reseed((Date.now() ^ 0x51ed) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(state.rover.x, state.rover.y + 0.6, state.rover.z + 1.2, 22, "sky");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("boom");
+          burst(state.rover.x, state.rover.y, state.rover.z, 20, reason === "overheat" ? "heat" : "rock");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function readSteer() {
+          let steer = 0;
+          let pitchIn = 0;
+          if (input.left) steer -= 1;
+          if (input.right) steer += 1;
+          if (input.up) pitchIn -= 1;
+          if (input.down) pitchIn += 1;
+          if (input.dragging) {
+            steer += input.steer;
+            pitchIn += input.pitchIn;
+          }
+          return {
+            steer: clamp(steer, -1.25, 1.25),
+            pitchIn: clamp(pitchIn, -1.2, 1.2),
+            radiator: input.hold || input.holding,
+          };
+        }
+
+        function updateRover(dt, params) {
+          const r = state.rover;
+          const cmd = readSteer();
+          const wasRad = r.radiator > 0.5;
+          r.radiator = lerp(r.radiator, cmd.radiator ? 1 : 0, Math.min(1, dt * 7.5));
+          if (cmd.radiator && !wasRad && r.radiator > 0.4) {
+            playSfx("radiator");
+            if (params.steam > 0 && r.heat > 0.45) {
+              state.steamKick = params.steam * r.heat;
+              burst(r.x, r.y + 0.5, r.z, 8, "heat");
+            }
+          }
+          const camber = floorCamber(r.z, params);
+          const bump = bumpAt(r.x, r.z) * params.bumpScale;
+          const damping = 2.4 - r.radiator * params.radUnstable;
+          r.rollVel += (cmd.steer * 2.15 + camber * 1.8 - r.roll * damping) * dt;
+          r.rollVel += state.steamKick * (random() > 0.5 ? 1 : -1) * dt * 4.2;
+          r.rollVel *= Math.exp(-(1.8 + (1 - r.radiator) * 1.1) * dt);
+          r.roll = clamp(r.roll + r.rollVel * dt, -1.45, 1.45);
+          r.pitchVel += (cmd.pitchIn * 1.7 + bump * 2.4 - r.pitch * 3.2) * dt;
+          r.pitchVel *= Math.exp(-3.1 * dt);
+          r.pitch = clamp(r.pitch + r.pitchVel * dt, -0.62, 0.48);
+          r.yaw = lerp(r.yaw, cmd.steer * 0.28, Math.min(1, dt * 4));
+          const noseDown = clamp(-r.pitch, 0, 0.62);
+          const pitchBoost = noseDown * 1.55;
+          const radDrag = lerp(1, 0.66, r.radiator);
+          const heatDrag = 1 - r.heat * 0.1;
+          r.speed = (2.08 + pitchBoost) * radDrag * heatDrag;
+          r.z += r.speed * dt;
+          r.x += (cmd.steer * 2.05 + Math.sin(r.roll) * 0.9) * dt;
+          const center = pathX(r.z, params);
+          const lane = r.x - center;
+          if (Math.abs(lane) > HALF_LANE) {
+            const sign = Math.sign(lane);
+            r.x = center + sign * HALF_LANE;
+            r.rollVel += sign * 1.15;
+            r.shakeHint = 0.2;
+            state.shake = Math.max(state.shake, 0.18);
+          }
+          r.y = 0.42 + bump * 0.55 + Math.abs(r.roll) * 0.08;
+          const lava = lavaFactor(r.x, r.z);
+          const sky = skyFactor(r.x, r.z);
+          let soak = 0.02 + lava * 0.2 + noseDown * params.pitchSoak - sky * 0.19;
+          soak *= params.heatMul;
+          soak -= r.radiator * params.radCool;
+          r.heat = clamp(r.heat + soak * dt, 0, 1.15);
+          state.steamKick = Math.max(0, state.steamKick - dt * 2.4);
+          if (lava > 0.45 && random() < 0.18) spawnEmber();
+          if (r.heat > 0.78 && random() < 0.12) spawnEmber();
+        }
+
+        function updateFx(dt) {
+          state.embers.forEach((ember) => {
+            ember.y += ember.vy * dt;
+            ember.x += Math.sin(state.elapsed * 4 + ember.z) * dt * 0.2;
+            ember.life -= dt;
+          });
+          state.embers = state.embers.filter((ember) => ember.life > 0);
+          state.sparks.forEach((spark) => {
+            spark.x += spark.vx * dt;
+            spark.y += spark.vy * dt;
+            spark.z += spark.vz * dt;
+            spark.vy -= 2.2 * dt;
+            spark.life -= dt;
+          });
+          state.sparks = state.sparks.filter((spark) => spark.life > 0);
+        }
+
+        function updateWarnings(dt) {
+          const r = state.rover;
+          const heatHot = r.heat > 0.78;
+          const rollHot = Math.abs(r.roll) > 0.86;
+          if (heatHot && state.warnHeat <= 0) {
+            playSfx("warn");
+            state.message = "과열 경고";
+            state.messageTime = 0.7;
+            state.warnHeat = 0.9;
+          }
+          if (rollHot && state.warnRoll <= 0) {
+            playSfx("warn");
+            state.message = "전복 위험";
+            state.messageTime = 0.7;
+            state.warnRoll = 0.9;
+          }
+          state.warnHeat = Math.max(0, state.warnHeat - dt);
+          state.warnRoll = Math.max(0, state.warnRoll - dt);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateRover(dt, params);
+          if (state.mode !== "running") return;
+          updateFx(dt);
+          updateWarnings(dt);
+          if (Math.abs(state.rover.roll) >= FLIP_ANGLE) {
+            failStage("overturn");
+            return;
+          }
+          if (state.rover.heat >= 1) {
+            failStage("overheat");
+            return;
+          }
+          if (state.rover.z >= GOAL_Z) {
+            clearStage();
+            return;
+          }
+          if (state.elapsed >= DURATION) failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) {
+              failStat.textContent = `거리 ${state.rover.z.toFixed(0)} / ${GOAL_Z} · 열 ${(state.rover.heat * 100).toFixed(0)}%`;
+            }
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 열 ${(state.rover.heat * 100).toFixed(0)}%`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x1a0906, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a0906);
+          scene.fog = new THREE.Fog(0x1a0906, 8, 36);
+
+          const camera = new THREE.PerspectiveCamera(62, VIEW_W / VIEW_H, 0.1, 140);
+          camera.position.set(0, 1.6, 7.2);
+
+          scene.add(new THREE.AmbientLight(0x4a2218, 0.42));
+          const hemi = new THREE.HemisphereLight(0xffc090, 0x2a0c08, 0.48);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffd0a0, 0.28);
+          sun.position.set(4, 18, 8);
+          scene.add(sun);
+          const lavaLight = new THREE.PointLight(0xff5a20, 1.35, 18);
+          lavaLight.position.set(0, 0.4, -4);
+          scene.add(lavaLight);
+          const skyLight = new THREE.PointLight(0xffe0b0, 0.7, 14);
+          skyLight.position.set(0, 4.2, -6);
+          scene.add(skyLight);
+
+          const wallMat = new THREE.MeshStandardMaterial({
+            color: 0x4a2a1c, roughness: 0.92, metalness: 0.08, emissive: 0x180804, emissiveIntensity: 0.25,
+            side: THREE.BackSide,
+          });
+          const tube = new THREE.Mesh(new THREE.CylinderGeometry(TUBE_R, TUBE_R, 130, 28, 1, true), wallMat);
+          tube.rotation.x = Math.PI / 2;
+          tube.position.set(0, 1.55, 50);
+          scene.add(tube);
+
+          const floorMat = new THREE.MeshStandardMaterial({
+            color: 0x2a1610, roughness: 0.9, metalness: 0.06, emissive: 0x120806, emissiveIntensity: 0.2,
+          });
+          const floorGeo = new THREE.BoxGeometry(6.4, 0.18, 8.2);
+          const floors = [];
+          for (let i = 0; i < 16; i += 1) {
+            const slab = new THREE.Mesh(floorGeo, floorMat);
+            slab.position.set(0, 0.02, i * 7.4);
+            scene.add(slab);
+            floors.push(slab);
+          }
+
+          const lavaMat = new THREE.MeshStandardMaterial({
+            color: 0xff4a18, roughness: 0.35, metalness: 0.05, emissive: 0xff3a10, emissiveIntensity: 1.1,
+          });
+          const lavaGeo = new THREE.CircleGeometry(1.1, 12);
+          const lavaMeshes = LAVA_POOLS.map((pool) => {
+            const mesh = new THREE.Mesh(lavaGeo, lavaMat);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(pool.x, 0.08, pool.z);
+            mesh.scale.set(pool.w * 0.55, pool.w * 0.4, 1);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const ribMat = new THREE.MeshStandardMaterial({
+            color: 0x5a3224, roughness: 0.78, metalness: 0.12, emissive: 0x1a0a06, emissiveIntensity: 0.18,
+          });
+          const ribGeo = new THREE.TorusGeometry(TUBE_R - 0.08, 0.16, 8, 22, Math.PI);
+          const ribMeshes = RIBS.map((z) => {
+            const mesh = new THREE.Mesh(ribGeo, ribMat);
+            mesh.rotation.x = Math.PI / 2;
+            mesh.rotation.z = Math.PI;
+            mesh.position.set(0, 1.7, z);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const colMat = new THREE.MeshStandardMaterial({
+            color: 0x3a2418, roughness: 0.86, metalness: 0.1, emissive: 0x120806, emissiveIntensity: 0.16,
+          });
+          const colGeo = new THREE.CylinderGeometry(0.22, 0.32, 2.6, 7);
+          const colMeshes = COLUMNS.map((col) => {
+            const mesh = new THREE.Mesh(colGeo, colMat);
+            mesh.position.set(col.x, 1.2, col.z);
+            mesh.scale.setScalar(col.s);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const stalMat = new THREE.MeshStandardMaterial({
+            color: 0x6a3a28, roughness: 0.7, metalness: 0.08, emissive: 0x2a1008, emissiveIntensity: 0.2,
+          });
+          const stalGeo = new THREE.ConeGeometry(0.18, 1.1, 6);
+          const stals = [];
+          for (let i = 0; i < 18; i += 1) {
+            const mesh = new THREE.Mesh(stalGeo, stalMat);
+            mesh.rotation.x = Math.PI;
+            mesh.position.set((i % 2 ? -1 : 1) * (1.1 + (i % 4) * 0.25), 3.35, 5 + i * 4.8);
+            scene.add(mesh);
+            stals.push(mesh);
+          }
+
+          const shaftMat = new THREE.MeshBasicMaterial({
+            color: 0xffd8a0, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide,
+          });
+          const shaftGeo = new THREE.CylinderGeometry(0.55, 1.15, 3.4, 10, 1, true);
+          const shafts = SKYLIGHTS.map((sky) => {
+            const mesh = new THREE.Mesh(shaftGeo, shaftMat);
+            mesh.position.set(sky.x, 3.4, sky.z);
+            mesh.scale.setScalar(sky.r * 0.7);
+            scene.add(mesh);
+            return mesh;
+          });
+          const diskMat = new THREE.MeshBasicMaterial({
+            color: 0xffe8c0, transparent: true, opacity: 0.22, depthWrite: false,
+          });
+          const disks = SKYLIGHTS.map((sky) => {
+            const mesh = new THREE.Mesh(new THREE.CircleGeometry(sky.r * 0.7, 12), diskMat);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(sky.x, 4.55, sky.z);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const bumpMat = new THREE.MeshStandardMaterial({
+            color: 0x4a281c, roughness: 0.88, metalness: 0.06, emissive: 0x1a0c08, emissiveIntensity: 0.15,
+          });
+          const bumpGeo = new THREE.DodecahedronGeometry(0.32, 0);
+          const bumpMeshes = BUMPS.map((bump) => {
+            const mesh = new THREE.Mesh(bumpGeo, bumpMat);
+            mesh.position.set(bump.x, 0.22, bump.z);
+            mesh.scale.set(1.1, bump.h * 2.4, 1.3);
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const gateMat = new THREE.MeshStandardMaterial({
+            color: 0xc47a3a, roughness: 0.4, metalness: 0.45, emissive: 0x4a2008, emissiveIntensity: 0.35,
+          });
+          const gate = new THREE.Group();
+          const arch = new THREE.Mesh(new THREE.TorusGeometry(1.7, 0.12, 8, 18, Math.PI), gateMat);
+          arch.position.y = 1.7;
+          gate.add(arch);
+          const postL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.8, 0.18), gateMat);
+          postL.position.set(-1.7, 0.9, 0);
+          const postR = postL.clone();
+          postR.position.x = 1.7;
+          gate.add(postL, postR);
+          const lamp = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 10, 10),
+            new THREE.MeshStandardMaterial({ color: 0xffc46b, emissive: 0xff9a40, emissiveIntensity: 0.9, roughness: 0.3 })
+          );
+          lamp.position.set(0, 3.15, 0);
+          gate.add(lamp);
+          gate.position.set(0, 0, GOAL_Z + 0.4);
+          scene.add(gate);
+
+          const hullMat = new THREE.MeshStandardMaterial({
+            color: 0x6a4a32, roughness: 0.42, metalness: 0.48, emissive: 0x221208, emissiveIntensity: 0.2,
+          });
+          const glassMat = new THREE.MeshStandardMaterial({
+            color: 0xffc8a0, roughness: 0.18, metalness: 0.35, emissive: 0xff7a3d, emissiveIntensity: 0.28,
+            transparent: true, opacity: 0.72,
+          });
+          const radMat = new THREE.MeshStandardMaterial({
+            color: 0xb8c4c8, roughness: 0.28, metalness: 0.72, emissive: 0x304048, emissiveIntensity: 0.25,
+          });
+          const wheelMat = new THREE.MeshStandardMaterial({
+            color: 0x1a1210, roughness: 0.8, metalness: 0.2, emissive: 0x080404, emissiveIntensity: 0.1,
+          });
+          const rover = new THREE.Group();
+          const chassis = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.28, 1.35), hullMat);
+          chassis.position.y = 0.28;
+          rover.add(chassis);
+          const cabin = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.58), glassMat);
+          cabin.position.set(0, 0.52, 0.12);
+          rover.add(cabin);
+          const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 0.55, 6), hullMat);
+          mast.position.set(-0.18, 0.78, -0.28);
+          rover.add(mast);
+          const dish = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.08, 10), radMat);
+          dish.position.set(-0.18, 1.05, -0.28);
+          rover.add(dish);
+          const wheelGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.16, 10);
+          const wheels = [];
+          [[-0.48, 0.2, 0.42], [0.48, 0.2, 0.42], [-0.48, 0.2, -0.42], [0.48, 0.2, -0.42]].forEach((pos) => {
+            const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+            wheel.rotation.z = Math.PI / 2;
+            wheel.position.set(pos[0], pos[1], pos[2]);
+            rover.add(wheel);
+            wheels.push(wheel);
+          });
+          const radL = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.04, 0.9), radMat);
+          radL.position.set(-0.62, 0.42, -0.05);
+          const radR = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.04, 0.9), radMat);
+          radR.position.set(0.62, 0.42, -0.05);
+          rover.add(radL, radR);
+          const lampL = new THREE.Mesh(
+            new THREE.SphereGeometry(0.06, 8, 8),
+            new THREE.MeshStandardMaterial({ color: 0xffe8d6, emissive: 0xffc090, emissiveIntensity: 0.8 })
+          );
+          lampL.position.set(-0.22, 0.32, 0.7);
+          const lampR = lampL.clone();
+          lampR.position.x = 0.22;
+          rover.add(lampL, lampR);
+          scene.add(rover);
+
+          const moteCount = reducedMotion ? 90 : 240;
+          const motePos = new Float32Array(moteCount * 3);
+          for (let i = 0; i < moteCount; i += 1) {
+            motePos[i * 3] = (Math.random() - 0.5) * 6;
+            motePos[i * 3 + 1] = Math.random() * 3.4;
+            motePos[i * 3 + 2] = Math.random() * 96;
+          }
+          const moteGeo = new THREE.BufferGeometry();
+          moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+          const motes = new THREE.Points(moteGeo, new THREE.PointsMaterial({
+            color: 0xff7a3d, size: 0.07, transparent: true, opacity: 0.45, sizeAttenuation: true,
+          }));
+          scene.add(motes);
+
+          const emberGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const emberMat = new THREE.MeshBasicMaterial({
+            color: 0xff7a3d, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+          const sparkGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const sparkMat = new THREE.MeshBasicMaterial({
+            color: 0xffc46b, transparent: true, opacity: 1, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, lavaLight, skyLight, tube, floors, lavaMeshes, ribMeshes,
+            colMeshes, stals, shafts, disks, bumpMeshes, gate, rover, wheels, radL, radR,
+            cabin, motes, emberGeo, emberMat, sparkGeo, sparkMat,
+            emberMeshes: [], sparkMeshes: [],
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const r = state.rover;
+          const t = state.elapsed;
+          const params = difficultyAt(t);
+          webgl.rover.position.set(r.x, r.y, r.z);
+          webgl.rover.rotation.set(r.pitch, r.yaw, r.roll);
+          const fold = lerp(0.15, 1.05, r.radiator);
+          webgl.radL.rotation.z = fold;
+          webgl.radR.rotation.z = -fold;
+          webgl.radL.position.y = 0.42 + r.radiator * 0.18;
+          webgl.radR.position.y = 0.42 + r.radiator * 0.18;
+          webgl.wheels.forEach((wheel, index) => {
+            wheel.rotation.x = t * r.speed * 3.4 * (index % 2 ? 1 : 1);
+          });
+          webgl.cabin.material.emissiveIntensity = 0.22 + r.heat * 0.7;
+          webgl.lavaLight.position.set(r.x, 0.35, r.z + 1.2);
+          webgl.lavaLight.intensity = 0.9 + lavaFactor(r.x, r.z) * 1.4 + r.heat * 0.4;
+          const sky = skyFactor(r.x, r.z);
+          webgl.skyLight.position.set(r.x, 4.1, r.z);
+          webgl.skyLight.intensity = 0.25 + sky * 1.3;
+          webgl.gate.position.x = pathX(GOAL_Z, params);
+          webgl.floors.forEach((slab, index) => {
+            const z = Math.floor(r.z / 7.4) * 7.4 + (index - 4) * 7.4;
+            slab.position.set(pathX(z, params) * 0.15, 0.02, z);
+          });
+          webgl.ribMeshes.forEach((mesh, index) => {
+            const z = RIBS[index];
+            mesh.position.x = pathX(z, params) * 0.2;
+            mesh.visible = Math.abs(z - r.z) < 28;
+          });
+          webgl.stals.forEach((mesh, index) => {
+            mesh.position.x = (index % 2 ? -1 : 1) * (1.15 + (index % 4) * 0.22) + pathX(mesh.position.z, params) * 0.2;
+            mesh.visible = Math.abs(mesh.position.z - r.z) < 26;
+          });
+          webgl.lavaMeshes.forEach((mesh, index) => {
+            const pool = LAVA_POOLS[index];
+            mesh.position.x = pool.x;
+            mesh.visible = Math.abs(pool.z - r.z) < 24;
+            mesh.material.emissiveIntensity = reducedMotion ? 0.9 : 0.95 + Math.sin(t * 4 + index) * 0.2;
+          });
+          webgl.shafts.forEach((mesh, index) => {
+            mesh.visible = Math.abs(SKYLIGHTS[index].z - r.z) < 26;
+            mesh.material.opacity = reducedMotion ? 0.1 : 0.1 + Math.sin(t * 1.4 + index) * 0.04;
+          });
+          webgl.disks.forEach((mesh, index) => {
+            mesh.visible = Math.abs(SKYLIGHTS[index].z - r.z) < 26;
+          });
+          webgl.bumpMeshes.forEach((mesh, index) => {
+            mesh.visible = Math.abs(BUMPS[index].z - r.z) < 22;
+          });
+          webgl.colMeshes.forEach((mesh, index) => {
+            mesh.visible = Math.abs(COLUMNS[index].z - r.z) < 24;
+          });
+
+          while (webgl.emberMeshes.length < state.embers.length) {
+            const mesh = new THREE.Mesh(webgl.emberGeo, webgl.emberMat.clone());
+            webgl.scene.add(mesh);
+            webgl.emberMeshes.push(mesh);
+          }
+          webgl.emberMeshes.forEach((mesh, index) => {
+            const ember = state.embers[index];
+            if (!ember) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(ember.x, ember.y, ember.z);
+            mesh.material.opacity = clamp(ember.life, 0, 1);
+          });
+          while (webgl.sparkMeshes.length < state.sparks.length) {
+            const mesh = new THREE.Mesh(webgl.sparkGeo, webgl.sparkMat.clone());
+            webgl.scene.add(mesh);
+            webgl.sparkMeshes.push(mesh);
+          }
+          webgl.sparkMeshes.forEach((mesh, index) => {
+            const spark = state.sparks[index];
+            if (!spark) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(spark.x, spark.y, spark.z);
+            mesh.material.color.setHex(spark.kind === "sky" ? 0xffe8d6 : spark.kind === "heat" ? 0xff7a3d : 0x8a5a40);
+            mesh.material.opacity = clamp(spark.life * 1.6, 0, 1);
+          });
+
+          const pos = webgl.motes.geometry.attributes.position;
+          for (let i = 0; i < pos.count; i += 1) {
+            let z = pos.getZ(i) + r.speed * FIXED_DT * 0.35;
+            if (z > r.z + 12) z -= 40;
+            if (z < r.z - 28) z += 40;
+            pos.setZ(i, z);
+            pos.setY(i, 0.4 + (i % 7) * 0.35 + Math.sin(t + i) * 0.05);
+          }
+          pos.needsUpdate = true;
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const r = state.rover;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.45 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.32 : 0;
+          const back = 6.4;
+          const camX = r.x - Math.sin(r.yaw) * back;
+          const camZ = r.z + Math.cos(r.yaw) * back * 0.15 + 5.6;
+          webgl.camera.position.set(camX + shakeX, r.y + 1.45 + shakeY + Math.abs(r.roll) * 0.2, camZ);
+          webgl.camera.lookAt(r.x + Math.sin(r.yaw) * 5, r.y + 0.35, r.z + 8);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project(x, y, z) {
+          const r = state.rover;
+          const dx = x - r.x;
+          const dy = y - r.y;
+          const dz = z - r.z;
+          const depth = Math.max(0.18, Math.min(1.4, 9 / (9 + Math.max(-2, dz) * 0.12)));
+          return {
+            x: VIEW_W / 2 + dx * 58 * depth,
+            y: VIEW_H * 0.62 - dy * 52 * depth - dz * 4.5,
+            depth,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#3a140c");
+          sky.addColorStop(0.5, "#1a0906");
+          sky.addColorStop(1, "#120604");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          const r = state.rover;
+          ctx.fillStyle = "rgba(255,122,61,0.08)";
+          for (let i = 0; i < 8; i += 1) {
+            const y = (i * 70 + state.elapsed * 40) % VIEW_H;
+            ctx.fillRect(0, y, VIEW_W, 10);
+          }
+          LAVA_POOLS.forEach((pool) => {
+            const p = project(pool.x, 0.05, pool.z);
+            if (p.y < -40 || p.y > VIEW_H + 40) return;
+            ctx.fillStyle = "rgba(255,74,24,0.8)";
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, pool.w * 16 * p.depth, 10 * p.depth, 0, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          SKYLIGHTS.forEach((skyHole) => {
+            const p = project(skyHole.x, 3.4, skyHole.z);
+            ctx.fillStyle = "rgba(255,232,214,0.16)";
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, skyHole.r * 18 * p.depth, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          BUMPS.forEach((bump) => {
+            const p = project(bump.x, bump.h, bump.z);
+            ctx.fillStyle = "#5a3224";
+            ctx.beginPath();
+            ctx.ellipse(p.x, p.y, 12 * p.depth, 8 * p.depth, 0, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          const gate = project(pathX(GOAL_Z), 1.4, GOAL_Z);
+          ctx.strokeStyle = COLORS.brass;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(gate.x, gate.y, 28 * gate.depth, Math.PI, 0);
+          ctx.stroke();
+          ctx.save();
+          const body = project(r.x, r.y, r.z);
+          ctx.translate(body.x, body.y);
+          ctx.rotate(r.roll);
+          ctx.fillStyle = "#6a4a32";
+          ctx.fillRect(-22, -10, 44, 20);
+          ctx.fillStyle = COLORS.accent;
+          ctx.beginPath();
+          ctx.arc(8, -4, 8, 0, Math.PI * 2);
+          ctx.fill();
+          if (r.radiator > 0.2) {
+            ctx.fillStyle = "rgba(184,196,200,0.9)";
+            ctx.fillRect(-34, -18, 12, 28);
+            ctx.fillRect(22, -18, 12, 28);
+          }
+          ctx.restore();
+          state.embers.forEach((ember) => {
+            const p = project(ember.x, ember.y, ember.z);
+            ctx.globalAlpha = clamp(ember.life, 0, 1);
+            ctx.fillStyle = COLORS.accent;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          state.sparks.forEach((spark) => {
+            const p = project(spark.x, spark.y, spark.z);
+            ctx.globalAlpha = clamp(spark.life * 1.5, 0, 1);
+            ctx.fillStyle = spark.kind === "heat" ? COLORS.lava : COLORS.ink;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,232,214,0.72)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          const dist = Math.min(GOAL_Z, state.rover.z);
+          if (objective) objective.textContent = `${dist.toFixed(0)} / ${GOAL_Z}`;
+          if (meter) meter.style.width = `${(state.rover.heat) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const rad = state.rover.radiator > 0.5 ? "방열 펼침" : "방열 접힘";
+            sub.textContent = `열 ${(state.rover.heat * 100).toFixed(0)}% · ${rad}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const cx = VIEW_W / 2;
+          const cy = VIEW_H - 54;
+          hud.save();
+          hud.strokeStyle = "rgba(255,232,214,0.35)";
+          hud.lineWidth = 2;
+          hud.beginPath();
+          hud.arc(cx, cy, 22, Math.PI, 0);
+          hud.stroke();
+          hud.strokeStyle = Math.abs(state.rover.roll) > 0.85 ? COLORS.danger : COLORS.accent;
+          hud.beginPath();
+          hud.moveTo(cx, cy);
+          hud.lineTo(cx + Math.sin(state.rover.roll) * 20, cy - Math.cos(state.rover.roll) * 12);
+          hud.stroke();
+          hud.restore();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.danger;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.rover.heat > 0.7) {
+            hud.fillStyle = `rgba(255,74,24,${(state.rover.heat - 0.7) * 0.35})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,122,61,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; rover on tube floor; +z down-tube; roll about z",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            distance: Number(state.rover.z.toFixed(2)),
+            heat: Number(state.rover.heat.toFixed(3)),
+            radiator: Number(state.rover.radiator.toFixed(2)),
+            player: {
+              x: Number(state.rover.x.toFixed(2)),
+              y: Number(state.rover.y.toFixed(2)),
+              z: Number(state.rover.z.toFixed(2)),
+              roll: Number(state.rover.roll.toFixed(3)),
+              pitch: Number(state.rover.pitch.toFixed(3)),
+            },
+            lava: Number(lavaFactor(state.rover.x, state.rover.z).toFixed(3)),
+            skylight: Number(skyFactor(state.rover.x, state.rover.z).toFixed(3)),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function pointerSteer(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          input.steer = ((event.clientX - rect.left) / Math.max(1, rect.width) - 0.5) * 2;
+          input.pitchIn = ((event.clientY - rect.top) / Math.max(1, rect.height) - 0.5) * 2;
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.holding = false;
+          input.moved = false;
+          input.pointerId = event.pointerId;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.downAt = performance.now();
+          pointerSteer(event);
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          if (Math.hypot(dx, dy) > 14) input.moved = true;
+          pointerSteer(event);
+          if (input.moved) input.holding = false;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.holding = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          input.dragging = false;
+          input.holding = false;
+          input.steer = 0;
+          input.pitchIn = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space" || event.code === "ShiftLeft" || event.code === "ShiftRight") {
+            event.preventDefault();
+            input.hold = true;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space" || event.code === "ShiftLeft" || event.code === "ShiftRight") {
+            input.hold = false;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          if (input.dragging && !input.moved && performance.now() - input.downAt > HOLD_MS) {
+            input.holding = true;
+          }
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.rover.z = GOAL_Z;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.hold = false; input.dragging = false; input.holding = false;
+          input.steer = 0; input.pitchIn = 0;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

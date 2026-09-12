@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>세단뛰기</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #10180c; --accent: #f4c56d; --accent-ink: #10180c; --danger: #ff6b7a; --ink: #fff4dc; --muted: rgba(255,244,220,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">세단뛰기. 홉·스텝·점프 보드를 순서대로 밟으세요. 홀드로 도움닫기, 탭으로 발구르기. 유효 기록 3회면 클리어. 보드를 밟지 못하거나 파울이면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 누른 채 도움닫기하고 보드 위에서 탭해 발구릅니다.</p>
+    <main class="stage" aria-label="세단뛰기 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="세단뛰기" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">보드</p>
+          <p class="hud-value" id="hud-objective">0 / 3</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">46.0</p>
+          <p class="hud-sub" id="hud-sub">속도 0.0</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Triple Jump</p>
+          <h1>세단뛰기</h1>
+          <p class="brief-lead">홉·스텝·점프 보드를 순서대로 밟으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>홀드로 도움닫기, 탭으로 발구르기</span></li>
+            <li><strong>클리어</strong><span>유효 기록 3회면 클리어</span></li>
+            <li><strong>실패</strong><span>보드를 밟지 못하거나 파울이면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">파울</p>
+          <h2>기록이 무효다</h2>
+          <p class="brief-lead" id="fail-detail">보드를 밟지 못하거나 파울이면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">유효 기록</p>
+          <h2>세 번의 보드를 이었다</h2>
+          <p class="brief-lead">홉·스텝·점프를 세 번 모두 유효하게 남겼습니다.</p>
+          <p class="hud-sub" id="clear-stat">유효 기록 3회면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 46;
+        const GOAL = 3;
+        const HOP_Z = 21.5;
+        const STEP_Z = 33.2;
+        const JUMP_Z = 45.4;
+        const PIT_Z0 = 50.2;
+        const PIT_Z1 = 68.5;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "triple-jump",
+          title: "세단뛰기",
+          description: "홉·스텝·점프 보드를 순서대로 밟으세요.",
+          creator: "collin",
+          genre: "3D triple jump",
+          clearCondition: "유효 기록 3회면 클리어",
+          failCondition: "보드를 밟지 못하거나 파울이면 실패",
+          controls: "홀드로 도움닫기, 탭으로 발구르기",
+        };
+        const COLORS = {
+          bg: "#10180c",
+          ink: "#fff4dc",
+          gold: "#f4c56d",
+          tartan: "#b44848",
+          sand: "#c4a056",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          miss_board: "보드를 밟지 못하고 지나쳤습니다",
+          foul: "보드 끝을 넘어 파울이 선언되었습니다",
+          time_limit: "제한 시간 46초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const BOARD_LAYOUT = [
+          { id: "hop", z: HOP_Z, label: "홉" },
+          { id: "step", z: STEP_Z, label: "스텝" },
+          { id: "jump", z: JUMP_Z, label: "점프" },
+        ];
+        const LIGHT_LAYOUT = [
+          { x: -7.4, z: 8, h: 9.2 }, { x: 7.4, z: 8, h: 9.2 },
+          { x: -7.4, z: 28, h: 9.6 }, { x: 7.4, z: 28, h: 9.6 },
+          { x: -7.4, z: 48, h: 9.4 }, { x: 7.4, z: 48, h: 9.4 },
+          { x: -7.4, z: 64, h: 9.0 }, { x: 7.4, z: 64, h: 9.0 },
+        ];
+        const FLAG_LAYOUT = [
+          { x: -5.6, z: 16, c: 0xf4c56d }, { x: 5.6, z: 16, c: 0xfff4dc },
+          { x: -5.6, z: 40, c: 0xff6b7a }, { x: 5.6, z: 40, c: 0xf4c56d },
+          { x: -5.6, z: 58, c: 0xfff4dc }, { x: 5.6, z: 58, c: 0xb44848 },
+        ];
+        const BENCH_ZS = [6, 14, 22, 30, 38, 46, 54, 62];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          score: 0,
+          athlete: { x: 0, y: 0, z: 1.2, vz: 0, vy: 0, stride: 0, plant: 0 },
+          phase: "approach",
+          nextBoard: 0,
+          wind: 0,
+          mark: 0,
+          attempt: 1,
+          resetWait: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          holdAge: 0,
+        };
+        const input = {
+          run: false, plant: false, plantQueued: false,
+          holding: false, pointerId: null, downAt: 0,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            accel: 3.35 + phase * 0.15,
+            maxSpeed: 9.2 + phase * 0.55,
+            window: 1.55 - phase * 0.12 - difficulty * 0.08,
+            foulEdge: 0.32 - phase * 0.03,
+            wind: (phase - 1) * 0.55 + Math.sin(seconds * 0.7) * (0.15 + phase * 0.22),
+            hopNeed: 5.2 + phase * 0.28,
+            rhythmLock: 0.22 + phase * 0.06,
+          };
+        }
+
+        function resetAthlete() {
+          state.athlete = { x: 0, y: 0, z: 1.2, vz: 0, vy: 0, stride: 0, plant: 0 };
+          state.phase = "approach";
+          state.nextBoard = 0;
+          state.mark = 0;
+          state.resetWait = 0;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(7, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.4, 2.6),
+              vy: randRange(0.8, 3.8),
+              vz: Math.sin(angle) * randRange(0.3, 1.8),
+              life: randRange(0.3, 0.75),
+              size: randRange(0.04, 0.1),
+              kind,
+            });
+          }
+          if (state.particles.length > 70) state.particles.splice(0, state.particles.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "plant") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "mark") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(540, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.14);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.19);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(460, now);
+              osc.frequency.exponentialRampToValueAtTime(1240, now + 0.26);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.33);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(160, now);
+              osc.frequency.exponentialRampToValueAtTime(42, now + 0.24);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.score = 0;
+          state.attempt = 1;
+          state.wind = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.holdAge = 0;
+          input.run = false;
+          input.plant = false;
+          input.plantQueued = false;
+          input.holding = false;
+          resetAthlete();
+          reseed((Date.now() ^ 0x51ed) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.62;
+          playSfx("boom");
+          burst(state.athlete.x, 0.4, state.athlete.z, 16, "foul");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function boardWindow(params, board) {
+          const speed = Math.max(3.2, state.athlete.vz);
+          const seconds = 0.26 - (params.phase - 1) * 0.03;
+          const meter = seconds * speed;
+          const tight = params.window * (1.12 - clamp(speed / params.maxSpeed, 0, 1) * params.rhythmLock);
+          return Math.max(meter, tight) + 0.22;
+        }
+
+        function nearBoard(params) {
+          if (state.nextBoard >= BOARD_LAYOUT.length) return null;
+          const board = BOARD_LAYOUT[state.nextBoard];
+          const gap = board.z - state.athlete.z;
+          const win = boardWindow(params, board);
+          if (gap < -params.foulEdge - 0.05) return null;
+          if (Math.abs(gap) <= win) return board;
+          return null;
+        }
+
+        function tryPlant(params) {
+          if (state.mode !== "running") return;
+          if (state.phase === "reset") return;
+          const board = nearBoard(params);
+          const a = state.athlete;
+          if (!board) {
+            if (state.phase === "approach" && a.z < HOP_Z - 2) return;
+            return;
+          }
+          const overshoot = a.z - board.z;
+          if (overshoot > params.foulEdge) {
+            failStage("foul");
+            return;
+          }
+          const speedOk = a.vz >= params.hopNeed * (board.id === "hop" ? 0.72 : board.id === "step" ? 0.64 : 0.58);
+          const lift = 2.1 + a.vz * 0.18 + (speedOk ? 0.45 : -0.2);
+          a.vy = lift;
+          a.plant = 1;
+          a.stride = 0;
+          playSfx("plant");
+          burst(0, 0.1, board.z, 10, board.id);
+          state.flash = 0.32;
+          state.message = board.label;
+          state.messageTime = 0.55;
+          if (board.id === "hop") state.phase = "hop";
+          if (board.id === "step") state.phase = "step";
+          if (board.id === "jump") state.phase = "jump";
+          state.nextBoard += 1;
+          if (!speedOk && board.id !== "jump") {
+            a.vz *= 0.82;
+          }
+        }
+
+        function finishMark(params) {
+          const a = state.athlete;
+          const dist = a.z - HOP_Z;
+          state.mark = dist;
+          state.score += 1;
+          state.flash = 0.55;
+          state.message = `기록 ${dist.toFixed(2)}m · ${state.score}/${GOAL}`;
+          state.messageTime = 1;
+          burst(0, 0.2, a.z, 18, "sand");
+          playSfx("mark");
+          if (state.score >= GOAL) {
+            clearStage();
+            return;
+          }
+          state.phase = "reset";
+          state.resetWait = 0.85;
+          state.attempt += 1;
+        }
+
+        function updateAthlete(dt, params) {
+          if (state.phase === "reset") {
+            state.resetWait -= dt;
+            if (state.resetWait <= 0) resetAthlete();
+            return;
+          }
+          const a = state.athlete;
+          state.wind = params.wind;
+          const holding = input.run || input.holding;
+          if (state.phase === "approach") {
+            if (holding) a.vz += params.accel * dt;
+            else a.vz *= Math.exp(-0.55 * dt);
+            a.vz = clamp(a.vz + state.wind * 0.35 * dt, 0, params.maxSpeed);
+            a.z += a.vz * dt;
+            a.stride += a.vz * dt;
+            a.y = Math.abs(Math.sin(a.stride * 1.7)) * 0.08 * (a.vz / params.maxSpeed);
+            const hop = BOARD_LAYOUT[0];
+            if (state.nextBoard === 0 && a.z > hop.z + params.foulEdge + 0.12) {
+              failStage("miss_board");
+              return;
+            }
+          } else {
+            a.vy -= 9.4 * dt;
+            a.y += a.vy * dt;
+            a.z += a.vz * dt;
+            a.vz *= Math.exp(-0.12 * dt);
+            if (a.y < 0) {
+              a.y = 0;
+              a.vy = 0;
+              if (state.phase === "jump") {
+                if (a.z < PIT_Z0 - 0.4) {
+                  failStage("foul");
+                  return;
+                }
+                finishMark(params);
+                return;
+              }
+              if (state.nextBoard < BOARD_LAYOUT.length) {
+                const board = BOARD_LAYOUT[state.nextBoard];
+                if (a.z > board.z + params.foulEdge + 0.2) {
+                  failStage("miss_board");
+                  return;
+                }
+              }
+            }
+          }
+          a.plant = Math.max(0, a.plant - dt * 4);
+          if (state.phase !== "approach" && state.nextBoard < BOARD_LAYOUT.length) {
+            const board = BOARD_LAYOUT[state.nextBoard];
+            if (a.z > board.z + params.foulEdge + 0.35 && a.y < 0.08) {
+              failStage("miss_board");
+            }
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            p.vy -= 6.5 * dt;
+            p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.5);
+          state.shake = Math.max(0, state.shake - dt * 2.7);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (input.holding || input.run) state.holdAge += dt;
+          else state.holdAge = 0;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          if (input.plantQueued) {
+            input.plantQueued = false;
+            tryPlant(params);
+            if (state.mode !== "running") return;
+          }
+          updateAthlete(dt, params);
+          if (state.mode !== "running") return;
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `보드 ${state.score} / ${GOAL} · 속도 ${state.athlete.vz.toFixed(1)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 유효 ${state.score}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x10180c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x10180c);
+          scene.fog = new THREE.Fog(0x152414, 14, 62);
+
+          const camera = new THREE.PerspectiveCamera(50, VIEW_W / VIEW_H, 0.1, 140);
+          camera.position.set(10.5, 2.6, 4);
+
+          scene.add(new THREE.AmbientLight(0x3a4a28, 0.5));
+          const hemi = new THREE.HemisphereLight(0xffe6b0, 0x1a2810, 0.48);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xfff0c8, 0.7);
+          sun.position.set(-6, 16, 8);
+          scene.add(sun);
+          const flood = new THREE.PointLight(0xf4c56d, 1.05, 22);
+          flood.position.set(4, 6, 24);
+          scene.add(flood);
+          const pitLight = new THREE.PointLight(0xc4a056, 0.7, 12);
+          pitLight.position.set(0, 2.2, 58);
+          scene.add(pitLight);
+
+          const moteCount = reducedMotion ? 90 : 220;
+          const motePos = new Float32Array(moteCount * 3);
+          for (let index = 0; index < moteCount; index += 1) {
+            motePos[index * 3] = (Math.random() - 0.5) * 16;
+            motePos[index * 3 + 1] = Math.random() * 8;
+            motePos[index * 3 + 2] = Math.random() * 80;
+          }
+          const moteGeo = new THREE.BufferGeometry();
+          moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+          scene.add(new THREE.Points(moteGeo, new THREE.PointsMaterial({
+            color: 0xfff4dc, size: 0.07, transparent: true, opacity: 0.28, sizeAttenuation: true,
+          })));
+
+          const grassMat = new THREE.MeshStandardMaterial({
+            color: 0x1c3a18, roughness: 0.92, metalness: 0.04, emissive: 0x081408, emissiveIntensity: 0.12,
+          });
+          const grass = new THREE.Mesh(new THREE.PlaneGeometry(42, 90), grassMat);
+          grass.rotation.x = -Math.PI / 2;
+          grass.position.set(0, -0.02, 36);
+          scene.add(grass);
+
+          const tartanMat = new THREE.MeshStandardMaterial({
+            color: 0x8a3030, roughness: 0.7, metalness: 0.08, emissive: 0x2a0808, emissiveIntensity: 0.16,
+          });
+          const lane = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.04, 52), tartanMat);
+          lane.position.set(0, 0.01, 24);
+          scene.add(lane);
+          const laneLineMat = new THREE.MeshStandardMaterial({ color: 0xfff4dc, roughness: 0.5 });
+          const lineGeo = new THREE.BoxGeometry(0.04, 0.045, 52);
+          const lineL = new THREE.Mesh(lineGeo, laneLineMat);
+          lineL.position.set(-0.62, 0.03, 24);
+          const lineR = new THREE.Mesh(lineGeo, laneLineMat);
+          lineR.position.set(0.62, 0.03, 24);
+          scene.add(lineL, lineR);
+
+          const sandMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a056, roughness: 0.88, metalness: 0.04, emissive: 0x3a2a10, emissiveIntensity: 0.12,
+          });
+          const pit = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.16, 18.4), sandMat);
+          pit.position.set(0, -0.02, 59);
+          scene.add(pit);
+          const curbMat = new THREE.MeshStandardMaterial({ color: 0xd8d0c0, roughness: 0.55, metalness: 0.1 });
+          const curbGeo = new THREE.BoxGeometry(2.8, 0.12, 0.18);
+          const curbA = new THREE.Mesh(curbGeo, curbMat);
+          curbA.position.set(0, 0.04, PIT_Z0);
+          const curbB = new THREE.Mesh(curbGeo, curbMat);
+          curbB.position.set(0, 0.04, PIT_Z1);
+          scene.add(curbA, curbB);
+
+          const hopMat = new THREE.MeshStandardMaterial({
+            color: 0xf4c56d, roughness: 0.4, metalness: 0.12, emissive: 0x5a3a10, emissiveIntensity: 0.35,
+          });
+          const stepMat = new THREE.MeshStandardMaterial({
+            color: 0x9be7ff, roughness: 0.4, metalness: 0.12, emissive: 0x103040, emissiveIntensity: 0.3,
+          });
+          const jumpMat = new THREE.MeshStandardMaterial({
+            color: 0xff6b7a, roughness: 0.4, metalness: 0.12, emissive: 0x401018, emissiveIntensity: 0.32,
+          });
+          const boardGeo = new THREE.BoxGeometry(1.28, 0.06, 0.28);
+          const hopBoard = new THREE.Mesh(boardGeo, hopMat);
+          hopBoard.position.set(0, 0.05, HOP_Z);
+          const stepBoard = new THREE.Mesh(boardGeo, stepMat);
+          stepBoard.position.set(0, 0.05, STEP_Z);
+          const jumpBoard = new THREE.Mesh(boardGeo, jumpMat);
+          jumpBoard.position.set(0, 0.05, JUMP_Z);
+          scene.add(hopBoard, stepBoard, jumpBoard);
+          const plastic = new THREE.Mesh(new THREE.BoxGeometry(1.28, 0.03, 0.08), jumpMat);
+          plastic.position.set(0, 0.07, HOP_Z + 0.2);
+          scene.add(plastic);
+
+          const standMat = new THREE.MeshStandardMaterial({
+            color: 0x243018, roughness: 0.82, metalness: 0.08, emissive: 0x0c1408, emissiveIntensity: 0.1,
+          });
+          const seatMat = new THREE.MeshStandardMaterial({ color: 0x3a2818, roughness: 0.7, metalness: 0.06 });
+          const stands = [];
+          BENCH_ZS.forEach((z, index) => {
+            const left = new THREE.Group();
+            for (let row = 0; row < 4; row += 1) {
+              const bench = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.16, 1.6), seatMat);
+              bench.position.set(-4.8 - row * 0.55, 0.4 + row * 0.42, 0);
+              left.add(bench);
+            }
+            left.position.z = z;
+            scene.add(left);
+            const right = left.clone();
+            right.scale.x = -1;
+            scene.add(right);
+            stands.push(left, right);
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.4, 7.6), standMat);
+            wall.position.set(index % 2 ? 7.6 : -7.6, 1.2, z);
+            scene.add(wall);
+          });
+
+          const steelMat = new THREE.MeshStandardMaterial({
+            color: 0x8a9080, roughness: 0.38, metalness: 0.55, emissive: 0x181c14, emissiveIntensity: 0.1,
+          });
+          const lampMat = new THREE.MeshStandardMaterial({
+            color: 0xfff4dc, roughness: 0.25, metalness: 0.2, emissive: 0xf4c56d, emissiveIntensity: 0.8,
+          });
+          const lights = LIGHT_LAYOUT.map((row) => {
+            const group = new THREE.Group();
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.12, row.h, 6), steelMat);
+            pole.position.y = row.h * 0.5;
+            const head = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.18, 0.4), lampMat);
+            head.position.y = row.h;
+            head.rotation.z = row.x > 0 ? 0.4 : -0.4;
+            group.add(pole, head);
+            group.position.set(row.x, 0, row.z);
+            scene.add(group);
+            return group;
+          });
+
+          const clothGeo = new THREE.PlaneGeometry(0.55, 0.38);
+          const flags = FLAG_LAYOUT.map((row) => {
+            const group = new THREE.Group();
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 2.4, 5), steelMat);
+            pole.position.y = 1.2;
+            const flag = new THREE.Mesh(clothGeo, new THREE.MeshStandardMaterial({
+              color: row.c, roughness: 0.65, metalness: 0.05, side: THREE.DoubleSide, emissive: row.c, emissiveIntensity: 0.12,
+            }));
+            flag.position.set(0.28, 2.05, 0);
+            group.add(pole, flag);
+            group.position.set(row.x, 0, row.z);
+            scene.add(group);
+            return group;
+          });
+
+          const boardMat = new THREE.MeshStandardMaterial({
+            color: 0x1a2014, roughness: 0.6, metalness: 0.1, emissive: 0x0a1008, emissiveIntensity: 0.2,
+          });
+          const score = new THREE.Group();
+          const panel = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.6, 0.16), boardMat);
+          panel.position.y = 3.4;
+          const postA = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.6, 0.12), steelMat);
+          postA.position.set(-1.5, 1.3, 0);
+          const postB = postA.clone();
+          postB.position.x = 1.5;
+          score.add(panel, postA, postB);
+          score.position.set(-8.4, 0, 36);
+          score.rotation.y = 0.55;
+          scene.add(score);
+
+          const sock = new THREE.Group();
+          const sockPole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 3.4, 6), steelMat);
+          sockPole.position.y = 1.7;
+          const sockBag = new THREE.Mesh(new THREE.ConeGeometry(0.18, 1.1, 6), new THREE.MeshStandardMaterial({
+            color: 0xf4c56d, roughness: 0.55, metalness: 0.08, emissive: 0x4a3010, emissiveIntensity: 0.2,
+          }));
+          sockBag.rotation.z = Math.PI / 2;
+          sockBag.position.set(0.55, 3.15, 0);
+          sock.add(sockPole, sockBag);
+          sock.position.set(4.8, 0, 12);
+          scene.add(sock);
+
+          const rake = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.05, 0.08), steelMat);
+          rake.position.set(1.6, 0.12, 56.5);
+          scene.add(rake);
+          const officialMat = new THREE.MeshStandardMaterial({ color: 0xf4c56d, roughness: 0.6, metalness: 0.08 });
+          const bodyGeo = new THREE.CylinderGeometry(0.16, 0.2, 0.7, 6);
+          const headGeo = new THREE.SphereGeometry(0.14, 8, 8);
+          const skinMat = new THREE.MeshStandardMaterial({ color: 0xc4a07a, roughness: 0.7 });
+          const officials = [47.6, 50.4].map((z, index) => {
+            const group = new THREE.Group();
+            const body = new THREE.Mesh(bodyGeo, officialMat);
+            body.position.y = 0.55;
+            const head = new THREE.Mesh(headGeo, skinMat);
+            head.position.y = 1.02;
+            group.add(body, head);
+            group.position.set(index ? 2.3 : -2.3, 0, z);
+            scene.add(group);
+            return group;
+          });
+
+          const roof = new THREE.Mesh(new THREE.BoxGeometry(22, 0.12, 8), steelMat);
+          roof.position.set(0, 7.4, 30);
+          scene.add(roof);
+          const trussGeo = new THREE.BoxGeometry(0.08, 1.4, 8);
+          for (let index = 0; index < 6; index += 1) {
+            const truss = new THREE.Mesh(trussGeo, steelMat);
+            truss.position.set(-8 + index * 3.2, 6.6, 30);
+            scene.add(truss);
+          }
+
+          const athlete = new THREE.Group();
+          const singlet = new THREE.MeshStandardMaterial({
+            color: 0xf4c56d, roughness: 0.5, metalness: 0.08, emissive: 0x3a2a08, emissiveIntensity: 0.18,
+          });
+          const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 0.48, 8), singlet);
+          torso.position.y = 0.72;
+          const hip = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 8), singlet);
+          hip.position.y = 0.48;
+          const head = new THREE.Mesh(headGeo, skinMat);
+          head.position.y = 1.08;
+          const legL = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.46, 6), skinMat);
+          legL.position.set(-0.07, 0.24, 0);
+          const legR = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.46, 6), skinMat);
+          legR.position.set(0.07, 0.24, 0);
+          const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.4, 6), skinMat);
+          armL.position.set(-0.2, 0.72, 0);
+          const armR = armL.clone();
+          armR.position.x = 0.2;
+          athlete.add(torso, hip, head, legL, legR, armL, armR);
+          scene.add(athlete);
+
+          const pGeo = new THREE.SphereGeometry(0.05, 5, 5);
+          const pMat = new THREE.MeshBasicMaterial({ color: 0xc4a056, transparent: true, opacity: 0.8, depthWrite: false });
+
+          const photoPit = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.4, 1.2), standMat);
+          photoPit.position.set(3.4, 0.1, 52);
+          scene.add(photoPit);
+          const cameraRig = new THREE.Group();
+          const tripod = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.08, 1.1, 5), steelMat);
+          tripod.position.y = 0.55;
+          const camBody = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.16, 0.36), boardMat);
+          camBody.position.y = 1.12;
+          cameraRig.add(tripod, camBody);
+          cameraRig.position.set(3.4, 0.2, 52.2);
+          scene.add(cameraRig);
+
+          const markerMat = new THREE.MeshStandardMaterial({
+            color: 0xfff4dc, roughness: 0.5, metalness: 0.08, emissive: 0x2a2410, emissiveIntensity: 0.12,
+          });
+          const markerGeo = new THREE.BoxGeometry(0.08, 0.28, 0.08);
+          const markers = [];
+          [18, 24, 30, 36, 42, 54, 60].forEach((z, index) => {
+            const peg = new THREE.Mesh(markerGeo, markerMat);
+            peg.position.set(-0.85, 0.16, z);
+            scene.add(peg);
+            markers.push(peg);
+            const plate = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.1, 0.2), hopMat);
+            plate.position.set(-1.15, 0.08, z);
+            scene.add(plate);
+          });
+
+          const infield = new THREE.Mesh(new THREE.CircleGeometry(4.6, 20), grassMat);
+          infield.rotation.x = -Math.PI / 2;
+          infield.position.set(-6.5, 0.01, 22);
+          scene.add(infield);
+          const bannerMat = new THREE.MeshStandardMaterial({
+            color: 0xf4c56d, roughness: 0.55, metalness: 0.08, emissive: 0x4a3010, emissiveIntensity: 0.22, side: THREE.DoubleSide,
+          });
+          const railBanner = new THREE.Mesh(new THREE.PlaneGeometry(10.5, 0.7), bannerMat);
+          railBanner.position.set(6.4, 1.35, 34);
+          railBanner.rotation.y = -Math.PI / 2;
+          scene.add(railBanner);
+          const clockFace = new THREE.Mesh(new THREE.CircleGeometry(0.55, 16), lampMat);
+          clockFace.position.set(-8.4, 4.45, 36.12);
+          clockFace.rotation.y = 0.55;
+          scene.add(clockFace);
+          const hedgeGeo = new THREE.BoxGeometry(0.6, 0.7, 4.2);
+          const hedgeMat = new THREE.MeshStandardMaterial({
+            color: 0x24501c, roughness: 0.9, metalness: 0.04, emissive: 0x0a1c08, emissiveIntensity: 0.12,
+          });
+          [-1, 1].forEach((side) => {
+            const hedge = new THREE.Mesh(hedgeGeo, hedgeMat);
+            hedge.position.set(side * 2.4, 0.32, 4.2);
+            scene.add(hedge);
+          });
+
+          return {
+            renderer, scene, camera, flood, pitLight, hopBoard, stepBoard, jumpBoard,
+            flags, sock, sockBag, athlete, legL, legR, armL, armR, lights, officials,
+            pGeo, pMat, pMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const a = state.athlete;
+          const t = state.elapsed;
+          webgl.athlete.position.set(a.x, a.y, a.z);
+          const lean = clamp(a.vz * 0.03, 0, 0.28);
+          webgl.athlete.rotation.x = -lean + a.vy * 0.04;
+          const swing = Math.sin(a.stride * 1.7) * 0.55;
+          webgl.legL.rotation.x = state.phase === "approach" ? swing : 0.35 + a.plant;
+          webgl.legR.rotation.x = state.phase === "approach" ? -swing : -0.15;
+          webgl.armL.rotation.x = -webgl.legL.rotation.x * 0.7;
+          webgl.armR.rotation.x = -webgl.legR.rotation.x * 0.7;
+          webgl.flood.position.set(3.5, 5.6, a.z + 4);
+          webgl.pitLight.intensity = 0.55 + Math.sin(t * 2) * 0.08;
+          const pulse = reducedMotion ? 1 : 1 + Math.sin(t * 6) * 0.06;
+          webgl.hopBoard.scale.y = state.nextBoard === 0 ? pulse : 1;
+          webgl.stepBoard.scale.y = state.nextBoard === 1 ? pulse : 1;
+          webgl.jumpBoard.scale.y = state.nextBoard === 2 ? pulse : 1;
+          webgl.sock.rotation.y = state.wind * 0.35;
+          webgl.sockBag.rotation.y = Math.sin(t * 3) * 0.2;
+          webgl.flags.forEach((flag, index) => {
+            flag.children[1].rotation.y = Math.sin(t * 2.2 + index) * 0.25 + state.wind * 0.1;
+          });
+
+          while (webgl.pMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.pGeo, webgl.pMat.clone());
+            webgl.scene.add(mesh);
+            webgl.pMeshes.push(mesh);
+          }
+          webgl.pMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "foul" ? 0xff6b7a : p.kind === "sand" ? 0xc4a056 : 0xf4c56d);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const a = state.athlete;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.2 : 0;
+          const desired = { x: 9.6 + shakeX, y: 2.35 + shakeY + a.y * 0.2, z: a.z - 1.4 };
+          webgl.camera.position.x = lerp(webgl.camera.position.x, desired.x, 0.14);
+          webgl.camera.position.y = lerp(webgl.camera.position.y, desired.y, 0.14);
+          webgl.camera.position.z = lerp(webgl.camera.position.z, desired.z, 0.14);
+          webgl.look.set(0, 0.7 + a.y, a.z + 3.2);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project(x, y, z) {
+          const a = state.athlete;
+          return {
+            x: VIEW_W * 0.38 + (z - a.z) * 14 + x * 18,
+            y: VIEW_H * 0.68 - y * 46 - (z - a.z) * 0.4,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#243818");
+          sky.addColorStop(1, "#10180c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#1c3a18";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H * 0.38);
+          ctx.fillStyle = "#8a3030";
+          ctx.fillRect(0, VIEW_H * 0.66, VIEW_W, 28);
+          ctx.fillStyle = COLORS.sand;
+          const pit0 = project(0, 0, PIT_Z0);
+          const pit1 = project(0, 0, PIT_Z1);
+          ctx.fillRect(pit0.x, VIEW_H * 0.66, Math.max(20, pit1.x - pit0.x), 28);
+          BOARD_LAYOUT.forEach((board, index) => {
+            const p = project(0, 0.05, board.z);
+            ctx.fillStyle = index === 0 ? COLORS.gold : index === 1 ? "#9be7ff" : COLORS.danger;
+            ctx.fillRect(p.x - 6, VIEW_H * 0.64, 12, 34);
+          });
+          const p = project(0, state.athlete.y, state.athlete.z);
+          ctx.fillStyle = COLORS.gold;
+          ctx.fillRect(p.x - 6, p.y - 28, 12, 28);
+          ctx.fillStyle = "#c4a07a";
+          ctx.beginPath();
+          ctx.arc(p.x, p.y - 32, 5, 0, Math.PI * 2);
+          ctx.fill();
+          state.particles.forEach((bit) => {
+            const s = project(bit.x, bit.y, bit.z);
+            ctx.globalAlpha = clamp(bit.life * 1.4, 0, 1);
+            ctx.fillStyle = COLORS.sand;
+            ctx.fillRect(s.x, s.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,244,220,0.72)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.score} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.score / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const board = BOARD_LAYOUT[state.nextBoard];
+            const tag = board ? board.label : "착지";
+            sub.textContent = `속도 ${state.athlete.vz.toFixed(1)} · ${tag}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const board = BOARD_LAYOUT[state.nextBoard];
+          if (board) {
+            const p = project(0, 0.2, board.z);
+            hud.save();
+            hud.strokeStyle = "rgba(244,197,109,0.7)";
+            hud.setLineDash([4, 4]);
+            hud.beginPath();
+            hud.arc(p.x, VIEW_H * 0.62, 16, 0, Math.PI * 2);
+            hud.stroke();
+            hud.setLineDash([]);
+            hud.restore();
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.gold;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(244,197,109,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const board = BOARD_LAYOUT[state.nextBoard] || null;
+          return JSON.stringify({
+            coordinate_system: "world units; +z down runway; side camera +x",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            jumpPhase: state.phase,
+            score: state.score,
+            speed: Number(state.athlete.vz.toFixed(3)),
+            wind: Number(state.wind.toFixed(3)),
+            athlete: {
+              z: Number(state.athlete.z.toFixed(2)),
+              y: Number(state.athlete.y.toFixed(2)),
+            },
+            next_board: board ? { id: board.id, z: board.z } : null,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.pointerId = event.pointerId;
+          input.downAt = state.elapsed;
+          if (state.phase !== "approach") input.plantQueued = true;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          event.preventDefault();
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          const held = state.elapsed - input.downAt;
+          input.holding = false;
+          if (state.mode === "running" && (held < 0.2 || state.phase !== "approach" || state.athlete.z > HOP_Z - 3.5)) {
+            input.plantQueued = true;
+          }
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            input.plantQueued = true;
+            return;
+          }
+          if (event.code === "ArrowRight" || event.code === "KeyD" || event.code === "ArrowUp" || event.code === "KeyW") {
+            event.preventDefault();
+            input.run = true;
+          }
+        }
+        function onKeyUp(event) {
+          if (event.code === "ArrowRight" || event.code === "KeyD" || event.code === "ArrowUp" || event.code === "KeyW") {
+            input.run = false;
+          }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.score = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.run = false;
+          input.holding = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

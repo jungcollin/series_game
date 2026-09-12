@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>기상 존데</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #07141c; --accent: #9be7ff; --accent-ink: #07141c; --danger: #ff6b7a; --ink: #e9f7ff; --muted: rgba(233,247,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">기상 존데. 풍선 부력과 밸러스트로 목표 고도의 층을 지나세요. 탭으로 밸러스트, 홀드로 배기. 목표 고도에서 자료를 보내면 클리어. 빙결로 터지거나 실속하면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 짧게 탭해 밸러스트를 버리고 길게 눌러 헬륨을 배기합니다.</p>
+    <main class="stage" aria-label="기상 존데 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="기상 존데" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">고도</p>
+          <p class="hud-value" id="hud-objective">0.4 km</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">빙결 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Weather Sonde</p>
+          <h1>기상 존데</h1>
+          <p class="brief-lead">풍선 부력과 밸러스트로 목표 고도의 층을 지나세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 밸러스트, 홀드로 배기</span></li>
+            <li><strong>클리어</strong><span>목표 고도에서 자료를 보내면 클리어</span></li>
+            <li><strong>실패</strong><span>빙결로 터지거나 실속하면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">존데 손실</p>
+          <h2>상승이 꺾였다</h2>
+          <p class="brief-lead" id="fail-detail">빙결로 터지거나 실속하면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">자료 송신</p>
+          <h2>목표 고도 확보</h2>
+          <p class="brief-lead">권계면 위 목표 층에서 기상관측 자료를 보냈습니다.</p>
+          <p class="hud-sub" id="clear-stat">목표 고도에서 자료를 보내면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const GRACE = 5.15;
+        const TARGET_LO = 18.6;
+        const TARGET_HI = 22.4;
+        const TX_NEED = 2.65;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "weather-sonde",
+          title: "기상 존데",
+          description: "풍선 부력과 밸러스트로 목표 고도의 층을 지나세요.",
+          creator: "collin",
+          genre: "3D radiosonde",
+          clearCondition: "목표 고도에서 자료를 보내면 클리어",
+          failCondition: "빙결로 터지거나 실속하면 실패",
+          controls: "탭으로 밸러스트, 홀드로 배기",
+        };
+        const COLORS = {
+          bg: "#07141c",
+          ink: "#e9f7ff",
+          accent: "#9be7ff",
+          ice: "#c8f4ff",
+          danger: "#ff6b7a",
+          sand: "#c4a06a",
+        };
+        const FAIL_COPY = {
+          burst: "빙결과 팽창으로 풍선이 터졌습니다",
+          stall: "실속해 낙하했습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const LAYERS = [
+          { lo: 0, hi: 6.2, name: "대류권", ice: 0.02, dens: 1 },
+          { lo: 6.2, hi: 9.4, name: "구름층", ice: 0.38, dens: 0.86 },
+          { lo: 9.4, hi: 16.2, name: "빙결층", ice: 1, dens: 0.68 },
+          { lo: 16.2, hi: 18.6, name: "권계면", ice: 0.42, dens: 0.48 },
+          { lo: 18.6, hi: 22.4, name: "목표층", ice: 0.16, dens: 0.34 },
+          { lo: 22.4, hi: 40, name: "성층권", ice: 0.06, dens: 0.2 },
+        ];
+        const CAM2D = {
+          eye: { x: 3.4, y: 2.2, z: 8.2 },
+          right: { x: 0.96, y: 0, z: -0.28 },
+          up: { x: 0.05, y: 0.98, z: 0.18 },
+          fwd: { x: -0.27, y: 0.2, z: -0.94 },
+          focal: 390,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          alt: 0.45,
+          vy: 0.32,
+          helium: 0.74,
+          ballast: 0.44,
+          ice: 0,
+          tx: 0,
+          burst: 0,
+          stall: 0,
+          venting: false,
+          sway: 0,
+          particles: [],
+          flakes: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          pulse: 0,
+          drops: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          holding: false, moved: false, vent: false,
+          downX: 0, downY: 0, downT: 0, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            iceRate: 0.045 + (phase - 1) * 0.028,
+            burstMargin: 1.22 - (phase - 1) * 0.1,
+            ventRate: 0.12 + (phase - 1) * 0.02,
+            targetLo: TARGET_LO + (phase - 1) * 0.15,
+            targetHi: TARGET_HI - (phase - 1) * 0.2,
+            stallLift: 0.08 + (phase - 1) * 0.02,
+          };
+        }
+
+        function layerAt(alt) {
+          for (let i = 0; i < LAYERS.length; i += 1) {
+            if (alt >= LAYERS[i].lo && alt < LAYERS[i].hi) return LAYERS[i];
+          }
+          return LAYERS[LAYERS.length - 1];
+        }
+
+        function massOf() {
+          return 1.02 + state.ballast + state.ice * 1.58;
+        }
+        function liftOf() {
+          return state.helium * 3.18 - massOf();
+        }
+        function volumeOf(alt) {
+          return state.helium * (1 + alt / 13.5);
+        }
+        function strengthOf(alt, params) {
+          return params.burstMargin - alt / 40 - state.ice * 0.24;
+        }
+        function inTarget(alt, params) {
+          return alt >= params.targetLo && alt <= params.targetHi;
+        }
+
+        function burstFx(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const ang = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            const lift = randRange(0.7, 3.6);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(ang) * lift,
+              vy: randRange(0.4, 3.2),
+              vz: Math.sin(ang) * lift,
+              life: randRange(0.3, 0.85),
+              kind,
+              size: randRange(0.04, 0.12),
+            });
+          }
+          if (state.particles.length > 96) state.particles.splice(0, state.particles.length - 96);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) { return null; }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "ballast") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.1);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "vent") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(240, now + 0.08);
+              gain.gain.setValueAtTime(0.018, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+              osc.start(now); osc.stop(now + 0.1);
+            } else if (kind === "tx") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(440, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.2);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.26);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(360, now);
+              osc.frequency.exponentialRampToValueAtTime(920, now + 0.28);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(30, now + 0.22);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+              osc.start(now); osc.stop(now + 0.26);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function dropBallast() {
+          if (state.ballast <= 0.02) {
+            state.message = "밸러스트 없음";
+            state.messageTime = 0.6;
+            return;
+          }
+          state.ballast = clamp(state.ballast - 0.09, 0, 1);
+          state.vy += 0.085;
+          state.drops += 1;
+          playSfx("ballast");
+          const y = visualY();
+          burstFx(0.15, y - 0.6, 0.1, 10, "sand");
+        }
+
+        function visualY() {
+          return state.alt * 0.22;
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.alt = 0.45;
+          state.vy = 0.32;
+          state.helium = 0.74;
+          state.ballast = 0.44;
+          state.ice = 0;
+          state.tx = 0;
+          state.burst = 0;
+          state.stall = 0;
+          state.venting = false;
+          state.sway = 0;
+          state.particles = [];
+          state.flakes = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.pulse = 0;
+          state.drops = 0;
+          input.holding = false;
+          input.vent = false;
+          reseed((Date.now() ^ 0x9e3779b9) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id, stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id, stageTitle: META.title, reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          state.flash = 0.72;
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.68;
+          playSfx("boom");
+          burstFx(0, visualY(), 0, 24, "ice");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function spawnFlake() {
+          if (reducedMotion && state.flakes.length > 10) return;
+          const y = visualY();
+          state.flakes.push({
+            x: randRange(-1.6, 1.6),
+            y: y + randRange(-0.4, 1.2),
+            z: randRange(-1.4, 1.4),
+            vy: randRange(-0.4, 0.2),
+            life: randRange(0.6, 1.4),
+            size: randRange(0.03, 0.07),
+          });
+        }
+
+        function updateAscent(dt, params) {
+          if (state.venting) {
+            state.helium = clamp(state.helium - params.ventRate * dt, 0.12, 1);
+            if (Math.random() < dt * 6) playSfx("vent");
+          }
+          const lift = liftOf();
+          const targetVy = clamp(lift * 0.42, -0.55, 0.72);
+          state.vy = lerp(state.vy, targetVy, 1 - Math.exp(-dt * 1.8));
+          state.alt = clamp(state.alt + state.vy * dt, 0, 34);
+          state.sway = Math.sin(state.elapsed * 0.7) * 0.18 + Math.sin(state.elapsed * 1.6) * 0.06;
+        }
+
+        function updateIce(dt, params) {
+          const layer = layerAt(state.alt);
+          const dwell = state.vy < 0.2 ? 1.45 : 0.72;
+          const gain = layer.ice * params.iceRate * dwell;
+          const melt = state.venting ? 0.035 : 0.01;
+          if (state.elapsed >= GRACE) state.ice = clamp(state.ice + gain * dt - melt * dt, 0, 1);
+          else state.ice = clamp(state.ice - 0.02 * dt, 0, 1);
+          if (layer.ice > 0.5 && Math.random() < dt * 10) spawnFlake();
+        }
+
+        function updateStress(dt, params) {
+          if (state.elapsed < GRACE) {
+            state.burst = Math.max(0, state.burst - dt);
+            state.stall = Math.max(0, state.stall - dt);
+            return;
+          }
+          const vol = volumeOf(state.alt);
+          const str = strengthOf(state.alt, params);
+          if (vol > str) state.burst += dt * (vol - str) * 1.7;
+          else state.burst = Math.max(0, state.burst - dt * 0.35);
+          const lift = liftOf();
+          if (lift < params.stallLift && state.ice > 0.28 && state.vy < 0.06) {
+            state.stall += dt * 0.85;
+          } else if (state.alt < 2.2 && state.vy < -0.04 && state.elapsed > 10) {
+            state.stall += dt * 0.7;
+          } else {
+            state.stall = Math.max(0, state.stall - dt * 0.3);
+          }
+          if (state.burst >= 1) failStage("burst");
+          else if (state.stall >= 1) failStage("stall");
+        }
+
+        function updateTx(dt, params) {
+          if (inTarget(state.alt, params) && state.helium > 0.18 && state.ice < 0.92) {
+            state.tx += dt;
+            if (state.tx >= TX_NEED * 0.5 && state.messageTime <= 0) {
+              state.message = "송신 중";
+              state.messageTime = 0.4;
+            }
+            if (state.tx >= TX_NEED) {
+              playSfx("tx");
+              clearStage();
+            }
+          } else {
+            state.tx = Math.max(0, state.tx - dt * 0.35);
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            p.vy -= 1.6 * dt;
+            p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          state.flakes.forEach((f) => {
+            f.y += f.vy * dt;
+            f.x += Math.sin(state.elapsed * 3 + f.z) * dt * 0.2;
+            f.life -= dt;
+          });
+          state.flakes = state.flakes.filter((f) => f.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.5);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.pulse += dt;
+          if (input.holding && performance.now() - input.downT > 200) input.vent = true;
+          state.venting = Boolean(input.vent || input.up);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateAscent(dt, params);
+          updateIce(dt, params);
+          updateStress(dt, params);
+          if (state.mode !== "running") return;
+          updateTx(dt, params);
+          updateParticles(dt);
+          if (state.mode !== "running") return;
+          if (state.elapsed >= DURATION) failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `고도 ${state.alt.toFixed(1)}km · 빙결 ${(state.ice * 100).toFixed(0)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · ${state.alt.toFixed(1)}km`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) { return null; }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x07141c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x07141c);
+          scene.fog = new THREE.Fog(0x07141c, 8, 28);
+
+          const camera = new THREE.PerspectiveCamera(46, VIEW_W / VIEW_H, 0.1, 80);
+          camera.position.set(2.2, 1.4, 6.4);
+
+          scene.add(new THREE.AmbientLight(0x244056, 0.5));
+          scene.add(new THREE.HemisphereLight(0x9be7ff, 0x1a3040, 0.55));
+          const sun = new THREE.DirectionalLight(0xfff0d0, 0.55);
+          sun.position.set(-6, 14, 8);
+          scene.add(sun);
+          const lamp = new THREE.PointLight(0x9be7ff, 0.9, 14);
+          lamp.position.set(0.4, 2.2, 1.2);
+          scene.add(lamp);
+
+          const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+          const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 18);
+          const sphGeo = new THREE.SphereGeometry(1, 18, 14);
+          const coneGeo = new THREE.ConeGeometry(1, 1, 8);
+          const sandMat = new THREE.MeshStandardMaterial({ color: 0xc4a06a, roughness: 0.88, metalness: 0.04 });
+          const rockMat = new THREE.MeshStandardMaterial({ color: 0x6a5a48, roughness: 0.86, metalness: 0.06 });
+          const latexMat = new THREE.MeshStandardMaterial({
+            color: 0xd8f6ff, roughness: 0.35, metalness: 0.08, emissive: 0x1a4050, emissiveIntensity: 0.22,
+          });
+          const iceMat = new THREE.MeshStandardMaterial({
+            color: 0x9be7ff, roughness: 0.28, metalness: 0.12, emissive: 0x3a80a0, emissiveIntensity: 0.3,
+          });
+          const crateMat = new THREE.MeshStandardMaterial({ color: 0x8a6a3a, roughness: 0.7, metalness: 0.12 });
+          const metalMat = new THREE.MeshStandardMaterial({
+            color: 0x8aa4b4, roughness: 0.4, metalness: 0.55, emissive: 0x102028, emissiveIntensity: 0.12,
+          });
+          const cloudMat = new THREE.MeshStandardMaterial({
+            color: 0xc8e8f8, roughness: 0.9, metalness: 0.02, emissive: 0x203848, emissiveIntensity: 0.08,
+          });
+          const darkCloud = new THREE.MeshStandardMaterial({
+            color: 0x6a889c, roughness: 0.92, metalness: 0.04, emissive: 0x102030, emissiveIntensity: 0.1,
+          });
+
+          const ground = new THREE.Mesh(new THREE.CircleGeometry(22, 28), sandMat);
+          ground.rotation.x = -Math.PI / 2;
+          ground.position.y = -0.2;
+          scene.add(ground);
+          for (let i = 0; i < 9; i += 1) {
+            const a = (i / 9) * Math.PI * 2;
+            const mtn = new THREE.Mesh(coneGeo, rockMat);
+            const s = 1.4 + (i % 3) * 0.7;
+            mtn.scale.set(s * 1.4, s * 2.2, s * 1.4);
+            mtn.position.set(Math.cos(a) * 10.5, s * 0.9, Math.sin(a) * 10.5 - 2);
+            scene.add(mtn);
+          }
+          const pad = new THREE.Mesh(cylGeo, rockMat);
+          pad.scale.set(1.6, 0.12, 1.6);
+          pad.position.y = 0.02;
+          scene.add(pad);
+          const tower = new THREE.Mesh(boxGeo, metalMat);
+          tower.scale.set(0.12, 2.4, 0.12);
+          tower.position.set(1.15, 1.2, 0.4);
+          scene.add(tower);
+          const tower2 = tower.clone();
+          tower2.position.set(-1.1, 1.2, 0.5);
+          scene.add(tower2);
+          const boom = new THREE.Mesh(boxGeo, metalMat);
+          boom.scale.set(2.4, 0.08, 0.08);
+          boom.position.set(0, 2.35, 0.45);
+          scene.add(boom);
+          const hut = new THREE.Mesh(boxGeo, crateMat);
+          hut.scale.set(1.6, 0.7, 1.1);
+          hut.position.set(3.4, 0.35, 2.2);
+          scene.add(hut);
+          const roof = new THREE.Mesh(coneGeo, rockMat);
+          roof.scale.set(1.2, 0.45, 1.2);
+          roof.position.set(3.4, 0.9, 2.2);
+          scene.add(roof);
+          const dish = new THREE.Mesh(cylGeo, metalMat);
+          dish.scale.set(0.45, 0.05, 0.45);
+          dish.position.set(4.1, 1.15, 1.6);
+          dish.rotation.x = 0.7;
+          scene.add(dish);
+          const mast = new THREE.Mesh(cylGeo, metalMat);
+          mast.scale.set(0.05, 1.8, 0.05);
+          mast.position.set(4.1, 0.9, 1.6);
+          scene.add(mast);
+          const windsockPole = new THREE.Mesh(cylGeo, metalMat);
+          windsockPole.scale.set(0.04, 1.5, 0.04);
+          windsockPole.position.set(-2.4, 0.75, 1.8);
+          scene.add(windsockPole);
+          const windsock = new THREE.Mesh(coneGeo, iceMat);
+          windsock.scale.set(0.18, 0.55, 0.18);
+          windsock.rotation.z = Math.PI / 2;
+          windsock.position.set(-2.05, 1.45, 1.8);
+          scene.add(windsock);
+          const crates = [];
+          for (let i = 0; i < 4; i += 1) {
+            const c = new THREE.Mesh(boxGeo, crateMat);
+            c.scale.set(0.38, 0.28, 0.32);
+            c.position.set(-3.2 + i * 0.42, 0.12, 2.4);
+            c.rotation.y = i * 0.2;
+            scene.add(c);
+            crates.push(c);
+          }
+          const fenceGeo = new THREE.BoxGeometry(0.06, 0.55, 0.06);
+          for (let i = 0; i < 10; i += 1) {
+            const post = new THREE.Mesh(fenceGeo, metalMat);
+            post.position.set(-5 + i * 1.1, 0.2, 4.2);
+            scene.add(post);
+          }
+          const fenceRail = new THREE.Mesh(boxGeo, metalMat);
+          fenceRail.scale.set(10.2, 0.04, 0.04);
+          fenceRail.position.set(0, 0.38, 4.2);
+          scene.add(fenceRail);
+          const tank = new THREE.Mesh(cylGeo, metalMat);
+          tank.scale.set(0.38, 0.7, 0.38);
+          tank.position.set(2.2, 0.35, 2.8);
+          scene.add(tank);
+          const tankCap = new THREE.Mesh(sphGeo, metalMat);
+          tankCap.scale.setScalar(0.38);
+          tankCap.position.set(2.2, 0.72, 2.8);
+          scene.add(tankCap);
+          const hose = new THREE.Mesh(cylGeo, crateMat);
+          hose.scale.set(0.04, 1.1, 0.04);
+          hose.rotation.z = 1.05;
+          hose.position.set(1.55, 0.22, 1.6);
+          scene.add(hose);
+          const van = new THREE.Mesh(boxGeo, metalMat);
+          van.scale.set(1.8, 0.7, 0.9);
+          van.position.set(-4.2, 0.4, -1.6);
+          scene.add(van);
+          const vanCab = new THREE.Mesh(boxGeo, iceMat);
+          vanCab.scale.set(0.7, 0.5, 0.88);
+          vanCab.position.set(-5.2, 0.5, -1.6);
+          scene.add(vanCab);
+          const radarHut = new THREE.Mesh(cylGeo, rockMat);
+          radarHut.scale.set(0.7, 0.5, 0.7);
+          radarHut.position.set(5.4, 0.25, -0.8);
+          scene.add(radarHut);
+
+          const balloon = new THREE.Mesh(sphGeo, latexMat);
+          balloon.scale.set(1.15, 1.32, 1.15);
+          scene.add(balloon);
+          const iceShell = new THREE.Mesh(sphGeo, iceMat);
+          iceShell.scale.set(1.18, 1.36, 1.18);
+          iceShell.visible = false;
+          scene.add(iceShell);
+          const neck = new THREE.Mesh(cylGeo, latexMat);
+          neck.scale.set(0.12, 0.35, 0.12);
+          scene.add(neck);
+          const payload = new THREE.Mesh(boxGeo, crateMat);
+          payload.scale.set(0.32, 0.22, 0.28);
+          scene.add(payload);
+          const antenna = new THREE.Mesh(cylGeo, metalMat);
+          antenna.scale.set(0.02, 0.45, 0.02);
+          scene.add(antenna);
+          const chute = new THREE.Mesh(coneGeo, metalMat);
+          chute.scale.set(0.28, 0.12, 0.28);
+          scene.add(chute);
+          const string = new THREE.Mesh(cylGeo, metalMat);
+          string.scale.set(0.012, 0.7, 0.012);
+          scene.add(string);
+          const boomArm = new THREE.Mesh(boxGeo, metalMat);
+          boomArm.scale.set(0.42, 0.03, 0.03);
+          scene.add(boomArm);
+          const sensor = new THREE.Mesh(cylGeo, iceMat);
+          sensor.scale.set(0.04, 0.1, 0.04);
+          scene.add(sensor);
+          const hygro = new THREE.Mesh(sphGeo, metalMat);
+          hygro.scale.setScalar(0.05);
+          scene.add(hygro);
+          const fins = [];
+          for (let i = 0; i < 4; i += 1) {
+            const fin = new THREE.Mesh(boxGeo, latexMat);
+            fin.scale.set(0.02, 0.28, 0.12);
+            scene.add(fin);
+            fins.push(fin);
+          }
+
+          const clouds = [];
+          for (let band = 0; band < 5; band += 1) {
+            const y = 1.4 + band * 0.95;
+            for (let i = 0; i < 7; i += 1) {
+              const puff = new THREE.Mesh(sphGeo, band % 2 ? darkCloud : cloudMat);
+              const r = 2.4 + band * 0.35;
+              const a = (i / 7) * Math.PI * 2 + band * 0.4;
+              puff.scale.set(1.3 + (i % 3) * 0.4, 0.45 + band * 0.08, 1.1);
+              puff.position.set(Math.cos(a) * r, y, Math.sin(a) * r - 1.2);
+              scene.add(puff);
+              clouds.push(puff);
+            }
+          }
+
+          const hazeCount = reducedMotion ? 40 : 130;
+          const hazePos = new Float32Array(hazeCount * 3);
+          for (let i = 0; i < hazeCount; i += 1) {
+            hazePos[i * 3] = randRange(-8, 8);
+            hazePos[i * 3 + 1] = randRange(0.2, 8);
+            hazePos[i * 3 + 2] = randRange(-8, 6);
+          }
+          const hazeGeo = new THREE.BufferGeometry();
+          hazeGeo.setAttribute("position", new THREE.BufferAttribute(hazePos, 3));
+          const haze = new THREE.Points(hazeGeo, new THREE.PointsMaterial({
+            color: 0x9be7ff, size: 0.07, transparent: true, opacity: 0.35, depthWrite: false,
+          }));
+          scene.add(haze);
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0x9be7ff, transparent: true, opacity: 0.9, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, sun, lamp, balloon, iceShell, neck, payload, antenna, chute, string,
+            clouds, haze, latexMat, iceMat, windsock, boomArm, sensor, hygro, fins,
+            particleGeo, particleMat, particleMeshes: [], flakeMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const y = visualY();
+          const x = state.sway;
+          webgl.balloon.position.set(x, y + 1.15, 0);
+          const swell = 1 + state.helium * 0.12 + state.alt * 0.012;
+          webgl.balloon.scale.set(1.15 * swell, 1.32 * swell, 1.15 * swell);
+          webgl.iceShell.position.copy(webgl.balloon.position);
+          webgl.iceShell.scale.set(1.18 * swell, 1.36 * swell, 1.18 * swell);
+          webgl.iceShell.visible = state.ice > 0.12;
+          webgl.iceShell.material.opacity = 1;
+          webgl.iceShell.material.emissiveIntensity = 0.2 + state.ice * 0.5;
+          webgl.neck.position.set(x, y + 0.42, 0);
+          webgl.string.position.set(x, y + 0.05, 0);
+          webgl.payload.position.set(x, y - 0.42, 0);
+          webgl.antenna.position.set(x + 0.12, y - 0.18, 0.05);
+          webgl.chute.position.set(x, y - 0.62, 0);
+          webgl.boomArm.position.set(x + 0.22, y - 0.4, 0);
+          webgl.sensor.position.set(x + 0.42, y - 0.4, 0);
+          webgl.hygro.position.set(x + 0.42, y - 0.48, 0);
+          webgl.fins.forEach((fin, i) => {
+            const a = (i / 4) * Math.PI * 2 + state.elapsed * 0.4;
+            fin.position.set(x + Math.cos(a) * 0.22, y + 0.55, Math.sin(a) * 0.22);
+            fin.rotation.y = a;
+          });
+          webgl.windsock.rotation.y = Math.sin(state.elapsed * 1.4) * 0.35;
+          webgl.lamp.position.set(x, y + 1.3, 1.1);
+          webgl.lamp.intensity = 0.7 + state.tx * 0.35 + (state.venting ? 0.25 : 0);
+          webgl.clouds.forEach((c, i) => {
+            c.position.y = (1.2 + (i % 5) * 0.9) - y * 0.15;
+            c.rotation.y = state.elapsed * 0.03 + i;
+          });
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.material.color.setHex(p.kind === "sand" ? 0xc4a06a : p.kind === "ice" ? 0x9be7ff : 0xe9f7ff);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+          while (webgl.flakeMeshes.length < state.flakes.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.flakeMeshes.push(mesh);
+          }
+          webgl.flakeMeshes.forEach((mesh, index) => {
+            const f = state.flakes[index];
+            if (!f) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(f.x, f.y, f.z);
+            mesh.scale.setScalar(f.size / 0.05);
+            mesh.material.color.setHex(0xc8f4ff);
+            mesh.material.opacity = clamp(f.life, 0, 1);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const y = visualY();
+          const shakeX = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          const shakeY = state.shake > 0 ? (Math.random() - 0.5) * state.shake * 0.18 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.35) * 0.12;
+          webgl.camera.position.set(2.15 + sway + shakeX, y + 0.55 + shakeY, 6.2);
+          webgl.look.set(state.sway, y + 0.7, 0);
+          webgl.camera.lookAt(webgl.look);
+          const fogFar = lerp(26, 14, clamp(state.ice, 0, 1));
+          webgl.scene.fog.far = fogFar;
+          const sky = state.alt < 8 ? 0x07141c : state.alt < 16 ? 0x0a2030 : 0x081018;
+          webgl.scene.background.setHex(sky);
+          webgl.scene.fog.color.setHex(sky);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          const ey = CAM2D.eye.y + visualY() * 0.15;
+          const ex = x - CAM2D.eye.x, ey2 = y - ey, ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey2 * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey2 * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey2 * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.55 - ly * w };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, state.alt > 16 ? "#081018" : "#12344a");
+          sky.addColorStop(1, "#07141c");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          LAYERS.forEach((layer, i) => {
+            const t = clamp((layer.lo - (state.alt - 8)) / 16, 0, 1);
+            const y = VIEW_H * t;
+            ctx.fillStyle = i === 2 ? "rgba(155,231,255,0.12)" : "rgba(200,232,248,0.08)";
+            ctx.fillRect(0, y, VIEW_W, 28);
+            ctx.fillStyle = "rgba(233,247,255,0.45)";
+            ctx.font = "700 11px Trebuchet MS, sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText(layer.name, VIEW_W - 18, y + 16);
+          });
+          const b = projectToScreen(state.sway, visualY() + 1.1, 0);
+          const r = 46 + state.helium * 18 + state.alt * 0.6;
+          ctx.fillStyle = state.ice > 0.2 ? "#c8f4ff" : "#9be7ff";
+          ctx.beginPath();
+          ctx.ellipse(b.x, b.y, r * 0.72, r, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#8a6a3a";
+          ctx.fillRect(b.x - 10, b.y + r - 4, 20, 16);
+          ctx.strokeStyle = "#8aa4b4";
+          ctx.beginPath();
+          ctx.moveTo(b.x, b.y + r * 0.7);
+          ctx.lineTo(b.x, b.y + r + 8);
+          ctx.stroke();
+          ctx.fillStyle = "#c4a06a";
+          ctx.fillRect(0, VIEW_H * 0.82, VIEW_W, VIEW_H * 0.18);
+          ctx.fillStyle = "#6a5a48";
+          for (let i = 0; i < 6; i += 1) {
+            const mx = 40 + i * 70;
+            ctx.beginPath();
+            ctx.moveTo(mx, VIEW_H * 0.82);
+            ctx.lineTo(mx + 28, VIEW_H * 0.7);
+            ctx.lineTo(mx + 56, VIEW_H * 0.82);
+            ctx.fill();
+          }
+          ctx.strokeStyle = "rgba(155,231,255,0.35)";
+          ctx.lineWidth = 1;
+          for (let i = 0; i < 8; i += 1) {
+            const gy = VIEW_H * 0.15 + i * 28;
+            ctx.beginPath();
+            ctx.moveTo(18, gy);
+            ctx.lineTo(80, gy);
+            ctx.stroke();
+          }
+          ctx.fillStyle = "#e9f7ff";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText(`He ${(state.helium * 100).toFixed(0)}%  밸러스트 ${(state.ballast * 100).toFixed(0)}%`, 22, VIEW_H - 36);
+          ctx.fillStyle = "rgba(233,247,255,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.alt.toFixed(1)} km`;
+          if (meter) meter.style.width = `${clamp(state.ice, 0, 1) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          const layer = layerAt(state.alt);
+          if (sub) sub.textContent = `빙결 ${(state.ice * 100).toFixed(0)}% · ${layer.name}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 108);
+            hud.restore();
+          }
+          if (inTarget(state.alt, difficultyAt(state.elapsed))) {
+            hud.save();
+            hud.globalAlpha = 0.85;
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "800 15px Trebuchet MS, sans-serif";
+            hud.fillText(`송신 ${(clamp(state.tx / TX_NEED, 0, 1) * 100).toFixed(0)}%`, VIEW_W / 2, VIEW_H - 26);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(155,231,255,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const by = visualY();
+          return JSON.stringify({
+            coordinate_system: "launch pad y=0; balloon rises with alt km; camera follows payload",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            alt: Number(state.alt.toFixed(2)),
+            vy: Number(state.vy.toFixed(3)),
+            helium: Number(state.helium.toFixed(3)),
+            ballast: Number(state.ballast.toFixed(3)),
+            ice: Number(state.ice.toFixed(3)),
+            lift: Number(liftOf().toFixed(3)),
+            tx: Number(state.tx.toFixed(3)),
+            burst: Number(state.burst.toFixed(3)),
+            stall: Number(state.stall.toFixed(3)),
+            distPad: Number(dist3(state.sway, by, 0, 0, 0, 0).toFixed(2)),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.moved = false;
+          input.vent = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.downT = performance.now();
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          if (Math.hypot(dx, dy) > 14) input.moved = true;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            input.vent = false;
+            return;
+          }
+          const dur = performance.now() - input.downT;
+          if (state.mode === "running" && !input.vent && dur < 260) dropBallast();
+          input.holding = false;
+          input.vent = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") startStage();
+            else {
+              input.holding = true;
+              input.downT = performance.now();
+              input.vent = false;
+            }
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") {
+            const dur = performance.now() - input.downT;
+            if (state.mode === "running" && !input.vent && dur < 260) dropBallast();
+            input.holding = false;
+            input.vent = false;
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.alt = 20;
+            state.tx = TX_NEED;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          Object.keys(input).forEach((key) => { if (typeof input[key] === "boolean") input[key] = false; });
+          input.holding = false;
+          input.vent = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>에어록</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #0c1018; --accent: #7ee0ff; --accent-ink: #0c1018; --danger: #ff6b7a; --ink: #e8f6ff; --muted: rgba(232,246,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">에어록. 두 해치를 연동해 압력을 맞추고 잔해를 빼세요. 탭으로 해치, 홀드로 펌프, 드래그로 잔해. 승무원 3명을 안으로 들이면 클리어. 해치가 동시에 열리거나 폭발 감압되면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 해치를 탭하고 펌프를 길게 누르며 잔해를 드래그합니다.</p>
+    <main class="stage" aria-label="에어록 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="에어록" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">압력</p>
+          <p class="hud-value" id="hud-objective">1.00</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">48.0</p>
+          <p class="hud-sub" id="hud-sub">해치 닫힘</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Airlock Cycle</p>
+          <h1>에어록</h1>
+          <p class="brief-lead">두 해치를 연동해 압력을 맞추고 잔해를 빼세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 해치, 홀드로 펌프, 드래그로 잔해</span></li>
+            <li><strong>클리어</strong><span>승무원 3명을 안으로 들이면 클리어</span></li>
+            <li><strong>실패</strong><span>해치가 동시에 열리거나 폭발 감압되면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">감압 사고</p>
+          <h2>연동이 깨졌다</h2>
+          <p class="brief-lead" id="fail-detail">해치가 동시에 열리거나 폭발 감압되면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">승선 완료</p>
+          <h2>세 명 안전</h2>
+          <p class="brief-lead">승무원 세 명을 서식 모듈로 들였습니다.</p>
+          <p class="hud-sub" id="clear-stat">승무원 3명을 안으로 들이면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 48;
+        const GOAL = 3;
+        const HOLD_MS = 150;
+        const TAP_MS = 280;
+        const TAP_PX = 16;
+        const OUTER_X = -3.15;
+        const INNER_X = 3.15;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "airlock-cycle",
+          title: "에어록",
+          description: "두 해치를 연동해 압력을 맞추고 잔해를 빼세요.",
+          creator: "collin",
+          genre: "3D airlock",
+          clearCondition: "승무원 3명을 안으로 들이면 클리어",
+          failCondition: "해치가 동시에 열리거나 폭발 감압되면 실패",
+          controls: "탭으로 해치, 홀드로 펌프, 드래그로 잔해",
+        };
+        const COLORS = {
+          bg: "#0c1018",
+          ink: "#e8f6ff",
+          accent: "#7ee0ff",
+          brass: "#c4a056",
+          suit: "#e07a3a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          both_hatches: "바깥 해치와 안쪽 해치가 동시에 열렸습니다",
+          blowout: "압력 차로 폭발 감압이 일어났습니다",
+          time_limit: "제한 시간 48초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const PIPE_RUNS = [
+          { y: 1.35, z: -1.15, s: 1 },
+          { y: 1.42, z: 1.2, s: 0.9 },
+          { y: -1.05, z: -0.85, s: 0.8 },
+          { y: -1.12, z: 1.05, s: 1.05 },
+        ];
+        const PANEL_POS = [
+          { x: -1.6, y: 0.8, z: -1.55 },
+          { x: 1.4, y: 0.9, z: -1.52 },
+          { x: -0.2, y: 1.55, z: 0.2 },
+          { x: 0.4, y: -1.35, z: 1.4 },
+        ];
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          pressure: 1,
+          selected: "outer",
+          outer: { open: 0, jammed: false, target: 0 },
+          inner: { open: 0, jammed: false, target: 0 },
+          pumping: 0,
+          rescued: 0,
+          crew: [],
+          debris: [],
+          sparks: [],
+          mist: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          heldDebris: null,
+          impeller: 0,
+        };
+        const input = {
+          left: false, right: false, pump: false,
+          dragging: false, holding: false, moved: false,
+          pointerId: null, downX: 0, downY: 0, downAt: 0,
+          x: 0, y: 0, nx: 0, ny: 0,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            pumpRate: phase === 1 ? 0.24 : phase === 2 ? 0.175 : 0.135,
+            jamRadius: phase === 1 ? 0.42 : phase === 2 ? 0.52 : 0.62,
+            blowDelta: phase === 1 ? 0.42 : phase === 2 ? 0.3 : 0.2,
+            debrisN: phase === 1 ? 3 : phase === 2 ? 5 : 7,
+            jamChance: phase === 1 ? 0.35 : phase === 2 ? 0.7 : 1,
+            cavitation: phase === 1 ? 0 : phase === 2 ? 0.08 : 0.2,
+            drift: 0.18 + difficulty * 0.28,
+          };
+        }
+
+        function hatchLabel() {
+          const o = state.outer.open > 0.2;
+          const i = state.inner.open > 0.2;
+          if (o && i) return "양쪽 열림";
+          if (o) return "바깥 열림";
+          if (i) return "안쪽 열림";
+          return "해치 닫힘";
+        }
+
+        function spawnCrew() {
+          state.crew = [0, 1, 2].map((id) => ({
+            id,
+            loc: "outside",
+            x: OUTER_X - 1.4 - id * 0.55,
+            y: -0.15 + (id % 2) * 0.2,
+            z: -0.35 + id * 0.35,
+            walk: 0,
+            bob: randRange(0, Math.PI * 2),
+          }));
+        }
+
+        function spawnDebris(count) {
+          const kinds = ["panel", "tank", "wrench", "crate"];
+          while (state.debris.length < count) {
+            state.debris.push({
+              id: state.debris.length,
+              kind: kinds[state.debris.length % kinds.length],
+              x: randRange(-1.6, 1.6),
+              y: randRange(-0.7, 0.9),
+              z: randRange(-0.9, 0.9),
+              vx: randRange(-0.25, 0.25),
+              vy: randRange(-0.18, 0.18),
+              vz: randRange(-0.2, 0.2),
+              r: 0.22 + (state.debris.length % 3) * 0.05,
+              held: false,
+              gone: false,
+              spin: randRange(0, Math.PI * 2),
+            });
+          }
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(8, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.sparks.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.6, 2.8),
+              vy: randRange(0.4, 2.4),
+              vz: Math.sin(angle) * randRange(0.6, 2.8),
+              life: randRange(0.3, 0.75),
+              kind,
+              size: randRange(0.04, 0.1),
+            });
+          }
+          if (state.sparks.length > 70) state.sparks.splice(0, state.sparks.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "hatch") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.12);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "pump") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(160, now + 0.08);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "crew") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(680, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(1200, now + 0.26);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(24, now + 0.3);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.pressure = 1;
+          state.selected = "outer";
+          state.outer = { open: 0, jammed: false, target: 0 };
+          state.inner = { open: 0, jammed: false, target: 0 };
+          state.pumping = 0;
+          state.rescued = 0;
+          state.sparks = [];
+          state.mist = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "";
+          state.messageTime = 0;
+          state.failReason = "";
+          state.heldDebris = null;
+          state.impeller = 0;
+          input.holding = false;
+          input.dragging = false;
+          reseed((Date.now() ^ 0xA11C) >>> 0);
+          spawnCrew();
+          state.debris = [];
+          spawnDebris(3);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.78;
+          playSfx("boom");
+          burst(0, 0.2, 0, 24, "vent");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function debrisNear(x, y, z, radius) {
+          let best = null;
+          let bestD = radius;
+          state.debris.forEach((piece) => {
+            if (piece.gone) return;
+            const d = dist3(piece.x, piece.y, piece.z, x, y, z);
+            if (d < bestD) { bestD = d; best = piece; }
+          });
+          return best;
+        }
+
+        function pumpJam() {
+          const piece = debrisNear(0, 0.15, 0, 0.85);
+          return piece ? 1 - clamp(dist3(piece.x, piece.y, piece.z, 0, 0.15, 0) / 0.85, 0, 1) : 0;
+        }
+
+        function hatchBlocked(which, params) {
+          const hx = which === "outer" ? OUTER_X : INNER_X;
+          const piece = debrisNear(hx, 0, 0, params.jamRadius + 0.15);
+          return piece;
+        }
+
+        function setHatch(which, wantOpen, params) {
+          const hatch = which === "outer" ? state.outer : state.inner;
+          const other = which === "outer" ? state.inner : state.outer;
+          const outsideP = which === "outer" ? 0 : 1;
+          state.selected = which;
+          if (wantOpen) {
+            if (other.open > 0.22 || other.jammed) {
+              hatch.target = 1;
+              hatch.open = Math.max(hatch.open, 0.35);
+              failStage("both_hatches");
+              return;
+            }
+            if (Math.abs(state.pressure - outsideP) > params.blowDelta) {
+              failStage("blowout");
+              return;
+            }
+            hatch.jammed = false;
+            hatch.target = 1;
+            playSfx("hatch");
+            state.message = which === "outer" ? "바깥 해치 개방" : "안쪽 해치 개방";
+            state.messageTime = 0.7;
+          } else {
+            const block = hatchBlocked(which, params);
+            if (block && random() < params.jamChance) {
+              hatch.jammed = true;
+              hatch.target = 0.34;
+              hatch.open = Math.max(hatch.open, 0.3);
+              state.message = "잔해가 해치를 막음";
+              state.messageTime = 0.85;
+              playSfx("hatch");
+              burst(block.x, block.y, block.z, 8, "spark");
+              return;
+            }
+            hatch.jammed = false;
+            hatch.target = 0;
+            playSfx("hatch");
+            state.message = which === "outer" ? "바깥 해치 폐쇄" : "안쪽 해치 폐쇄";
+            state.messageTime = 0.55;
+          }
+        }
+
+        function toggleHatch(which, params) {
+          const hatch = which === "outer" ? state.outer : state.inner;
+          const wantOpen = hatch.open < 0.5 && hatch.target < 0.5;
+          setHatch(which, wantOpen, params);
+        }
+
+        function worldFromPointer() {
+          const nx = input.nx;
+          const ny = input.ny;
+          return {
+            x: (nx - 0.5) * 6.6,
+            y: (0.55 - ny) * 3.2,
+            z: 0.2,
+          };
+        }
+
+        function pickDebris() {
+          const w = worldFromPointer();
+          let best = null;
+          let bestD = 0.7;
+          state.debris.forEach((piece) => {
+            if (piece.gone) return;
+            const d = dist3(piece.x, piece.y, piece.z, w.x, w.y, w.z);
+            if (d < bestD) { bestD = d; best = piece; }
+          });
+          return best;
+        }
+
+        function pickHatch() {
+          const w = worldFromPointer();
+          const outerD = Math.hypot(w.x - OUTER_X, w.y, w.z);
+          const innerD = Math.hypot(w.x - INNER_X, w.y, w.z);
+          if (outerD < 1.55 && outerD < innerD) return "outer";
+          if (innerD < 1.55) return "inner";
+          if (input.nx < 0.28) return "outer";
+          if (input.nx > 0.72) return "inner";
+          return null;
+        }
+
+        function updateHatches(dt) {
+          ["outer", "inner"].forEach((key) => {
+            const hatch = state[key];
+            hatch.open = lerp(hatch.open, hatch.target, Math.min(1, dt * 4.2));
+            if (hatch.jammed) hatch.open = Math.max(hatch.open, 0.28);
+          });
+          if (state.outer.open > 0.28 && state.inner.open > 0.28) failStage("both_hatches");
+        }
+
+        function updatePressure(dt, params) {
+          const wantPump = input.pump || (input.holding && !state.heldDebris);
+          state.pumping = lerp(state.pumping, wantPump ? 1 : 0, Math.min(1, dt * 8));
+          const jam = pumpJam();
+          const rate = params.pumpRate * (1 - jam * 0.78);
+          const target = state.selected === "inner" ? 1 : 0;
+          if (state.pumping > 0.35) {
+            state.pressure = lerp(state.pressure, target, Math.min(1, dt * rate * 3.4));
+            state.impeller += dt * (8 + state.pumping * 10);
+            if (jam > 0.55 && params.cavitation > 0) {
+              state.pressure += (random() - 0.5) * params.cavitation * dt * 8;
+              state.pressure = clamp(state.pressure, 0, 1.08);
+              if (random() < 0.08) burst(0, 0.2, 0, 4, "spark");
+            }
+            if (random() < 0.04) playSfx("pump");
+          }
+          if (state.outer.open > 0.55) {
+            state.pressure = lerp(state.pressure, 0, Math.min(1, dt * 2.8));
+          }
+          if (state.inner.open > 0.55) {
+            state.pressure = lerp(state.pressure, 1, Math.min(1, dt * 2.8));
+          }
+          state.pressure = clamp(state.pressure, 0, 1.08);
+          if (state.pressure > 1.02 && (state.outer.open > 0.4)) failStage("blowout");
+        }
+
+        function updateDebris(dt, params) {
+          if (state.heldDebris) {
+            const w = worldFromPointer();
+            const piece = state.heldDebris;
+            piece.x = lerp(piece.x, clamp(w.x, -2.6, 2.6), Math.min(1, dt * 10));
+            piece.y = lerp(piece.y, clamp(w.y, -1.1, 1.2), Math.min(1, dt * 10));
+            piece.z = lerp(piece.z, clamp(w.z, -1.1, 1.1), Math.min(1, dt * 8));
+            piece.vx = 0; piece.vy = 0; piece.vz = 0;
+          }
+          state.debris.forEach((piece) => {
+            if (piece.gone || piece === state.heldDebris) return;
+            piece.vx += (random() - 0.5) * params.drift * dt;
+            piece.vy += (random() - 0.5) * params.drift * dt;
+            piece.vz += (random() - 0.5) * params.drift * dt;
+            const suck = (state.outer.open * -0.9 + state.inner.open * 0.7) * (0.4 + (1 - state.pressure));
+            piece.vx += suck * dt;
+            piece.x += piece.vx * dt;
+            piece.y += piece.vy * dt;
+            piece.z += piece.vz * dt;
+            piece.spin += dt * 1.2;
+            piece.x = clamp(piece.x, -2.85, 2.85);
+            piece.y = clamp(piece.y, -1.2, 1.35);
+            piece.z = clamp(piece.z, -1.25, 1.25);
+            if (piece.x < -2.7) piece.vx *= -0.4;
+            if (piece.x > 2.7) piece.vx *= -0.4;
+            if (state.outer.open > 0.7 && piece.x < -2.35) {
+              piece.gone = true;
+              burst(piece.x, piece.y, piece.z, 10, "vent");
+              state.message = "잔해 배출";
+              state.messageTime = 0.55;
+            }
+          });
+          state.debris = state.debris.filter((piece) => !piece.gone || piece === state.heldDebris);
+          spawnDebris(params.debrisN);
+        }
+
+        function updateCrew(dt) {
+          state.crew.forEach((person) => {
+            person.bob += dt * 2.2;
+            if (person.loc === "outside") {
+              person.x = lerp(person.x, OUTER_X - 1.2, Math.min(1, dt * 0.8));
+              person.y = Math.sin(person.bob) * 0.08;
+              if (state.outer.open > 0.75 && state.pressure < 0.18) {
+                person.loc = "entering";
+                person.walk = 0;
+              }
+            } else if (person.loc === "entering") {
+              person.walk += dt;
+              person.x = lerp(OUTER_X - 1.1, -0.2, clamp(person.walk / 1.35, 0, 1));
+              person.z = lerp(person.z, (person.id - 1) * 0.35, Math.min(1, dt * 2));
+              if (person.walk >= 1.35) {
+                person.loc = "chamber";
+                playSfx("crew");
+                state.message = "승무원 진입";
+                state.messageTime = 0.7;
+                burst(person.x, person.y, person.z, 8, "crew");
+              }
+            } else if (person.loc === "chamber") {
+              person.x = lerp(person.x, -0.15 + person.id * 0.15, Math.min(1, dt));
+              person.y = Math.sin(person.bob) * 0.06;
+              if (state.inner.open > 0.75 && state.pressure > 0.84) {
+                person.loc = "exiting";
+                person.walk = 0;
+              }
+            } else if (person.loc === "exiting") {
+              person.walk += dt;
+              person.x = lerp(-0.1, INNER_X + 1.3, clamp(person.walk / 1.15, 0, 1));
+              if (person.walk >= 1.15) {
+                person.loc = "inside";
+                state.rescued += 1;
+                playSfx("crew");
+                state.flash = 0.45;
+                state.message = `승선 ${state.rescued}/${GOAL}`;
+                state.messageTime = 0.85;
+                burst(INNER_X, 0.2, 0, 12, "crew");
+                if (state.rescued >= GOAL) clearStage();
+              }
+            } else {
+              person.x = INNER_X + 1.4 + person.id * 0.4;
+              person.y = 0.05;
+            }
+          });
+        }
+
+        function updateFx(dt) {
+          state.sparks.forEach((spark) => {
+            spark.x += spark.vx * dt;
+            spark.y += spark.vy * dt;
+            spark.z += spark.vz * dt;
+            spark.life -= dt;
+          });
+          state.sparks = state.sparks.filter((spark) => spark.life > 0);
+          if (state.pumping > 0.4 && !reducedMotion && random() < 0.2) {
+            state.mist.push({
+              x: randRange(-0.4, 0.4), y: randRange(-0.2, 0.5), z: randRange(-0.3, 0.3),
+              life: 0.5, vy: randRange(0.1, 0.4),
+            });
+          }
+          state.mist.forEach((m) => { m.y += m.vy * dt; m.life -= dt; });
+          state.mist = state.mist.filter((m) => m.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.3);
+          state.shake = Math.max(0, state.shake - dt * 2.5);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateHatches(dt);
+          if (state.mode !== "running") return;
+          updatePressure(dt, params);
+          if (state.mode !== "running") return;
+          updateDebris(dt, params);
+          updateCrew(dt);
+          if (state.mode !== "running") return;
+          updateFx(dt);
+          if (state.elapsed >= DURATION) failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `승선 ${state.rescued}/${GOAL} · 압력 ${state.pressure.toFixed(2)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 승선 ${state.rescued}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x0c1018, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x070a10);
+          scene.fog = new THREE.Fog(0x0c1018, 6, 22);
+
+          const camera = new THREE.PerspectiveCamera(64, VIEW_W / VIEW_H, 0.08, 80);
+          camera.position.set(0, 0.35, 4.15);
+
+          scene.add(new THREE.AmbientLight(0x4a6070, 0.42));
+          const hemi = new THREE.HemisphereLight(0xa8d8ff, 0x121820, 0.4);
+          scene.add(hemi);
+          const dir = new THREE.DirectionalLight(0xd8e8ff, 0.35);
+          dir.position.set(2, 6, 4);
+          scene.add(dir);
+          const pumpLight = new THREE.PointLight(0x7ee0ff, 1.1, 8);
+          pumpLight.position.set(0, 0.4, 0.2);
+          scene.add(pumpLight);
+          const hatchLightO = new THREE.PointLight(0x88a0ff, 0.7, 7);
+          hatchLightO.position.set(OUTER_X + 0.4, 0.3, 0);
+          scene.add(hatchLightO);
+          const hatchLightI = new THREE.PointLight(0x7ee0ff, 0.7, 7);
+          hatchLightI.position.set(INNER_X - 0.4, 0.3, 0);
+          scene.add(hatchLightI);
+
+          const hullMat = new THREE.MeshStandardMaterial({
+            color: 0x2a3544, roughness: 0.62, metalness: 0.48, emissive: 0x0a1218, emissiveIntensity: 0.2,
+            side: THREE.BackSide,
+          });
+          const chamber = new THREE.Mesh(new THREE.CylinderGeometry(1.85, 1.85, 7.4, 28, 1, true), hullMat);
+          chamber.rotation.z = Math.PI / 2;
+          scene.add(chamber);
+
+          const ribMat = new THREE.MeshStandardMaterial({
+            color: 0x3a4a58, roughness: 0.5, metalness: 0.55, emissive: 0x101820, emissiveIntensity: 0.18,
+          });
+          const ribGeo = new THREE.TorusGeometry(1.82, 0.06, 6, 24);
+          [-2.4, -0.8, 0.8, 2.4].forEach((x) => {
+            const rib = new THREE.Mesh(ribGeo, ribMat);
+            rib.rotation.y = Math.PI / 2;
+            rib.position.x = x;
+            scene.add(rib);
+          });
+
+          const floorMat = new THREE.MeshStandardMaterial({
+            color: 0x1a2430, roughness: 0.82, metalness: 0.2, emissive: 0x0a1016, emissiveIntensity: 0.15,
+          });
+          const grate = new THREE.Mesh(new THREE.BoxGeometry(6.6, 0.08, 1.7), floorMat);
+          grate.position.y = -1.28;
+          scene.add(grate);
+          const stripeMat = new THREE.MeshStandardMaterial({
+            color: 0x7ee0ff, roughness: 0.4, metalness: 0.3, emissive: 0x1a5060, emissiveIntensity: 0.4,
+          });
+          const stripe = new THREE.Mesh(new THREE.BoxGeometry(6.4, 0.02, 0.08), stripeMat);
+          stripe.position.set(0, -1.22, 0.55);
+          scene.add(stripe);
+
+          const pipeMat = new THREE.MeshStandardMaterial({
+            color: 0x8aa0b0, roughness: 0.35, metalness: 0.7, emissive: 0x182028, emissiveIntensity: 0.15,
+          });
+          const pipeGeo = new THREE.CylinderGeometry(0.07, 0.07, 6.4, 8);
+          const pipes = PIPE_RUNS.map((run) => {
+            const mesh = new THREE.Mesh(pipeGeo, pipeMat);
+            mesh.rotation.z = Math.PI / 2;
+            mesh.position.set(0, run.y, run.z);
+            mesh.scale.x = run.s;
+            scene.add(mesh);
+            return mesh;
+          });
+
+          const panelMat = new THREE.MeshStandardMaterial({
+            color: 0x243040, roughness: 0.55, metalness: 0.4, emissive: 0x102028, emissiveIntensity: 0.22,
+          });
+          const ledMat = new THREE.MeshStandardMaterial({
+            color: 0x7ee0ff, roughness: 0.25, metalness: 0.2, emissive: 0x3ad0ff, emissiveIntensity: 0.8,
+          });
+          PANEL_POS.forEach((pos) => {
+            const panel = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.45, 0.06), panelMat);
+            panel.position.set(pos.x, pos.y, pos.z);
+            scene.add(panel);
+            const led = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.05, 0.04), ledMat);
+            led.position.set(pos.x + 0.22, pos.y + 0.12, pos.z + 0.04);
+            scene.add(led);
+          });
+
+          const ringMat = new THREE.MeshStandardMaterial({
+            color: 0xc4d0d8, roughness: 0.32, metalness: 0.72, emissive: 0x202830, emissiveIntensity: 0.2,
+          });
+          const doorMat = new THREE.MeshStandardMaterial({
+            color: 0x9aa8b4, roughness: 0.28, metalness: 0.68, emissive: 0x1a2830, emissiveIntensity: 0.18,
+          });
+          const warnMat = new THREE.MeshStandardMaterial({
+            color: 0xffc46b, roughness: 0.45, metalness: 0.3, emissive: 0x6a4010, emissiveIntensity: 0.45,
+          });
+
+          function makeHatch(x, inward) {
+            const group = new THREE.Group();
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.1, 8, 22), ringMat);
+            ring.rotation.y = Math.PI / 2;
+            group.add(ring);
+            const door = new THREE.Mesh(new THREE.CircleGeometry(0.98, 22), doorMat);
+            door.rotation.y = Math.PI / 2;
+            group.add(door);
+            const bar = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.7, 0.08), warnMat);
+            bar.rotation.y = Math.PI / 2;
+            group.add(bar);
+            const wheel = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.04, 6, 12), ringMat);
+            wheel.position.x = inward * 0.08;
+            group.add(wheel);
+            group.position.x = x;
+            scene.add(group);
+            return { group, door, bar, wheel };
+          }
+          const outerH = makeHatch(OUTER_X, 1);
+          const innerH = makeHatch(INNER_X, -1);
+
+          const pumpMat = new THREE.MeshStandardMaterial({
+            color: 0x3a4854, roughness: 0.4, metalness: 0.6, emissive: 0x102028, emissiveIntensity: 0.25,
+          });
+          const pump = new THREE.Group();
+          const housing = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.42, 0.7, 12), pumpMat);
+          pump.add(housing);
+          const impeller = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.05, 6, 10), ringMat);
+          impeller.position.y = 0.28;
+          pump.add(impeller);
+          const blades = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.04, 0.08), warnMat);
+          blades.position.y = 0.28;
+          pump.add(blades);
+          pump.position.set(0, -0.85, 0.15);
+          scene.add(pump);
+
+          const windowMat = new THREE.MeshStandardMaterial({
+            color: 0x7ee0ff, roughness: 0.12, metalness: 0.3, emissive: 0x123040, emissiveIntensity: 0.35,
+            transparent: true, opacity: 0.35,
+          });
+          const winL = new THREE.Mesh(new THREE.CircleGeometry(0.42, 14), windowMat);
+          winL.position.set(-0.2, 0.55, -1.78);
+          scene.add(winL);
+          const winR = winL.clone();
+          winR.position.set(1.2, 0.4, -1.78);
+          scene.add(winR);
+
+          const starCount = reducedMotion ? 80 : 220;
+          const starPos = new Float32Array(starCount * 3);
+          for (let i = 0; i < starCount; i += 1) {
+            starPos[i * 3] = -18 - Math.random() * 10;
+            starPos[i * 3 + 1] = (Math.random() - 0.5) * 16;
+            starPos[i * 3 + 2] = (Math.random() - 0.5) * 16;
+          }
+          const starGeo = new THREE.BufferGeometry();
+          starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+          const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+            color: 0xe8f6ff, size: 0.12, transparent: true, opacity: 0.85,
+          }));
+          scene.add(stars);
+
+          const suitMat = new THREE.MeshStandardMaterial({
+            color: 0xd07038, roughness: 0.55, metalness: 0.2, emissive: 0x401808, emissiveIntensity: 0.2,
+          });
+          const helmMat = new THREE.MeshStandardMaterial({
+            color: 0xd8e8f0, roughness: 0.2, metalness: 0.4, emissive: 0x7ee0ff, emissiveIntensity: 0.25,
+          });
+          const bodyGeo = new THREE.CylinderGeometry(0.16, 0.18, 0.55, 8);
+          const helmGeo = new THREE.SphereGeometry(0.15, 10, 10);
+          const packGeo = new THREE.BoxGeometry(0.22, 0.28, 0.12);
+          const crewMeshes = [0, 1, 2].map(() => {
+            const g = new THREE.Group();
+            g.add(new THREE.Mesh(bodyGeo, suitMat));
+            const helm = new THREE.Mesh(helmGeo, helmMat);
+            helm.position.y = 0.38;
+            g.add(helm);
+            const pack = new THREE.Mesh(packGeo, pumpMat);
+            pack.position.set(0, 0.05, -0.16);
+            g.add(pack);
+            scene.add(g);
+            return g;
+          });
+
+          const debrisGeos = {
+            panel: new THREE.BoxGeometry(0.38, 0.28, 0.05),
+            tank: new THREE.CylinderGeometry(0.12, 0.12, 0.38, 8),
+            wrench: new THREE.BoxGeometry(0.08, 0.08, 0.42),
+            crate: new THREE.BoxGeometry(0.28, 0.22, 0.24),
+          };
+          const debrisMat = new THREE.MeshStandardMaterial({
+            color: 0x8a9aa8, roughness: 0.5, metalness: 0.45, emissive: 0x182028, emissiveIntensity: 0.15,
+          });
+          const debrisAlt = new THREE.MeshStandardMaterial({
+            color: 0xc4a056, roughness: 0.4, metalness: 0.55, emissive: 0x302010, emissiveIntensity: 0.2,
+          });
+
+          const sparkGeo = new THREE.SphereGeometry(0.05, 6, 6);
+          const sparkMat = new THREE.MeshBasicMaterial({
+            color: 0x7ee0ff, transparent: true, opacity: 1, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, pumpLight, hatchLightO, hatchLightI,
+            outerH, innerH, pump, impeller, blades, pipes, stars, crewMeshes,
+            debrisGeos, debrisMat, debrisAlt, debrisMeshes: [],
+            sparkGeo, sparkMat, sparkMeshes: [],
+            proj: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.elapsed;
+          const p = state.pressure;
+          webgl.outerH.door.scale.setScalar(lerp(1, 0.08, state.outer.open));
+          webgl.outerH.door.rotation.z = state.outer.open * 0.8;
+          webgl.outerH.bar.rotation.z = state.outer.open * 1.2;
+          webgl.outerH.wheel.rotation.x = state.outer.open * 4;
+          webgl.innerH.door.scale.setScalar(lerp(1, 0.08, state.inner.open));
+          webgl.innerH.door.rotation.z = -state.inner.open * 0.8;
+          webgl.innerH.bar.rotation.z = -state.inner.open * 1.2;
+          webgl.innerH.wheel.rotation.x = state.inner.open * 4;
+          webgl.impeller.rotation.y = state.impeller;
+          webgl.blades.rotation.y = state.impeller;
+          webgl.pumpLight.intensity = 0.55 + state.pumping * 0.9 + (1 - p) * 0.25;
+          webgl.pumpLight.color.setHex(state.selected === "inner" ? 0x7ee0ff : 0x88a0ff);
+          webgl.hatchLightO.intensity = 0.35 + state.outer.open * 1.1;
+          webgl.hatchLightI.intensity = 0.35 + state.inner.open * 1.1;
+          state.crew.forEach((person, index) => {
+            const mesh = webgl.crewMeshes[index];
+            mesh.visible = person.loc !== "inside" || person.x < INNER_X + 2.2;
+            mesh.position.set(person.x, person.y, person.z);
+            mesh.rotation.y = person.loc === "outside" || person.loc === "entering" ? Math.PI / 2 : -Math.PI / 2;
+          });
+          while (webgl.debrisMeshes.length < state.debris.length) {
+            const piece = state.debris[webgl.debrisMeshes.length];
+            const geo = webgl.debrisGeos[piece?.kind] || webgl.debrisGeos.crate;
+            const mesh = new THREE.Mesh(geo, webgl.debrisMeshes.length % 2 ? webgl.debrisAlt : webgl.debrisMat);
+            webgl.scene.add(mesh);
+            webgl.debrisMeshes.push(mesh);
+          }
+          webgl.debrisMeshes.forEach((mesh, index) => {
+            const piece = state.debris[index];
+            if (!piece || piece.gone) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(piece.x, piece.y, piece.z);
+            mesh.rotation.set(piece.spin, piece.spin * 0.6, piece.spin * 0.3);
+            mesh.scale.setScalar(piece === state.heldDebris ? 1.12 : 1);
+          });
+          while (webgl.sparkMeshes.length < state.sparks.length) {
+            const mesh = new THREE.Mesh(webgl.sparkGeo, webgl.sparkMat.clone());
+            webgl.scene.add(mesh);
+            webgl.sparkMeshes.push(mesh);
+          }
+          webgl.sparkMeshes.forEach((mesh, index) => {
+            const spark = state.sparks[index];
+            if (!spark) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(spark.x, spark.y, spark.z);
+            mesh.material.color.setHex(spark.kind === "crew" ? 0xffc46b : spark.kind === "spark" ? 0xffe8a0 : 0x7ee0ff);
+            mesh.material.opacity = clamp(spark.life * 1.6, 0, 1);
+          });
+          webgl.stars.rotation.y = t * 0.01;
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.4 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.3 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.35) * 0.08;
+          webgl.camera.position.set(sway + shakeX, 0.32 + shakeY, 4.2);
+          webgl.camera.lookAt(0, 0.05, 0);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function project(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+            };
+          }
+          return {
+            x: VIEW_W / 2 + x * 92,
+            y: VIEW_H / 2 - y * 110 - z * 18,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#152030");
+          g.addColorStop(1, "#0c1018");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "rgba(126,224,255,0.08)";
+          ctx.fillRect(VIEW_W * 0.08, 70, VIEW_W * 0.84, VIEW_H - 140);
+          ctx.strokeStyle = "rgba(196,208,216,0.7)";
+          ctx.lineWidth = 6;
+          const ox = project(OUTER_X, 0, 0);
+          const ix = project(INNER_X, 0, 0);
+          ctx.beginPath();
+          ctx.arc(ox.x, ox.y, 46, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(ix.x, ix.y, 46, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = `rgba(154,168,180,${1 - state.outer.open})`;
+          ctx.beginPath();
+          ctx.arc(ox.x, ox.y, 40 * (1 - state.outer.open * 0.85), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = `rgba(154,168,180,${1 - state.inner.open})`;
+          ctx.beginPath();
+          ctx.arc(ix.x, ix.y, 40 * (1 - state.inner.open * 0.85), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = COLORS.accent;
+          ctx.fillRect(VIEW_W / 2 - 18, VIEW_H / 2 + 40, 36, 22);
+          state.crew.forEach((person) => {
+            const p = project(person.x, person.y, person.z);
+            ctx.fillStyle = COLORS.suit;
+            ctx.fillRect(p.x - 8, p.y - 16, 16, 28);
+            ctx.fillStyle = COLORS.ink;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y - 20, 7, 0, Math.PI * 2);
+            ctx.fill();
+          });
+          state.debris.forEach((piece) => {
+            if (piece.gone) return;
+            const p = project(piece.x, piece.y, piece.z);
+            ctx.fillStyle = piece === state.heldDebris ? COLORS.brass : "#8a9aa8";
+            ctx.fillRect(p.x - 8, p.y - 8, 16, 16);
+          });
+          state.sparks.forEach((spark) => {
+            const p = project(spark.x, spark.y, spark.z);
+            ctx.globalAlpha = clamp(spark.life * 1.5, 0, 1);
+            ctx.fillStyle = COLORS.accent;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(232,246,255,0.7)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = state.pressure.toFixed(2);
+          if (meter) meter.style.width = `${clamp(state.pressure, 0, 1) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `${hatchLabel()} · 승선 ${state.rescued}/${GOAL}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const ox = project(OUTER_X, 0.9, 0);
+          const ix = project(INNER_X, 0.9, 0);
+          hud.save();
+          hud.textAlign = "center";
+          hud.font = "700 12px Trebuchet MS, sans-serif";
+          hud.fillStyle = state.selected === "outer" ? COLORS.accent : "rgba(232,246,255,0.55)";
+          hud.fillText("바깥", ox.x, ox.y);
+          hud.fillStyle = state.selected === "inner" ? COLORS.accent : "rgba(232,246,255,0.55)";
+          hud.fillText("안쪽", ix.x, ix.y);
+          hud.restore();
+          if (state.pumping > 0.4) {
+            hud.fillStyle = `rgba(126,224,255,${0.08 * state.pumping})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.accent;
+            hud.font = "900 26px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(126,224,255,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "chamber units; x outer-to-inner; camera interior +z",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            pressure: Number(state.pressure.toFixed(3)),
+            selected: state.selected,
+            outer: Number(state.outer.open.toFixed(2)),
+            inner: Number(state.inner.open.toFixed(2)),
+            rescued: state.rescued,
+            debris: state.debris.filter((d) => !d.gone).length,
+            pumping: Number(state.pumping.toFixed(2)),
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function storePointer(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          input.x = event.clientX;
+          input.y = event.clientY;
+          input.nx = (event.clientX - rect.left) / Math.max(1, rect.width);
+          input.ny = (event.clientY - rect.top) / Math.max(1, rect.height);
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          storePointer(event);
+          input.dragging = true;
+          input.holding = false;
+          input.moved = false;
+          input.pointerId = event.pointerId;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.downAt = performance.now();
+          const piece = pickDebris();
+          if (piece) {
+            state.heldDebris = piece;
+            piece.held = true;
+            input.moved = true;
+          }
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          storePointer(event);
+          if (Math.hypot(event.clientX - input.downX, event.clientY - input.downY) > TAP_PX) {
+            input.moved = true;
+            input.holding = false;
+            if (!state.heldDebris) {
+              const piece = pickDebris();
+              if (piece) { state.heldDebris = piece; piece.held = true; }
+            }
+          }
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.holding = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          const dur = performance.now() - input.downAt;
+          storePointer(event);
+          if (state.mode === "running" && !input.moved && dur < TAP_MS && !state.heldDebris) {
+            const which = pickHatch();
+            if (which) toggleHatch(which, difficultyAt(state.elapsed));
+          }
+          if (state.heldDebris) {
+            state.heldDebris.held = false;
+            state.heldDebris = null;
+          }
+          input.dragging = false;
+          input.holding = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") { event.preventDefault(); input.pump = true; }
+          if (event.code === "KeyQ" || event.code === "Digit1") {
+            event.preventDefault();
+            if (state.mode === "running") toggleHatch("outer", difficultyAt(state.elapsed));
+          }
+          if (event.code === "KeyE" || event.code === "Digit2") {
+            event.preventDefault();
+            if (state.mode === "running") toggleHatch("inner", difficultyAt(state.elapsed));
+          }
+          if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = true;
+          if (event.code === "ArrowRight" || event.code === "KeyD") input.right = true;
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") input.pump = false;
+          if (event.code === "ArrowLeft" || event.code === "KeyA") input.left = false;
+          if (event.code === "ArrowRight" || event.code === "KeyD") input.right = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          if (input.dragging && !input.moved && !state.heldDebris && performance.now() - input.downAt > HOLD_MS) {
+            input.holding = true;
+          }
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.rescued = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.pump = false; input.dragging = false; input.holding = false;
+          if (state.heldDebris) { state.heldDebris.held = false; state.heldDebris = null; }
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

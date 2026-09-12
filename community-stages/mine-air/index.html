@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>갱도 환기</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #100c08; --accent: #c4a056; --accent-ink: #140e08; --danger: #ff6b7a; --ink: #f6ead0; --muted: rgba(246,234,208,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">갱도 환기. 팬을 뒤집어 가스를 빼고 고립된 팀에 닿으세요. 탭으로 풍문, 드래그로 진행. 대피소에 도착하면 클리어. 메탄이 폭발 농도에 닿으면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 터치해 풍문이나 팬을 바꾸고 드래그해 갱도를 걸어갑니다.</p>
+    <main class="stage" aria-label="갱도 환기 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="갱도 환기" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">가스</p>
+          <p class="hud-value" id="hud-objective">18%</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">52.0</p>
+          <p class="hud-sub" id="hud-sub">거리 40m</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Mine Air</p>
+          <h1>갱도 환기</h1>
+          <p class="brief-lead">팬을 뒤집어 가스를 빼고 고립된 팀에 닿으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 풍문, 드래그로 진행</span></li>
+            <li><strong>클리어</strong><span>대피소에 도착하면 클리어</span></li>
+            <li><strong>실패</strong><span>메탄이 폭발 농도에 닿으면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">갱도 붕괴</p>
+          <h2>메탄이 터졌다</h2>
+          <p class="brief-lead" id="fail-detail">메탄이 폭발 농도에 닿으면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">대피 완료</p>
+          <h2>환기 성공</h2>
+          <p class="brief-lead">고립된 팀에 닿아 대피소 문을 열었습니다.</p>
+          <p class="hud-sub" id="clear-stat">대피소에 도착하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 52;
+        const SHELTER_Z = 40;
+        const WALK_SPEED = 3.15;
+        const RED_BAND = 0.72;
+        const BLAST = 1;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "mine-air",
+          title: "갱도 환기",
+          description: "팬을 뒤집어 가스를 빼고 고립된 팀에 닿으세요.",
+          creator: "collin",
+          genre: "3D mine ventilation",
+          clearCondition: "대피소에 도착하면 클리어",
+          failCondition: "메탄이 폭발 농도에 닿으면 실패",
+          controls: "탭으로 풍문, 드래그로 진행",
+        };
+        const COLORS = {
+          bg: "#100c08",
+          ink: "#f6ead0",
+          brass: "#c4a056",
+          timber: "#6a4a28",
+          coal: "#2a2218",
+          gas: "#8cff6a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          methane_blast: "메탄이 폭발 농도에 닿았습니다",
+          backdraft: "풍문을 열자 역화로 가스가 터졌습니다",
+          time_limit: "제한 시간 52초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const BRATTICE_Z = [8.5, 16.5, 24.5, 32.5];
+        const FAN_Z = [4.2, 12.4, 20.6, 28.8];
+        const CAM2D = {
+          eye: { x: 4.8, y: 2.4, z: 6.2 },
+          right: { x: 0.94, y: 0, z: -0.34 },
+          up: { x: 0.08, y: 0.97, z: 0.22 },
+          fwd: { x: -0.33, y: 0.24, z: -0.91 },
+          focal: 390,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          player: { x: 0, y: 0, z: 0.4, heading: 0, speed: 0 },
+          methane: 0.16,
+          brattices: [],
+          fans: [],
+          particles: [],
+          dust: [],
+          flash: 0,
+          shake: 0,
+          lamp: 1,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          lastToggle: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, walk: 0, strafe: 0, pointerId: null,
+          downX: 0, downY: 0, moved: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            seep: 0.034 + difficulty * 0.055 + (phase >= 3 ? 0.02 : 0),
+            fanPower: phase === 1 ? 0.11 : phase === 2 ? 0.078 : 0.055,
+            redBand: phase >= 3 ? 0.58 : RED_BAND,
+            stallChance: phase === 1 ? 0 : phase === 2 ? 0.18 : 0.42,
+            slamChance: phase === 1 ? 0 : phase === 2 ? 0.12 : 0.28,
+            walkScale: phase >= 3 ? 0.86 : 1,
+          };
+        }
+
+        function spawnLayout() {
+          state.brattices = BRATTICE_Z.map((z, index) => ({
+            id: index,
+            z,
+            open: index === 0,
+            slam: 0,
+            cloth: 0,
+          }));
+          state.fans = FAN_Z.map((z, index) => ({
+            id: index,
+            z,
+            reversed: index === 0,
+            spin: random() * Math.PI * 2,
+            stall: 0,
+            power: 1,
+          }));
+        }
+
+        function nextClosedBrattice() {
+          return state.brattices.find((door) => !door.open && door.z > state.player.z - 0.4) || null;
+        }
+
+        function nearestDevice() {
+          let best = null;
+          let bestDist = 3.4;
+          state.brattices.forEach((door) => {
+            const d = Math.abs(door.z - state.player.z);
+            if (d < bestDist) {
+              bestDist = d;
+              best = { kind: "brattice", item: door, dist: d };
+            }
+          });
+          state.fans.forEach((fan) => {
+            const d = Math.abs(fan.z - state.player.z);
+            if (d < bestDist) {
+              bestDist = d;
+              best = { kind: "fan", item: fan, dist: d };
+            }
+          });
+          return best;
+        }
+
+        function airflowAt(playerZ, params) {
+          let vent = 0.012;
+          state.fans.forEach((fan) => {
+            if (fan.stall > 0) return;
+            const along = 1 - clamp(Math.abs(fan.z - playerZ) / 14, 0, 1);
+            let path = 1;
+            state.brattices.forEach((door) => {
+              const between = (door.z - fan.z) * (door.z - playerZ) < 0;
+              if (between && !door.open) path *= 0.18;
+            });
+            const dir = fan.reversed ? 1 : -0.55;
+            vent += dir * params.fanPower * fan.power * along * path;
+          });
+          return vent;
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(5, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.4, 2.4),
+              vy: randRange(0.4, 2.8),
+              vz: Math.sin(angle) * randRange(0.4, 2.4),
+              life: randRange(0.28, 0.8),
+              kind,
+              size: randRange(0.05, 0.14),
+            });
+          }
+          if (state.particles.length > 72) state.particles.splice(0, state.particles.length - 72);
+        }
+
+        function spawnDust() {
+          if (reducedMotion && state.dust.length > 10) return;
+          state.dust.push({
+            x: state.player.x + randRange(-0.4, 0.4),
+            y: 0.12,
+            z: state.player.z + randRange(-0.3, 0.2),
+            vy: randRange(0.15, 0.5),
+            life: randRange(0.4, 0.9),
+            size: randRange(0.04, 0.09),
+          });
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "cloth") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(190, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.12);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "fan") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(160, now + 0.16);
+              gain.gain.setValueAtTime(0.035, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+              osc.start(now); osc.stop(now + 0.19);
+            } else if (kind === "warn") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(280, now + 0.1);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.22);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+              osc.start(now); osc.stop(now + 0.27);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(110, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.28);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.31);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.player = { x: 0, y: 0, z: 0.4, heading: 0, speed: 0 };
+          state.methane = 0.16;
+          state.particles = [];
+          state.dust = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.lamp = 1;
+          state.message = "헤드램프를 켜고 풍문을 여세요";
+          state.messageTime = 1.6;
+          state.failReason = "";
+          state.lastToggle = 0;
+          input.walk = 0;
+          input.strafe = 0;
+          input.dragging = false;
+          reseed((Date.now() ^ 0xa5a5) >>> 0);
+          spawnLayout();
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(0, 1.2, SHELTER_Z, 22, "brass");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.78;
+          state.flash = 0.7;
+          playSfx("boom");
+          burst(state.player.x, 1.1, state.player.z, 26, "danger");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function toggleNearest(params) {
+          if (state.elapsed - state.lastToggle < 0.18) return;
+          const found = nearestDevice();
+          if (!found) {
+            state.message = "가까운 풍문이나 팬이 없습니다";
+            state.messageTime = 0.7;
+            return;
+          }
+          state.lastToggle = state.elapsed;
+          if (found.kind === "brattice") {
+            const door = found.item;
+            if (!door.open && state.methane >= params.redBand) {
+              failStage("backdraft");
+              return;
+            }
+            door.open = !door.open;
+            door.cloth = door.open ? 1 : -1;
+            state.message = door.open ? "풍문 개방" : "풍문 폐쇄";
+            state.messageTime = 0.75;
+            playSfx("cloth");
+            burst(0, 1.4, door.z, 10, door.open ? "gas" : "timber");
+          } else {
+            const fan = found.item;
+            fan.reversed = !fan.reversed;
+            fan.stall = 0;
+            fan.power = 1;
+            state.message = fan.reversed ? "팬 배기 전환" : "팬 급기 전환";
+            state.messageTime = 0.75;
+            playSfx("fan");
+            burst(1.35, 1.6, fan.z, 12, "brass");
+          }
+        }
+
+        function updateWalk(dt, params) {
+          let walk = 0;
+          let strafe = 0;
+          if (input.up) walk += 1;
+          if (input.down) walk -= 0.55;
+          if (input.left) strafe -= 1;
+          if (input.right) strafe += 1;
+          if (input.dragging) {
+            walk += input.walk;
+            strafe += input.strafe;
+          }
+          walk = clamp(walk, -0.7, 1.15);
+          strafe = clamp(strafe, -1, 1);
+          const gassed = state.methane > 0.62 ? 0.72 : 1;
+          const speed = WALK_SPEED * params.walkScale * gassed;
+          state.player.speed = walk * speed;
+          state.player.x = clamp(state.player.x + strafe * 1.4 * dt, -0.85, 0.85);
+          let nextZ = state.player.z + state.player.speed * dt;
+          const blocker = nextClosedBrattice();
+          if (blocker && nextZ > blocker.z - 0.55) {
+            nextZ = blocker.z - 0.55;
+            if (walk > 0.2 && state.messageTime <= 0) {
+              state.message = "닫힌 풍문 · 탭으로 개방";
+              state.messageTime = 0.7;
+            }
+          }
+          state.player.z = clamp(nextZ, 0.2, SHELTER_Z + 0.8);
+          state.player.heading = lerp(state.player.heading, strafe * 0.18, Math.min(1, dt * 8));
+          if (Math.abs(walk) > 0.2 && random() < 0.18) spawnDust();
+        }
+
+        function updateVent(dt, params) {
+          const vent = airflowAt(state.player.z, params);
+          let seep = params.seep;
+          const closedNear = state.brattices.some((door) => !door.open && Math.abs(door.z - state.player.z) < 6);
+          if (closedNear) seep += 0.018;
+          if (Math.abs(state.player.speed) > 0.4) seep += 0.01;
+          state.methane += (seep - vent) * dt;
+          state.methane = clamp(state.methane, 0.02, 1.25);
+          if (state.methane >= BLAST) {
+            failStage("methane_blast");
+            return;
+          }
+          if (state.methane >= params.redBand && Math.floor(state.elapsed * 2) !== Math.floor((state.elapsed - dt) * 2)) {
+            playSfx("warn");
+            state.flash = Math.max(state.flash, 0.18);
+          }
+        }
+
+        function updateDevices(dt, params) {
+          state.fans.forEach((fan) => {
+            fan.stall = Math.max(0, fan.stall - dt);
+            const spinDir = fan.reversed ? 1 : -1;
+            const live = fan.stall > 0 ? 0.15 : 1;
+            fan.spin += dt * 7.5 * spinDir * live * fan.power;
+            if (params.phase >= 2 && fan.stall <= 0 && random() < params.stallChance * dt) {
+              fan.stall = randRange(1.6, 3.2);
+              fan.power = 0.2;
+              if (Math.abs(fan.z - state.player.z) < 10) {
+                state.message = "팬 실속!";
+                state.messageTime = 0.8;
+              }
+            }
+            if (fan.stall <= 0) fan.power = lerp(fan.power, 1, Math.min(1, dt * 1.4));
+          });
+          state.brattices.forEach((door) => {
+            door.cloth = lerp(door.cloth, 0, Math.min(1, dt * 3));
+            if (params.phase >= 2 && door.open && random() < params.slamChance * dt) {
+              door.open = false;
+              door.slam = 1;
+              door.cloth = -1;
+              if (Math.abs(door.z - state.player.z) < 8) {
+                state.message = "풍문이 닫혔다";
+                state.messageTime = 0.85;
+                playSfx("cloth");
+              }
+            }
+            door.slam = Math.max(0, door.slam - dt * 2);
+          });
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 2.6 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+          state.dust.forEach((grain) => {
+            grain.y += grain.vy * dt;
+            grain.x += Math.sin(state.elapsed * 4 + grain.z) * dt * 0.12;
+            grain.life -= dt;
+          });
+          state.dust = state.dust.filter((grain) => grain.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.2);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          const flicker = state.methane > 0.55 ? 0.72 + Math.sin(state.elapsed * 18) * 0.18 : 1;
+          state.lamp = reducedMotion ? 1 : flicker;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateWalk(dt, params);
+          if (state.mode !== "running") return;
+          updateVent(dt, params);
+          if (state.mode !== "running") return;
+          updateDevices(dt, params);
+          updateParticles(dt);
+          if (state.player.z >= SHELTER_Z - 0.35 && state.mode === "running") clearStage();
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) {
+              failStat.textContent = `가스 ${Math.round(state.methane * 100)}% · 잔여 ${Math.max(0, SHELTER_Z - state.player.z).toFixed(1)}m`;
+            }
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 가스 ${Math.round(state.methane * 100)}%`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x100c08, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x100c08);
+          scene.fog = new THREE.Fog(0x100c08, 6, 28);
+
+          const camera = new THREE.PerspectiveCamera(62, VIEW_W / VIEW_H, 0.12, 80);
+          camera.position.set(0.4, 1.7, 5.2);
+
+          scene.add(new THREE.AmbientLight(0x3a2a18, 0.38));
+          const hemi = new THREE.HemisphereLight(0x6a5840, 0x120c08, 0.42);
+          scene.add(hemi);
+          const dir = new THREE.DirectionalLight(0xc4a056, 0.28);
+          dir.position.set(-4, 10, 6);
+          scene.add(dir);
+          const lamp = new THREE.PointLight(0xffe2a0, 1.35, 11);
+          lamp.position.set(0, 1.55, 1);
+          scene.add(lamp);
+          const refugeGlow = new THREE.PointLight(0xc4a056, 0.85, 8);
+          refugeGlow.position.set(0, 1.4, SHELTER_Z);
+          scene.add(refugeGlow);
+
+          const timberMat = new THREE.MeshStandardMaterial({
+            color: 0x6a4a28, roughness: 0.82, metalness: 0.08, emissive: 0x1a1008, emissiveIntensity: 0.15,
+          });
+          const darkTimber = new THREE.MeshStandardMaterial({
+            color: 0x3a2818, roughness: 0.88, metalness: 0.06, emissive: 0x100804, emissiveIntensity: 0.12,
+          });
+          const coalMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2218, roughness: 0.94, metalness: 0.12, emissive: 0x080604, emissiveIntensity: 0.2,
+          });
+          const railMat = new THREE.MeshStandardMaterial({
+            color: 0x8a8a82, roughness: 0.35, metalness: 0.72, emissive: 0x222018, emissiveIntensity: 0.18,
+          });
+          const brassMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a056, roughness: 0.38, metalness: 0.62, emissive: 0x3a2a10, emissiveIntensity: 0.35,
+          });
+          const clothMat = new THREE.MeshStandardMaterial({
+            color: 0x8a6a40, roughness: 0.78, metalness: 0.05, emissive: 0x2a1c0c, emissiveIntensity: 0.2,
+            side: THREE.DoubleSide,
+          });
+          const canvasMat = new THREE.MeshStandardMaterial({
+            color: 0xc4b080, roughness: 0.7, metalness: 0.04, emissive: 0x2a2410, emissiveIntensity: 0.16,
+            side: THREE.DoubleSide, transparent: true, opacity: 0.92,
+          });
+          const steelMat = new THREE.MeshStandardMaterial({
+            color: 0x4a4a48, roughness: 0.42, metalness: 0.55, emissive: 0x101010, emissiveIntensity: 0.2,
+          });
+          const gasMat = new THREE.MeshBasicMaterial({
+            color: 0x8cff6a, transparent: true, opacity: 0.08, depthWrite: false, side: THREE.DoubleSide,
+          });
+
+          const floor = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.18, 52), coalMat);
+          floor.position.set(0, -0.12, 22);
+          scene.add(floor);
+          const leftRib = new THREE.Mesh(new THREE.BoxGeometry(0.55, 3.2, 52), coalMat);
+          leftRib.position.set(-2.05, 1.4, 22);
+          scene.add(leftRib);
+          const rightRib = new THREE.Mesh(new THREE.BoxGeometry(0.55, 3.2, 52), coalMat);
+          rightRib.position.set(2.05, 1.4, 22);
+          scene.add(rightRib);
+          const roof = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.22, 52), darkTimber);
+          roof.position.set(0, 2.85, 22);
+          scene.add(roof);
+
+          const postGeo = new THREE.BoxGeometry(0.16, 2.7, 0.16);
+          const capGeo = new THREE.BoxGeometry(3.6, 0.14, 0.22);
+          const sleeperGeo = new THREE.BoxGeometry(1.7, 0.08, 0.22);
+          const frames = [];
+          for (let index = 0; index < 22; index += 1) {
+            const z = index * 2.15;
+            const group = new THREE.Group();
+            const left = new THREE.Mesh(postGeo, timberMat);
+            left.position.set(-1.72, 1.25, 0);
+            const right = new THREE.Mesh(postGeo, timberMat);
+            right.position.set(1.72, 1.25, 0);
+            const cap = new THREE.Mesh(capGeo, darkTimber);
+            cap.position.set(0, 2.58, 0);
+            const sleeper = new THREE.Mesh(sleeperGeo, timberMat);
+            sleeper.position.set(0, 0.02, 0);
+            group.add(left, right, cap, sleeper);
+            group.position.z = z;
+            scene.add(group);
+            frames.push(group);
+          }
+
+          const railGeo = new THREE.BoxGeometry(0.08, 0.06, 48);
+          const railL = new THREE.Mesh(railGeo, railMat);
+          railL.position.set(-0.42, 0.04, 22);
+          const railR = new THREE.Mesh(railGeo, railMat);
+          railR.position.set(0.42, 0.04, 22);
+          scene.add(railL, railR);
+
+          const cartGeo = new THREE.BoxGeometry(0.7, 0.38, 1.05);
+          const wheelGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.08, 8);
+          const carts = [];
+          [6.5, 18.8, 30.2].forEach((z, index) => {
+            const cart = new THREE.Group();
+            const tub = new THREE.Mesh(cartGeo, steelMat);
+            tub.position.y = 0.32;
+            cart.add(tub);
+            [-0.28, 0.28].forEach((x) => {
+              [-0.38, 0.38].forEach((zz) => {
+                const wheel = new THREE.Mesh(wheelGeo, railMat);
+                wheel.rotation.z = Math.PI / 2;
+                wheel.position.set(x, 0.1, zz);
+                cart.add(wheel);
+              });
+            });
+            const lump = new THREE.Mesh(new THREE.SphereGeometry(0.22, 6, 5), coalMat);
+            lump.position.set(0, 0.55, 0);
+            cart.add(lump);
+            cart.position.set(index % 2 ? 0.7 : -0.7, 0, z);
+            scene.add(cart);
+            carts.push(cart);
+          });
+
+          const lanternGeo = new THREE.CylinderGeometry(0.07, 0.09, 0.22, 8);
+          const flameGeo = new THREE.SphereGeometry(0.06, 8, 8);
+          const flameMat = new THREE.MeshStandardMaterial({
+            color: 0xffd080, roughness: 0.3, metalness: 0.1, emissive: 0xffaa40, emissiveIntensity: 0.9,
+          });
+          const lanterns = [];
+          for (let index = 0; index < 8; index += 1) {
+            const group = new THREE.Group();
+            const body = new THREE.Mesh(lanternGeo, brassMat);
+            const flame = new THREE.Mesh(flameGeo, flameMat);
+            flame.position.y = 0.16;
+            group.add(body, flame);
+            group.position.set(index % 2 ? 1.55 : -1.55, 1.85, 3 + index * 5);
+            scene.add(group);
+            lanterns.push(group);
+          }
+
+          const doorGeo = new THREE.PlaneGeometry(3.1, 2.4, 4, 3);
+          const frameGeo = new THREE.BoxGeometry(3.3, 0.12, 0.12);
+          const bratticeMeshes = [];
+          BRATTICE_Z.forEach((z) => {
+            const group = new THREE.Group();
+            const cloth = new THREE.Mesh(doorGeo, canvasMat.clone());
+            cloth.position.y = 1.25;
+            const bar = new THREE.Mesh(frameGeo, timberMat);
+            bar.position.y = 2.42;
+            group.add(cloth, bar);
+            group.position.z = z;
+            scene.add(group);
+            bratticeMeshes.push({ group, cloth });
+          });
+
+          const housingGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.42, 12);
+          const bladeGeo = new THREE.BoxGeometry(0.9, 0.06, 0.16);
+          const fanMeshes = [];
+          FAN_Z.forEach((z) => {
+            const group = new THREE.Group();
+            const housing = new THREE.Mesh(housingGeo, steelMat);
+            housing.rotation.z = Math.PI / 2;
+            housing.position.set(1.55, 1.55, 0);
+            const blades = new THREE.Group();
+            for (let b = 0; b < 4; b += 1) {
+              const blade = new THREE.Mesh(bladeGeo, brassMat);
+              blade.rotation.z = (Math.PI / 2) * b;
+              blades.add(blade);
+            }
+            blades.position.set(1.55, 1.55, 0.12);
+            group.add(housing, blades);
+            group.position.z = z;
+            scene.add(group);
+            fanMeshes.push({ group, blades });
+          });
+
+          const miner = new THREE.Group();
+          const suitMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3428, roughness: 0.7, metalness: 0.12, emissive: 0x12100c, emissiveIntensity: 0.2,
+          });
+          const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.7, 8), suitMat);
+          torso.position.y = 0.85;
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 10), suitMat);
+          head.position.y = 1.32;
+          const lampMesh = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), flameMat);
+          lampMesh.position.set(0, 1.38, 0.14);
+          miner.add(torso, head, lampMesh);
+          scene.add(miner);
+
+          const refuge = new THREE.Group();
+          const room = new THREE.Mesh(new THREE.BoxGeometry(3.6, 2.6, 3.2), steelMat);
+          room.position.set(0, 1.2, 0);
+          const hatch = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.8, 0.12), brassMat);
+          hatch.position.set(0, 1.0, -1.66);
+          const sign = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.28, 0.06), brassMat);
+          sign.position.set(0, 2.15, -1.7);
+          refuge.add(room, hatch, sign);
+          refuge.position.z = SHELTER_Z + 1.4;
+          scene.add(refuge);
+
+          const crewGeo = new THREE.CylinderGeometry(0.16, 0.18, 0.7, 7);
+          const crew = [];
+          for (let index = 0; index < 3; index += 1) {
+            const body = new THREE.Mesh(crewGeo, suitMat);
+            body.position.set(-0.6 + index * 0.6, 0.7, SHELTER_Z + 1.1);
+            scene.add(body);
+            crew.push(body);
+          }
+
+          const hazeGeo = new THREE.PlaneGeometry(3.4, 2.2);
+          const haze = new THREE.Mesh(hazeGeo, gasMat);
+          haze.position.set(0, 1.4, 8);
+          scene.add(haze);
+
+          const particleGeo = new THREE.SphereGeometry(0.06, 6, 6);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0x8cff6a, transparent: true, opacity: 0.8, depthWrite: false,
+          });
+          const dustGeo = new THREE.SphereGeometry(0.05, 5, 5);
+          const dustMat = new THREE.MeshBasicMaterial({
+            color: 0xc4a056, transparent: true, opacity: 0.45, depthWrite: false,
+          });
+
+          const moteCount = reducedMotion ? 80 : 220;
+          const motePos = new Float32Array(moteCount * 3);
+          for (let index = 0; index < moteCount; index += 1) {
+            motePos[index * 3] = (Math.random() - 0.5) * 3.2;
+            motePos[index * 3 + 1] = Math.random() * 2.6;
+            motePos[index * 3 + 2] = Math.random() * 44;
+          }
+          const moteGeo = new THREE.BufferGeometry();
+          moteGeo.setAttribute("position", new THREE.BufferAttribute(motePos, 3));
+          const motes = new THREE.Points(moteGeo, new THREE.PointsMaterial({
+            color: 0x8cff6a, size: 0.07, transparent: true, opacity: 0.35, sizeAttenuation: true,
+          }));
+          scene.add(motes);
+
+          return {
+            renderer, scene, camera, lamp, refugeGlow, miner, lampMesh,
+            bratticeMeshes, fanMeshes, lanterns, carts, frames, haze, crew,
+            particleGeo, particleMat, particleMeshes: [],
+            dustGeo, dustMat, dustMeshes: [], motes,
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.elapsed;
+          const p = state.player;
+          webgl.miner.position.set(p.x, 0, p.z);
+          webgl.miner.rotation.y = p.heading;
+          webgl.lamp.position.set(p.x, 1.5, p.z + 0.3);
+          webgl.lamp.intensity = 1.05 * state.lamp + state.methane * 0.2;
+          webgl.lamp.color.setHex(state.methane > RED_BAND ? 0xff8860 : 0xffe2a0);
+          webgl.refugeGlow.intensity = reducedMotion ? 0.7 : 0.7 + Math.sin(t * 3) * 0.2;
+
+          state.brattices.forEach((door, index) => {
+            const mesh = webgl.bratticeMeshes[index];
+            if (!mesh) return;
+            const open = door.open ? 1.15 : 0.02;
+            mesh.cloth.rotation.y = lerp(mesh.cloth.rotation.y, open, 0.18);
+            mesh.cloth.position.x = door.open ? -1.4 : 0;
+            mesh.cloth.material.opacity = door.open ? 0.35 : 0.92;
+            mesh.cloth.rotation.z = door.cloth * 0.12;
+          });
+          state.fans.forEach((fan, index) => {
+            const mesh = webgl.fanMeshes[index];
+            if (!mesh) return;
+            mesh.blades.rotation.x = fan.spin;
+            mesh.group.children[0].material = mesh.group.children[0].material;
+          });
+          webgl.lanterns.forEach((lantern, index) => {
+            const flame = lantern.children[1];
+            flame.scale.setScalar(reducedMotion ? 1 : 0.9 + Math.sin(t * 9 + index) * 0.12);
+          });
+          webgl.haze.position.z = p.z + 3.5;
+          webgl.haze.material.opacity = 0.05 + state.methane * 0.22;
+          webgl.haze.material.color.setHex(state.methane > RED_BAND ? 0xff6b7a : 0x8cff6a);
+
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.scale.setScalar(particle.size / 0.06);
+            const hex = particle.kind === "danger" ? 0xff6b7a : particle.kind === "brass" ? 0xc4a056 : particle.kind === "timber" ? 0x6a4a28 : 0x8cff6a;
+            mesh.material.color.setHex(hex);
+            mesh.material.opacity = clamp(particle.life * 1.6, 0, 1);
+          });
+          while (webgl.dustMeshes.length < state.dust.length) {
+            const mesh = new THREE.Mesh(webgl.dustGeo, webgl.dustMat.clone());
+            webgl.scene.add(mesh);
+            webgl.dustMeshes.push(mesh);
+          }
+          webgl.dustMeshes.forEach((mesh, index) => {
+            const grain = state.dust[index];
+            if (!grain) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(grain.x, grain.y, grain.z);
+            mesh.material.opacity = clamp(grain.life * 0.7, 0, 0.5);
+          });
+
+          const pos = webgl.motes.geometry.attributes.position;
+          for (let index = 0; index < pos.count; index += 1) {
+            let z = pos.getZ(index) - state.player.speed * dtSafe() * 0.4;
+            if (z < p.z - 4) z += 24;
+            if (z > p.z + 20) z -= 24;
+            pos.setZ(index, z);
+            pos.setY(index, pos.getY(index) + Math.sin(t + index) * 0.002);
+          }
+          pos.needsUpdate = true;
+          webgl.motes.material.opacity = 0.15 + state.methane * 0.45;
+        }
+
+        function dtSafe() {
+          return FIXED_DT;
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const p = state.player;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.28 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 2.4) * Math.min(0.08, Math.abs(p.speed) * 0.03);
+          webgl.camera.position.set(p.x * 0.35 + 0.15 + shakeX, 1.62 + shakeY, p.z + 4.35);
+          webgl.look.set(p.x + sway, 1.25, p.z - 7.5);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return {
+              x: (v.x * 0.5 + 0.5) * VIEW_W,
+              y: (-v.y * 0.5 + 0.5) * VIEW_H,
+              visible: v.z < 1,
+            };
+          }
+          const relZ = z - state.player.z;
+          const relX = x - state.player.x;
+          const depth = Math.max(0.35, 8 / (8 + Math.max(0, -relZ)));
+          return {
+            x: VIEW_W * 0.5 + relX * 70 * depth + relZ * -4,
+            y: VIEW_H * 0.62 - y * 48 * depth - relZ * 6,
+            visible: relZ > -18 && relZ < 10,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#1a140c");
+          sky.addColorStop(0.5, "#100c08");
+          sky.addColorStop(1, "#080604");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = `rgba(140,255,106,${0.05 + state.methane * 0.18})`;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+          for (let index = 0; index < 12; index += 1) {
+            const z = state.player.z + 16 - index * 2.2;
+            const p = projectToScreen(-1.7, 1.2, z);
+            const q = projectToScreen(1.7, 1.2, z);
+            ctx.strokeStyle = "rgba(106,74,40,0.7)";
+            ctx.lineWidth = 6;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y - 40);
+            ctx.lineTo(p.x, p.y + 50);
+            ctx.moveTo(q.x, q.y - 40);
+            ctx.lineTo(q.x, q.y + 50);
+            ctx.moveTo(p.x, p.y - 40);
+            ctx.lineTo(q.x, q.y - 40);
+            ctx.stroke();
+          }
+
+          state.fans.forEach((fan) => {
+            const p = projectToScreen(1.4, 1.5, fan.z);
+            ctx.strokeStyle = fan.reversed ? COLORS.brass : COLORS.danger;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(fan.spin);
+            ctx.strokeStyle = COLORS.ink;
+            ctx.beginPath();
+            ctx.moveTo(-12, 0); ctx.lineTo(12, 0);
+            ctx.moveTo(0, -12); ctx.lineTo(0, 12);
+            ctx.stroke();
+            ctx.restore();
+          });
+
+          state.brattices.forEach((door) => {
+            const a = projectToScreen(-1.5, 1.3, door.z);
+            const b = projectToScreen(1.5, 1.3, door.z);
+            ctx.fillStyle = door.open ? "rgba(196,176,128,0.18)" : "rgba(196,176,128,0.7)";
+            ctx.fillRect(Math.min(a.x, b.x), a.y - 46, Math.abs(b.x - a.x), 90);
+            ctx.strokeStyle = COLORS.timber;
+            ctx.strokeRect(Math.min(a.x, b.x), a.y - 46, Math.abs(b.x - a.x), 90);
+          });
+
+          const shelter = projectToScreen(0, 1.2, SHELTER_Z);
+          ctx.fillStyle = COLORS.brass;
+          ctx.fillRect(shelter.x - 22, shelter.y - 28, 44, 56);
+          ctx.fillStyle = COLORS.ink;
+          ctx.font = "700 11px Trebuchet MS, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("대피소", shelter.x, shelter.y - 34);
+
+          const miner = projectToScreen(state.player.x, 0.9, state.player.z);
+          ctx.fillStyle = "#3a3428";
+          ctx.fillRect(miner.x - 8, miner.y - 22, 16, 34);
+          ctx.fillStyle = "#ffe2a0";
+          ctx.beginPath();
+          ctx.arc(miner.x, miner.y - 26, 5, 0, Math.PI * 2);
+          ctx.fill();
+
+          state.particles.forEach((particle) => {
+            const p = projectToScreen(particle.x, particle.y, particle.z);
+            ctx.globalAlpha = clamp(particle.life * 1.5, 0, 1);
+            ctx.fillStyle = particle.kind === "danger" ? COLORS.danger : COLORS.gas;
+            ctx.fillRect(p.x, p.y, 3, 3);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(246,234,208,0.7)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const dist = Math.max(0, SHELTER_Z - state.player.z);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          const pct = Math.round(state.methane * 100);
+          if (objective) objective.textContent = `${pct}%`;
+          if (meter) meter.style.width = `${clamp(pct, 0, 100)}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) {
+            const found = nearestDevice();
+            const hint = found
+              ? (found.kind === "brattice"
+                ? (found.item.open ? "풍문 열림" : "탭 · 풍문")
+                : (found.item.reversed ? "팬 배기" : "탭 · 팬 반전"))
+              : "드래그로 진행";
+            sub.textContent = `거리 ${dist.toFixed(1)}m · ${hint}`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const params = difficultyAt(state.elapsed);
+          if (state.methane >= params.redBand) {
+            hud.strokeStyle = "rgba(255,107,122,0.7)";
+            hud.lineWidth = 6;
+            hud.strokeRect(10, 10, VIEW_W - 20, VIEW_H - 20);
+            hud.fillStyle = "rgba(255,107,122,0.08)";
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          const found = nearestDevice();
+          if (found) {
+            const z = found.item.z;
+            const p = projectToScreen(found.kind === "fan" ? 1.4 : 0, 1.5, z);
+            hud.strokeStyle = COLORS.brass;
+            hud.setLineDash([4, 4]);
+            hud.beginPath();
+            hud.arc(p.x, p.y, 18, 0, Math.PI * 2);
+            hud.stroke();
+            hud.setLineDash([]);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.methane >= params.redBand ? COLORS.danger : COLORS.brass;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,107,122,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          const found = nearestDevice();
+          return JSON.stringify({
+            coordinate_system: "world units; drift +z to shelter; +y up; headlamp camera",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            methane: Number(state.methane.toFixed(3)),
+            distance: Number(Math.max(0, SHELTER_Z - state.player.z).toFixed(2)),
+            player: {
+              x: Number(state.player.x.toFixed(2)),
+              z: Number(state.player.z.toFixed(2)),
+              speed: Number(state.player.speed.toFixed(2)),
+            },
+            brattices: state.brattices.map((door) => ({ z: door.z, open: door.open })),
+            fans: state.fans.map((fan) => ({ z: fan.z, reversed: fan.reversed, stall: Number(fan.stall.toFixed(2)) })),
+            nearest: found ? { kind: found.kind, z: found.item.z } : null,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function pointerWalk(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = (event.clientX - rect.left) / Math.max(1, rect.width);
+          const ny = (event.clientY - rect.top) / Math.max(1, rect.height);
+          input.strafe = (nx - 0.5) * 1.6;
+          input.walk = clamp((0.62 - ny) * 2.4, -0.6, 1.15);
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          pointerWalk(event);
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          if (Math.hypot(dx, dy) > 10) input.moved = true;
+          pointerWalk(event);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.walk = 0;
+            input.strafe = 0;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.dragging && !input.moved) {
+            toggleNearest(difficultyAt(state.elapsed));
+          }
+          input.dragging = false;
+          input.walk = 0;
+          input.strafe = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") {
+              startStage();
+              return;
+            }
+            toggleNearest(difficultyAt(state.elapsed));
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.player.z = SHELTER_Z;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.dragging = false; input.walk = 0; input.strafe = 0;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

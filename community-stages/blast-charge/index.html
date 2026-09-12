@@ -1,0 +1,1199 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>용광로 장입</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #1a0c08; --accent: #ff6b3d; --accent-ink: #1a0c08; --danger: #ff6b7a; --ink: #ffe0d0; --muted: rgba(255,224,208,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">용광로 장입. 코크스·광석·플럭스를 켜켜이 넣고 송풍을 유지하세요. 탭으로 장입 종류, 드래그로 송풍. 선철 4차를 뽑으면 클리어. 노가 식거나 과열되면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 탭으로 장입 종류를 바꾸고 드래그로 송풍을 조절하며 출선 창에서 홀드해 뽑습니다.</p>
+    <main class="stage" aria-label="용광로 장입 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="용광로 장입" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">출선</p>
+          <p class="hud-value" id="hud-objective">0 / 4</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">노온 0%</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Blast Furnace</p>
+          <h1>용광로 장입</h1>
+          <p class="brief-lead">코크스·광석·플럭스를 켜켜이 넣고 송풍을 유지하세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>탭으로 장입 종류, 드래그로 송풍</span></li>
+            <li><strong>클리어</strong><span>선철 4차를 뽑으면 클리어</span></li>
+            <li><strong>실패</strong><span>노가 식거나 과열되면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">조업 중단</p>
+          <h2>노가 무너졌다</h2>
+          <p class="brief-lead" id="fail-detail">노가 식거나 과열되면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">출선 완료</p>
+          <h2>선철 네 차</h2>
+          <p class="brief-lead">장입과 송풍을 맞춰 선철 네 차를 뽑았습니다.</p>
+          <p class="hud-sub" id="clear-stat">선철 4차를 뽑으면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const GOAL = 4;
+        const GRACE = 5.3;
+        const TYPES = ["coke", "ore", "flux"];
+        const TYPE_KO = { coke: "코크스", ore: "광석", flux: "플럭스" };
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "blast-charge",
+          title: "용광로 장입",
+          description: "코크스·광석·플럭스를 켜켜이 넣고 송풍을 유지하세요.",
+          creator: "collin",
+          genre: "3D blast furnace",
+          clearCondition: "선철 4차를 뽑으면 클리어",
+          failCondition: "노가 식거나 과열되면 실패",
+          controls: "탭으로 장입 종류, 드래그로 송풍",
+        };
+        const COLORS = {
+          bg: "#1a0c08",
+          ink: "#ffe0d0",
+          accent: "#ff6b3d",
+          coke: "#2a2420",
+          ore: "#a04028",
+          flux: "#c8b090",
+          iron: "#ff8a3a",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          cold: "노온이 식어 조업이 멈췄습니다",
+          overheat: "노가 과열되어 내화물이 녹았습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const CAM2D = {
+          eye: { x: 6.4, y: 4.2, z: 8.2 },
+          right: { x: 0.92, y: 0, z: -0.39 },
+          up: { x: 0.1, y: 0.96, z: 0.24 },
+          fwd: { x: -0.375, y: 0.28, z: -0.883 },
+          focal: 390,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          taps: 0,
+          typeIndex: 0,
+          coke: 2,
+          ore: 2,
+          flux: 1,
+          heat: 0.62,
+          blast: 0.52,
+          skip: 0,
+          skipDir: 1,
+          skipReady: false,
+          tapWindow: 0,
+          tapHold: 0,
+          cold: 0,
+          hot: 0,
+          ratio: 1,
+          burden: 5,
+          ironFlow: 0,
+          particles: [],
+          sparks: [],
+          smoke: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          warnedCold: false,
+          warnedHot: false,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false, holdTap: false,
+          holding: false, dragging: false, moved: 0, holdTime: 0,
+          downX: 0, downY: 0, baseBlast: 0.52, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            heatMin: 0.42 + (phase - 1) * 0.04,
+            heatMax: 0.8 - (phase - 1) * 0.04,
+            skipSpeed: 0.28 + (phase - 1) * 0.07,
+            blastLeak: 0.04 + (phase - 1) * 0.02,
+            heatGain: 0.16 + (phase - 1) * 0.03,
+            heatLoss: 0.1 + (phase - 1) * 0.04,
+            hang: phase >= 3 ? 0.18 : 0,
+            windowLen: 2.6 - (phase - 1) * 0.28,
+          };
+        }
+
+        function currentType() { return TYPES[state.typeIndex]; }
+
+        function ratioScore() {
+          const total = state.coke + state.ore + state.flux;
+          if (total < 0.2) return 0;
+          const c = state.coke / total;
+          const o = state.ore / total;
+          const f = state.flux / total;
+          const err = Math.abs(c - 0.34) + Math.abs(o - 0.5) + Math.abs(f - 0.16);
+          return clamp(1 - err * 1.4, 0, 1);
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.7, 3.8),
+              vy: randRange(1.2, 5.4),
+              vz: Math.sin(angle) * randRange(0.7, 3.8),
+              life: randRange(0.3, 0.85),
+              kind,
+              size: randRange(0.05, 0.14),
+            });
+          }
+          if (state.particles.length > 80) state.particles.splice(0, state.particles.length - 80);
+        }
+
+        function spawnSmoke() {
+          if (reducedMotion && state.smoke.length > 10) return;
+          state.smoke.push({
+            x: randRange(-0.4, 0.4),
+            y: 8.4,
+            z: randRange(-0.4, 0.4),
+            vy: randRange(0.8, 1.6),
+            life: randRange(0.8, 1.6),
+            size: randRange(0.2, 0.45),
+          });
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "charge") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(160, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "tap") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(520, now + 0.16);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+              osc.start(now); osc.stop(now + 0.22);
+            } else if (kind === "cycle") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(280, now);
+              gain.gain.setValueAtTime(0.02, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+              osc.start(now); osc.stop(now + 0.07);
+            } else if (kind === "warn") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(180, now);
+              osc.frequency.exponentialRampToValueAtTime(90, now + 0.12);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(460, now);
+              osc.frequency.exponentialRampToValueAtTime(1240, now + 0.28);
+              gain.gain.setValueAtTime(0.06, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(80, now);
+              osc.frequency.exponentialRampToValueAtTime(24, now + 0.3);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.33);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.taps = 0;
+          state.typeIndex = 0;
+          state.coke = 2;
+          state.ore = 2;
+          state.flux = 1;
+          state.heat = 0.62;
+          state.blast = 0.52;
+          state.skip = 0.15;
+          state.skipDir = 1;
+          state.skipReady = false;
+          state.tapWindow = 0;
+          state.tapHold = 0;
+          state.cold = 0;
+          state.hot = 0;
+          state.ratio = 1;
+          state.burden = 5;
+          state.ironFlow = 0;
+          state.particles = [];
+          state.sparks = [];
+          state.smoke = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = TYPE_KO.coke;
+          state.messageTime = 0.8;
+          state.failReason = "";
+          state.warnedCold = false;
+          state.warnedHot = false;
+          input.holding = false;
+          input.dragging = false;
+          input.holdTap = false;
+          reseed((Date.now() ^ 0xb1a57) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(1.2, 0.8, 2.4, 26, "iron");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.82;
+          playSfx("boom");
+          burst(0, 2.2, 0, 22, reason === "overheat" ? "iron" : "coke");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function cycleType() {
+          state.typeIndex = (state.typeIndex + 1) % TYPES.length;
+          state.message = TYPE_KO[currentType()];
+          state.messageTime = 0.7;
+          playSfx("cycle");
+        }
+
+        function dumpCharge() {
+          const kind = currentType();
+          if (!state.skipReady) {
+            cycleType();
+            return;
+          }
+          state[kind] += 1;
+          state.skipReady = false;
+          state.skipDir = -1;
+          state.flash = 0.28;
+          playSfx("charge");
+          burst(-2.4, 7.4, 0.2, 10, kind);
+          state.message = `${TYPE_KO[kind]} 장입`;
+          state.messageTime = 0.7;
+        }
+
+        function tryTapIron(dt, params) {
+          const holding = input.holdTap || (input.holding && input.holdTime > 0.22);
+          if (state.tapWindow > 0 && holding) {
+            state.tapHold += dt;
+            state.ironFlow = clamp(state.tapHold / 0.72, 0, 1);
+            if (state.tapHold >= 0.72) completeTap();
+          } else {
+            state.tapHold = Math.max(0, state.tapHold - dt * 0.6);
+            state.ironFlow = state.tapHold / 0.72;
+          }
+        }
+
+        function completeTap() {
+          state.taps += 1;
+          state.tapHold = 0;
+          state.tapWindow = 0;
+          state.coke = Math.max(0, state.coke - 1.2);
+          state.ore = Math.max(0, state.ore - 1.6);
+          state.flux = Math.max(0, state.flux - 0.5);
+          state.heat = clamp(state.heat - 0.06, 0.05, 1);
+          state.flash = 0.55;
+          state.message = `출선 ${state.taps}/${GOAL}`;
+          state.messageTime = 0.9;
+          playSfx("tap");
+          burst(1.6, 0.4, 2.6, 18, "iron");
+          if (state.taps >= GOAL) clearStage();
+        }
+
+        function applyInput(dt) {
+          let blastDelta = 0;
+          if (input.up) blastDelta += 1;
+          if (input.down) blastDelta -= 1;
+          if (blastDelta) state.blast = clamp(state.blast + blastDelta * 0.55 * dt, 0.05, 1);
+        }
+
+        function updateSkip(dt, params) {
+          const hang = random() < params.hang ? 0.35 : 1;
+          state.skip += state.skipDir * params.skipSpeed * hang * dt;
+          if (state.skip >= 1) {
+            state.skip = 1;
+            state.skipReady = true;
+            state.skipDir = 0;
+          }
+          if (state.skip <= 0) {
+            state.skip = 0;
+            state.skipDir = 1;
+            state.skipReady = false;
+          }
+          if (state.skipReady && state.skipDir === 0) {
+            /* wait for dump */
+          }
+        }
+
+        function updateHeat(dt, params) {
+          state.burden = state.coke + state.ore + state.flux;
+          state.ratio = ratioScore();
+          const cokeHeat = state.coke * 0.035;
+          const oreCool = state.ore * 0.028;
+          const blastTerm = (state.blast - 0.42) * params.heatGain;
+          const idleLoss = params.heatLoss * (0.7 + (1 - state.blast) * 0.6);
+          state.heat += (blastTerm + cokeHeat - oreCool - idleLoss) * dt;
+          state.heat += (state.ratio - 0.55) * 0.04 * dt;
+          state.heat = clamp(state.heat, 0, 1);
+          if (!input.holding && !input.up && !input.down) {
+            state.blast = clamp(state.blast - params.blastLeak * dt * 0.15, 0.05, 1);
+          }
+
+          const inBand = state.heat >= params.heatMin && state.heat <= params.heatMax;
+          if (state.elapsed >= GRACE) {
+            if (state.heat < params.heatMin) state.cold = clamp(state.cold + (params.heatMin - state.heat) * dt * 1.5, 0, 1);
+            else state.cold = Math.max(0, state.cold - dt * 0.2);
+            if (state.heat > params.heatMax) state.hot = clamp(state.hot + (state.heat - params.heatMax) * dt * 1.6, 0, 1);
+            else state.hot = Math.max(0, state.hot - dt * 0.2);
+          }
+          if (state.cold > 0.45 && !state.warnedCold) {
+            state.warnedCold = true;
+            state.message = "노온 하락";
+            state.messageTime = 0.9;
+            playSfx("warn");
+          }
+          if (state.cold < 0.2) state.warnedCold = false;
+          if (state.hot > 0.45 && !state.warnedHot) {
+            state.warnedHot = true;
+            state.message = "과열";
+            state.messageTime = 0.9;
+            playSfx("warn");
+          }
+          if (state.hot < 0.2) state.warnedHot = false;
+          if (state.cold >= 1) failStage("cold");
+          else if (state.hot >= 1) failStage("overheat");
+
+          const ready = inBand && state.burden >= 4.2 && state.ratio > 0.42 && state.taps < GOAL;
+          if (ready && state.tapWindow <= 0 && state.elapsed > 6.2) {
+            state.tapWindow = params.windowLen;
+            state.message = "출선 창";
+            state.messageTime = 0.85;
+          }
+          if (!ready && state.tapWindow > 0) state.tapWindow = Math.max(0, state.tapWindow - dt * 1.4);
+          else if (state.tapWindow > 0) state.tapWindow = Math.max(0, state.tapWindow - dt);
+        }
+
+        function updateFx(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            p.vy -= 4.8 * dt; p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          state.smoke.forEach((p) => {
+            p.y += p.vy * dt;
+            p.x += Math.sin(state.elapsed + p.y) * dt * 0.2;
+            p.life -= dt;
+          });
+          state.smoke = state.smoke.filter((p) => p.life > 0);
+          if (random() < 0.15 + state.heat * 0.2) spawnSmoke();
+          if (state.ironFlow > 0.2 && random() < 0.25) burst(1.5, 0.3, 2.5, 2, "iron");
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          if (input.holding) input.holdTime += dt;
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          applyInput(dt);
+          const params = difficultyAt(state.elapsed);
+          updateSkip(dt, params);
+          if (state.mode !== "running") return;
+          updateHeat(dt, params);
+          if (state.mode !== "running") return;
+          tryTapIron(dt, params);
+          if (state.mode !== "running") return;
+          updateFx(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `출선 ${state.taps} / ${GOAL} · 노온 ${(state.heat * 100).toFixed(0)}%`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 출선 ${state.taps}차`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x1a0c08, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a0c08);
+          scene.fog = new THREE.Fog(0x1a0c08, 10, 42);
+
+          const camera = new THREE.PerspectiveCamera(55, VIEW_W / VIEW_H, 0.1, 90);
+          camera.position.set(7.2, 4.6, 9.1);
+
+          scene.add(new THREE.AmbientLight(0x3a2018, 0.42));
+          const hemi = new THREE.HemisphereLight(0xffb080, 0x1a0804, 0.38);
+          scene.add(hemi);
+          const moon = new THREE.DirectionalLight(0xffd0a0, 0.22);
+          moon.position.set(-10, 16, 6);
+          scene.add(moon);
+          const throatLight = new THREE.PointLight(0xff6b3d, 1.4, 22);
+          throatLight.position.set(0, 5.2, 0);
+          scene.add(throatLight);
+          const tapLight = new THREE.PointLight(0xffaa40, 1.1, 14);
+          tapLight.position.set(1.6, 0.8, 2.8);
+          scene.add(tapLight);
+
+          const emberCount = reducedMotion ? 80 : 260;
+          const emberPos = new Float32Array(emberCount * 3);
+          for (let i = 0; i < emberCount; i += 1) {
+            emberPos[i * 3] = (Math.random() - 0.5) * 16;
+            emberPos[i * 3 + 1] = Math.random() * 10;
+            emberPos[i * 3 + 2] = (Math.random() - 0.5) * 14;
+          }
+          const emberGeo = new THREE.BufferGeometry();
+          emberGeo.setAttribute("position", new THREE.BufferAttribute(emberPos, 3));
+          const embers = new THREE.Points(emberGeo, new THREE.PointsMaterial({
+            color: 0xff6b3d, size: 0.08, transparent: true, opacity: 0.55, sizeAttenuation: true,
+          }));
+          scene.add(embers);
+
+          const groundMat = new THREE.MeshStandardMaterial({
+            color: 0x2a1810, roughness: 0.92, metalness: 0.08, emissive: 0x120804, emissiveIntensity: 0.16,
+          });
+          const ground = new THREE.Mesh(new THREE.CircleGeometry(28, 28), groundMat);
+          ground.rotation.x = -Math.PI / 2;
+          scene.add(ground);
+
+          const brickMat = new THREE.MeshStandardMaterial({
+            color: 0x4a2818, roughness: 0.78, metalness: 0.12, emissive: 0x2a1008, emissiveIntensity: 0.2,
+          });
+          const ironMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3430, roughness: 0.4, metalness: 0.65, emissive: 0x141010, emissiveIntensity: 0.14,
+          });
+          const glowMat = new THREE.MeshStandardMaterial({
+            color: 0xff6b3d, roughness: 0.35, metalness: 0.2, emissive: 0xff3a10, emissiveIntensity: 0.9,
+          });
+          const cokeMat = new THREE.MeshStandardMaterial({
+            color: 0x2a2420, roughness: 0.9, metalness: 0.08, emissive: 0x101010, emissiveIntensity: 0.1,
+          });
+          const oreMat = new THREE.MeshStandardMaterial({
+            color: 0xa04028, roughness: 0.7, metalness: 0.18, emissive: 0x401008, emissiveIntensity: 0.22,
+          });
+          const fluxMat = new THREE.MeshStandardMaterial({
+            color: 0xc8b090, roughness: 0.65, metalness: 0.1, emissive: 0x2a2418, emissiveIntensity: 0.12,
+          });
+
+          const furnace = new THREE.Group();
+          const bosh = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 2.15, 3.4, 18), brickMat);
+          bosh.position.y = 1.8;
+          furnace.add(bosh);
+          const stack = new THREE.Mesh(new THREE.CylinderGeometry(1.15, 1.7, 4.6, 18), brickMat);
+          stack.position.y = 5.7;
+          furnace.add(stack);
+          const throat = new THREE.Mesh(new THREE.CylinderGeometry(1.35, 1.15, 1.2, 14), ironMat);
+          throat.position.y = 8.55;
+          furnace.add(throat);
+          const bell = new THREE.Mesh(new THREE.ConeGeometry(0.7, 0.7, 10), ironMat);
+          bell.position.y = 9.2;
+          furnace.add(bell);
+          const hearthGlow = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.5, 0.8, 16), glowMat);
+          hearthGlow.position.y = 0.5;
+          furnace.add(hearthGlow);
+          scene.add(furnace);
+
+          const bustle = new THREE.Mesh(new THREE.TorusGeometry(2.35, 0.16, 8, 24), ironMat);
+          bustle.rotation.x = Math.PI / 2;
+          bustle.position.y = 2.15;
+          scene.add(bustle);
+          const tuyeres = [];
+          for (let i = 0; i < 8; i += 1) {
+            const a = (i / 8) * Math.PI * 2;
+            const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.12, 0.9, 8), ironMat);
+            pipe.position.set(Math.cos(a) * 1.95, 2.15, Math.sin(a) * 1.95);
+            pipe.lookAt(0, 2.15, 0);
+            scene.add(pipe);
+            const jet = new THREE.Mesh(
+              new THREE.ConeGeometry(0.08, 0.35, 6),
+              new THREE.MeshBasicMaterial({ color: 0xffaa60, transparent: true, opacity: 0.55, depthWrite: false })
+            );
+            jet.position.set(Math.cos(a) * 1.55, 2.15, Math.sin(a) * 1.55);
+            scene.add(jet);
+            tuyeres.push(jet);
+          }
+
+          const platform = new THREE.Mesh(new THREE.BoxGeometry(6.4, 0.16, 4.2), ironMat);
+          platform.position.set(0.4, 2.0, 3.15);
+          scene.add(platform);
+          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 4.2), ironMat);
+          rail.position.set(-2.6, 2.55, 3.15);
+          scene.add(rail);
+          const railB = rail.clone();
+          railB.position.x = 3.4;
+          scene.add(railB);
+
+          const hoist = new THREE.Group();
+          const tower = new THREE.Mesh(new THREE.BoxGeometry(1.4, 10.2, 1.4), ironMat);
+          tower.position.set(-3.6, 5.1, 0.2);
+          hoist.add(tower);
+          for (let lv = 0; lv < 5; lv += 1) {
+            const brace = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.12), ironMat);
+            brace.position.set(-3.6, 1.4 + lv * 1.8, 0.95);
+            hoist.add(brace);
+          }
+          const skip = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.7, 0.85), ironMat);
+          skip.position.set(-2.55, 1.2, 0.2);
+          hoist.add(skip);
+          const skipLoad = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.28, 0.65), cokeMat);
+          skipLoad.position.set(-2.55, 1.5, 0.2);
+          hoist.add(skipLoad);
+          scene.add(hoist);
+
+          const stoveMat = new THREE.MeshStandardMaterial({
+            color: 0x5a3020, roughness: 0.7, metalness: 0.2, emissive: 0x3a1008, emissiveIntensity: 0.3,
+          });
+          const stoves = [];
+          for (let i = 0; i < 3; i += 1) {
+            const stove = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 0.95, 6.4, 12), stoveMat);
+            stove.position.set(4.6 + (i % 2) * 0.3, 3.2, -2.4 - i * 2.1);
+            scene.add(stove);
+            const cap = new THREE.Mesh(new THREE.SphereGeometry(0.85, 10, 8), ironMat);
+            cap.position.set(stove.position.x, 6.5, stove.position.z);
+            scene.add(cap);
+            stoves.push(stove);
+          }
+
+          const runner = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.18, 4.2), brickMat);
+          runner.position.set(1.55, 0.22, 3.4);
+          scene.add(runner);
+          const ironStream = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.08, 2.4), glowMat);
+          ironStream.position.set(1.55, 0.34, 3.1);
+          ironStream.visible = false;
+          scene.add(ironStream);
+
+          const potGeo = new THREE.CylinderGeometry(0.55, 0.45, 0.7, 10);
+          const pots = [];
+          for (let i = 0; i < 4; i += 1) {
+            const pot = new THREE.Mesh(potGeo, ironMat);
+            pot.position.set(3.4, 0.4, 1.2 + i * 1.15);
+            scene.add(pot);
+            pots.push(pot);
+          }
+
+          const pileGeo = new THREE.ConeGeometry(1.3, 1.4, 7);
+          const cokePile = new THREE.Mesh(pileGeo, cokeMat);
+          cokePile.position.set(-6.2, 0.7, 3.4);
+          scene.add(cokePile);
+          const orePile = new THREE.Mesh(pileGeo, oreMat);
+          orePile.position.set(-6.4, 0.7, 6.1);
+          scene.add(orePile);
+          const fluxPile = new THREE.Mesh(new THREE.ConeGeometry(1.0, 1.0, 7), fluxMat);
+          fluxPile.position.set(-4.6, 0.5, 5.4);
+          scene.add(fluxPile);
+
+          const shed = new THREE.Mesh(new THREE.BoxGeometry(4.4, 2.2, 3.2), ironMat);
+          shed.position.set(6.4, 1.1, 4.8);
+          scene.add(shed);
+          const roof = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.12, 3.5), brickMat);
+          roof.position.set(6.4, 2.28, 4.8);
+          roof.rotation.z = -0.06;
+          scene.add(roof);
+
+          const chimney = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.45, 7.5, 10), brickMat);
+          chimney.position.set(7.8, 3.7, -6.4);
+          scene.add(chimney);
+
+          const particleGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const ironPart = new THREE.MeshBasicMaterial({
+            color: 0xff8a3a, transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+          const cokePart = new THREE.MeshBasicMaterial({ color: 0x3a342c, transparent: true, opacity: 0.9, depthWrite: false });
+          const orePart = new THREE.MeshBasicMaterial({ color: 0xa04028, transparent: true, opacity: 0.9, depthWrite: false });
+          const fluxPart = new THREE.MeshBasicMaterial({ color: 0xc8b090, transparent: true, opacity: 0.9, depthWrite: false });
+          const smokeGeo = new THREE.SphereGeometry(0.22, 6, 6);
+          const smokeMat = new THREE.MeshBasicMaterial({ color: 0x4a3a30, transparent: true, opacity: 0.25, depthWrite: false });
+
+          return {
+            renderer, scene, camera, embers, throatLight, tapLight, hearthGlow, glowMat,
+            skip, skipLoad, tuyeres, ironStream, cokeMat, oreMat, fluxMat,
+            particleGeo, ironPart, cokePart, orePart, fluxPart, particleMeshes: [],
+            smokeGeo, smokeMat, smokeMeshes: [],
+            look: new THREE.Vector3(),
+          };
+        }
+
+        function kindMat(kind) {
+          if (kind === "ore") return webgl.orePart;
+          if (kind === "flux") return webgl.fluxPart;
+          if (kind === "coke") return webgl.cokePart;
+          return webgl.ironPart;
+        }
+        function skipMat(kind) {
+          if (kind === "ore") return webgl.oreMat;
+          if (kind === "flux") return webgl.fluxMat;
+          return webgl.cokeMat;
+        }
+
+        function skipY() {
+          return lerp(1.15, 8.6, state.skip);
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const t = state.elapsed;
+          webgl.skip.position.y = skipY();
+          webgl.skip.position.x = lerp(-2.55, -1.15, state.skip);
+          webgl.skipLoad.position.y = skipY() + 0.32;
+          webgl.skipLoad.position.x = webgl.skip.position.x;
+          webgl.skipLoad.material = skipMat(currentType());
+          webgl.skipLoad.visible = !state.skipReady || true;
+          webgl.hearthGlow.material.emissiveIntensity = 0.45 + state.heat * 1.1;
+          webgl.throatLight.intensity = 0.7 + state.heat * 1.3 + state.blast * 0.4;
+          webgl.tapLight.intensity = 0.4 + state.ironFlow * 1.6;
+          webgl.ironStream.visible = state.ironFlow > 0.15;
+          webgl.ironStream.scale.z = 0.4 + state.ironFlow * 1.3;
+          webgl.tuyeres.forEach((jet, i) => {
+            jet.scale.setScalar((0.6 + state.blast * 1.1) * (reducedMotion ? 1 : 0.85 + Math.sin(t * 14 + i) * 0.2));
+            jet.material.opacity = 0.25 + state.blast * 0.5;
+          });
+          const pos = webgl.embers.geometry.attributes.position;
+          if (!reducedMotion) {
+            for (let i = 0; i < pos.count; i += 1) {
+              let y = pos.getY(i) + 0.01 + state.heat * 0.02;
+              if (y > 10) y = 0.2;
+              pos.setY(i, y);
+            }
+            pos.needsUpdate = true;
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.ironPart.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.07);
+            mesh.material = kindMat(p.kind);
+            mesh.material.opacity = clamp(p.life * 1.6, 0, 1);
+          });
+          while (webgl.smokeMeshes.length < state.smoke.length) {
+            const mesh = new THREE.Mesh(webgl.smokeGeo, webgl.smokeMat.clone());
+            webgl.scene.add(mesh);
+            webgl.smokeMeshes.push(mesh);
+          }
+          webgl.smokeMeshes.forEach((mesh, index) => {
+            const p = state.smoke[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.22 + (1 - p.life));
+            mesh.material.opacity = clamp(p.life * 0.22, 0, 0.3);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.5 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.32 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 0.2) * 0.1;
+          webgl.camera.position.set(7.2 + sway + shakeX, 4.6 + shakeY, 9.1);
+          webgl.look.set(-0.4, lerp(2.4, 6.8, state.skip * 0.45), 0.6);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = webgl.look.set(x, y, z).project(webgl.camera);
+            return { x: (v.x * 0.5 + 0.5) * VIEW_W, y: (-v.y * 0.5 + 0.5) * VIEW_H, visible: v.z < 1 };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(2.2, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.6 };
+        }
+
+        function drawWorld2D(ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          g.addColorStop(0, "#2a1008");
+          g.addColorStop(1, "#1a0c08");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#2a1810";
+          ctx.fillRect(0, VIEW_H * 0.7, VIEW_W, VIEW_H * 0.3);
+          const base = projectToScreen(0, 0, 0);
+          const top = projectToScreen(0, 9.2, 0);
+          ctx.fillStyle = "#4a2818";
+          ctx.beginPath();
+          ctx.moveTo(base.x - 70, base.y);
+          ctx.lineTo(base.x + 70, base.y);
+          ctx.lineTo(top.x + 28, top.y);
+          ctx.lineTo(top.x - 28, top.y);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = `rgba(255,107,61,${0.25 + state.heat * 0.5})`;
+          ctx.fillRect(base.x - 36, base.y - 40, 72, 36);
+          const skip = projectToScreen(-2.4, skipY(), 0.2);
+          ctx.fillStyle = "#3a3430";
+          ctx.fillRect(skip.x - 18, skip.y - 12, 36, 24);
+          ctx.fillStyle = currentType() === "ore" ? COLORS.ore : currentType() === "flux" ? COLORS.flux : "#2a2420";
+          ctx.fillRect(skip.x - 12, skip.y - 18, 24, 10);
+          const stove = projectToScreen(4.6, 3.2, -2.4);
+          ctx.fillStyle = "#5a3020";
+          ctx.fillRect(stove.x - 16, stove.y - 70, 32, 90);
+          if (state.ironFlow > 0.1) {
+            const run = projectToScreen(1.55, 0.3, 3.1);
+            ctx.fillStyle = COLORS.iron;
+            ctx.globalAlpha = 0.4 + state.ironFlow * 0.5;
+            ctx.fillRect(run.x - 6, run.y, 12, 40);
+            ctx.globalAlpha = 1;
+          }
+          state.particles.forEach((p) => {
+            const q = projectToScreen(p.x, p.y, p.z);
+            ctx.globalAlpha = clamp(p.life * 1.5, 0, 1);
+            ctx.fillStyle = p.kind === "ore" ? COLORS.ore : p.kind === "flux" ? COLORS.flux : COLORS.iron;
+            ctx.beginPath(); ctx.arc(q.x, q.y, 3, 0, Math.PI * 2); ctx.fill();
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,224,208,0.62)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 22, VIEW_H - 18);
+        }
+
+        function drawGauge(x, y, value, lo, hi, label, danger) {
+          hud.save();
+          hud.translate(x, y);
+          hud.fillStyle = "rgba(26,12,8,0.72)";
+          hud.beginPath();
+          hud.roundRect(-54, -36, 108, 54, 10);
+          hud.fill();
+          hud.strokeStyle = danger ? COLORS.danger : "rgba(255,107,61,0.5)";
+          hud.stroke();
+          hud.fillStyle = COLORS.ink;
+          hud.font = "700 10px Trebuchet MS, sans-serif";
+          hud.textAlign = "center";
+          hud.fillText(label, 0, -18);
+          hud.fillStyle = "rgba(255,224,208,0.16)";
+          hud.fillRect(-40, -6, 80, 8);
+          hud.fillStyle = danger ? COLORS.danger : COLORS.accent;
+          hud.fillRect(-40, -6, 80 * clamp(value, 0, 1), 8);
+          if (hi > lo) {
+            hud.fillStyle = "rgba(94,240,176,0.45)";
+            hud.fillRect(-40 + lo * 80, -8, Math.max(2, (hi - lo) * 80), 12);
+          }
+          hud.restore();
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.taps} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.taps / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `노온 ${(state.heat * 100).toFixed(0)}% · ${TYPE_KO[currentType()]}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const params = difficultyAt(state.elapsed);
+          drawGauge(92, VIEW_H - 68, state.heat, params.heatMin, params.heatMax, "노온", state.cold > 0.4 || state.hot > 0.4);
+          drawGauge(214, VIEW_H - 68, state.blast, 0.35, 0.78, "송풍", false);
+          drawGauge(336, VIEW_H - 68, state.ratio, 0.45, 1, "배합", state.ratio < 0.4);
+          hud.fillStyle = COLORS.ink;
+          hud.font = "700 12px Trebuchet MS, sans-serif";
+          hud.textAlign = "left";
+          hud.fillText(`C ${state.coke.toFixed(0)}  O ${state.ore.toFixed(0)}  F ${state.flux.toFixed(0)}`, 24, VIEW_H - 18);
+          if (state.tapWindow > 0) {
+            hud.fillStyle = COLORS.accent;
+            hud.font = "800 16px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("출선 홀드", VIEW_W / 2, VIEW_H * 0.4);
+            hud.fillStyle = "rgba(255,107,61,0.25)";
+            hud.fillRect(VIEW_W / 2 - 80, VIEW_H * 0.43, 160, 10);
+            hud.fillStyle = COLORS.accent;
+            hud.fillRect(VIEW_W / 2 - 80, VIEW_H * 0.43, 160 * clamp(state.tapHold / 0.72, 0, 1), 10);
+          }
+          if (state.skipReady) {
+            hud.fillStyle = COLORS.flux;
+            hud.font = "800 13px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("스키프 장입", VIEW_W * 0.22, 96);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.includes("과열") || state.message.includes("하락") ? COLORS.danger : COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,107,61,${state.flash * 0.14})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; furnace origin; +y up; skip/tuyere camera",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            taps: state.taps,
+            heat: Number(state.heat.toFixed(3)),
+            blast: Number(state.blast.toFixed(3)),
+            coke: Number(state.coke.toFixed(2)),
+            ore: Number(state.ore.toFixed(2)),
+            flux: Number(state.flux.toFixed(2)),
+            ratio: Number(state.ratio.toFixed(3)),
+            skip: Number(state.skip.toFixed(3)),
+            type: currentType(),
+            tapWindow: Number(state.tapWindow.toFixed(2)),
+            result: window.relayStageResult.status,
+            webgl: Boolean(webgl),
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.holding = true;
+          input.dragging = false;
+          input.moved = 0;
+          input.holdTime = 0;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.baseBlast = state.blast;
+          input.pointerId = event.pointerId;
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.holding || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          input.moved = Math.hypot(dx, dy);
+          if (input.moved > 8) {
+            input.dragging = true;
+            state.blast = clamp(input.baseBlast - dy * 0.0022, 0.05, 1);
+          }
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.holding = false;
+            input.dragging = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.holding && !input.dragging && input.holdTime < 0.22) {
+            dumpCharge();
+          }
+          input.holding = false;
+          input.dragging = false;
+          input.holdTime = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (state.mode !== "running") { startStage(); return; }
+            input.holdTap = true;
+            if (!event.repeat && state.tapWindow <= 0) dumpCharge();
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "Space") { input.holdTap = false; return; }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.taps = GOAL;
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.holding = false; input.dragging = false; input.holdTap = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

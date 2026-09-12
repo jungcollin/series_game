@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>탐침 수색</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #0c141c; --accent: #9be7ff; --accent-ink: #061018; --danger: #ff6b7a; --ink: #e9f7ff; --muted: rgba(233,247,255,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">탐침 수색. 비콘 방향과 탐침 격자로 매몰자를 찾으세요. 드래그로 이동, 탭으로 탐침. 매몰자 1명을 찾아 표시하면 클리어. 시간이 다 되면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 드래그해 설면을 걷고 탭해 탐침을 꽂습니다.</p>
+    <main class="stage" aria-label="탐침 수색 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="탐침 수색" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">신호</p>
+          <p class="hud-value" id="hud-objective">--</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">48.0</p>
+          <p class="hud-sub" id="hud-sub">격자 --</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Avalanche Probe</p>
+          <h1>탐침 수색</h1>
+          <p class="brief-lead">비콘 방향과 탐침 격자로 매몰자를 찾으세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 이동, 탭으로 탐침</span></li>
+            <li><strong>클리어</strong><span>매몰자 1명을 찾아 표시하면 클리어</span></li>
+            <li><strong>실패</strong><span>시간이 다 되면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">수색 실패</p>
+          <h2>공기가 끊겼다</h2>
+          <p class="brief-lead" id="fail-detail">시간이 다 되면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">발견</p>
+          <h2>매몰자 표시</h2>
+          <p class="brief-lead">탐침이 매몰자를 맞혀 깃발을 꽂았습니다.</p>
+          <p class="hud-sub" id="clear-stat">매몰자 1명을 찾아 표시하면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 48;
+        const FIELD = 11.5;
+        const TAP_PX = 12;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "avalanche-probe",
+          title: "탐침 수색",
+          description: "비콘 방향과 탐침 격자로 매몰자를 찾으세요.",
+          creator: "collin",
+          genre: "3D avalanche search",
+          clearCondition: "매몰자 1명을 찾아 표시하면 클리어",
+          failCondition: "시간이 다 되면 실패",
+          controls: "드래그로 이동, 탭으로 탐침",
+        };
+        const COLORS = {
+          bg: "#0c141c",
+          ink: "#e9f7ff",
+          ice: "#9be7ff",
+          snow: "#d8eef8",
+          wood: "#6a4a28",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          time_limit: "매몰자 잔여 공기가 소진되었습니다",
+          off_field: "사면을 벗어나 데브리에 빠졌습니다",
+          probe_miss: "헛탐침이 많아 골든타임을 잃었습니다",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+        function dist2(ax, az, bx, bz) { return Math.hypot(ax - bx, az - bz); }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          air: 1,
+          player: { x: 0, y: 0, z: 8.4, yaw: 0, speed: 0 },
+          victim: { x: 2.4, z: -4.2, depth: 1.15 },
+          probes: [],
+          flags: [],
+          particles: [],
+          beacon: { dist: 12, dir: 0, strength: 0.2, grid: false },
+          flash: 0,
+          shake: 0,
+          probeAnim: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          misses: 0,
+          lastTone: 0,
+        };
+        const input = {
+          left: false, right: false, up: false, down: false,
+          dragging: false, mx: 0, mz: 0, downX: 0, downY: 0, moved: false, pointerId: null,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            walk: phase >= 3 ? 2.55 : 2.9,
+            airFar: phase === 1 ? 1.12 : phase === 2 ? 1.35 : 1.62,
+            airNear: 0.88,
+            cone: phase === 1 ? 1 : phase === 2 ? 0.72 : 0.48,
+            bounce: phase >= 3,
+            hitR: phase >= 3 ? 0.38 : 0.48,
+            missLimit: 8,
+          };
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(6, count) : count;
+          for (let index = 0; index < amount; index += 1) {
+            const angle = (Math.PI * 2 * index) / amount;
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(angle) * randRange(0.4, 2.2),
+              vy: randRange(0.5, 2.4),
+              vz: Math.sin(angle) * randRange(0.4, 2.2),
+              life: randRange(0.3, 0.75),
+              kind,
+              size: randRange(0.04, 0.1),
+            });
+          }
+          if (state.particles.length > 70) state.particles.splice(0, state.particles.length - 70);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind, freq) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "tone") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(freq || 420, now);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+              osc.start(now); osc.stop(now + 0.09);
+            } else if (kind === "probe") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(140, now);
+              osc.frequency.exponentialRampToValueAtTime(70, now + 0.1);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+              osc.start(now); osc.stop(now + 0.13);
+            } else if (kind === "hit") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(520, now);
+              osc.frequency.exponentialRampToValueAtTime(980, now + 0.16);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+              osc.start(now); osc.stop(now + 0.21);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(400, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.24);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.29);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.26);
+              gain.gain.setValueAtTime(0.07, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.29);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.air = 1;
+          state.player = { x: 0, y: 0, z: 8.4, yaw: 0, speed: 0 };
+          reseed((Date.now() ^ 0xd7d7) >>> 0);
+          const angle = randRange(-0.9, 0.9);
+          const radius = randRange(6.5, 9.2);
+          state.victim = {
+            x: Math.sin(angle) * radius,
+            z: -Math.cos(angle) * radius * 0.55 - 1.2,
+            depth: randRange(0.9, 1.35),
+          };
+          state.probes = [];
+          state.flags = [];
+          state.particles = [];
+          state.beacon = { dist: 12, dir: 0, strength: 0.2, grid: false };
+          state.flash = 0;
+          state.shake = 0;
+          state.probeAnim = 0;
+          state.message = "비콘을 따라 격자로 좁히세요";
+          state.messageTime = 1.5;
+          state.failReason = "";
+          state.misses = 0;
+          state.lastTone = 0;
+          input.dragging = false;
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          burst(state.victim.x, 0.6, state.victim.z, 22, "ice");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.14 : 0.7;
+          playSfx("boom");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function updateBeacon(params) {
+          const p = state.player;
+          const v = state.victim;
+          let dx = v.x - p.x;
+          let dz = v.z - p.z;
+          if (params.bounce && Math.sin(state.elapsed * 2.4) > 0.65) {
+            dx += Math.sin(state.elapsed * 5) * 1.8;
+            dz += Math.cos(state.elapsed * 4.2) * 1.4;
+          }
+          const dist = Math.hypot(dx, dz);
+          const absDir = Math.atan2(dx, -dz);
+          let rel = absDir - p.yaw;
+          while (rel > Math.PI) rel -= Math.PI * 2;
+          while (rel < -Math.PI) rel += Math.PI * 2;
+          const cone = Math.max(0, 1 - Math.abs(rel) / (params.cone * 1.4));
+          state.beacon.dist = dist;
+          state.beacon.dir = rel;
+          state.beacon.strength = clamp((1 - dist / 16) * (0.35 + cone * 0.65), 0, 1);
+          state.beacon.grid = dist < 4.2;
+        }
+
+        function doProbe(params) {
+          if (state.probeAnim > 0) return;
+          state.probeAnim = 0.28;
+          const p = state.player;
+          const gx = Math.round(p.x * 2) / 2;
+          const gz = Math.round(p.z * 2) / 2;
+          const onGrid = state.beacon.grid && Math.abs(p.x - gx) < 0.28 && Math.abs(p.z - gz) < 0.28;
+          const hitDist = dist2(p.x, p.z, state.victim.x, state.victim.z);
+          playSfx("probe");
+          burst(p.x, 0.2, p.z, 8, "snow");
+          state.probes.push({ x: p.x, z: p.z, hit: hitDist <= params.hitR, onGrid });
+          if (hitDist <= params.hitR) {
+            state.flags.push({ x: p.x, z: p.z });
+            state.message = "탐침 접촉!";
+            state.messageTime = 0.9;
+            playSfx("hit");
+            state.flash = 0.5;
+            clearStage();
+            return;
+          }
+          if (!onGrid && state.beacon.grid) {
+            state.air -= 0.035;
+            state.misses += 1;
+            state.message = "격자 밖 헛탐침";
+            state.messageTime = 0.7;
+          } else if (state.beacon.grid) {
+            state.misses += 1;
+            const hint = hitDist < 1.2 ? "바로 옆" : hitDist < 2.2 ? "가까운 격자" : "격자 이동";
+            state.message = hint;
+            state.messageTime = 0.7;
+          } else {
+            state.misses += 1;
+            state.message = "아직 비콘 수색";
+            state.messageTime = 0.6;
+          }
+          if (state.misses >= params.missLimit) failStage("probe_miss");
+        }
+
+        function updateMove(dt, params) {
+          let mx = 0;
+          let mz = 0;
+          if (input.left) mx -= 1;
+          if (input.right) mx += 1;
+          if (input.up) mz -= 1;
+          if (input.down) mz += 1;
+          if (input.dragging) {
+            mx += input.mx;
+            mz += input.mz;
+          }
+          const mag = Math.hypot(mx, mz);
+          if (mag > 1) { mx /= mag; mz /= mag; }
+          const speed = params.walk * (state.beacon.grid ? 0.78 : 1);
+          state.player.x += mx * speed * dt;
+          state.player.z += mz * speed * dt;
+          state.player.speed = mag * speed;
+          if (mag > 0.15) state.player.yaw = Math.atan2(mx, -mz);
+          const r = Math.hypot(state.player.x, state.player.z);
+          if (r > FIELD) {
+            failStage("off_field");
+            return;
+          }
+        }
+
+        function updateAir(dt, params) {
+          const approaching = state.beacon.dist < 9 && Math.abs(state.beacon.dir) < 0.7;
+          const rate = approaching ? params.airNear : params.airFar;
+          const pathWaste = state.player.speed > 0.4 && !approaching ? 1.15 : 1;
+          state.air -= (dt / DURATION) * rate * pathWaste;
+          if (state.air <= 0) failStage("time_limit");
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((particle) => {
+            particle.x += particle.vx * dt;
+            particle.y += particle.vy * dt;
+            particle.z += particle.vz * dt;
+            particle.vy -= 2.8 * dt;
+            particle.life -= dt;
+          });
+          state.particles = state.particles.filter((particle) => particle.life > 0);
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.6);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.probeAnim = Math.max(0, state.probeAnim - dt);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          updateMove(dt, params);
+          if (state.mode !== "running") return;
+          updateBeacon(params);
+          updateAir(dt, params);
+          if (state.mode !== "running") return;
+          const interval = lerp(0.85, 0.16, state.beacon.strength);
+          if (state.elapsed - state.lastTone > interval) {
+            state.lastTone = state.elapsed;
+            const freq = lerp(280, 880, state.beacon.strength);
+            playSfx("tone", freq);
+          }
+          updateParticles(dt);
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `신호 ${Math.round(state.beacon.strength * 100)}% · 탐침 ${state.probes.length}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 탐침 ${state.probes.length}회`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x0c141c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x6a8498);
+          scene.fog = new THREE.Fog(0x6a8498, 8, 34);
+
+          const camera = new THREE.PerspectiveCamera(58, VIEW_W / VIEW_H, 0.12, 80);
+          camera.position.set(0, 6.5, 12);
+
+          scene.add(new THREE.AmbientLight(0x8aa8c0, 0.5));
+          const hemi = new THREE.HemisphereLight(0xd8eef8, 0x3a4850, 0.55);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xfff4e0, 0.55);
+          sun.position.set(-10, 18, 8);
+          scene.add(sun);
+          const beaconLight = new THREE.PointLight(0x9be7ff, 0.9, 10);
+          beaconLight.position.set(0, 1.4, 0);
+          scene.add(beaconLight);
+
+          const snowMat = new THREE.MeshStandardMaterial({
+            color: 0xd8eef8, roughness: 0.92, metalness: 0.04, emissive: 0x1a2830, emissiveIntensity: 0.12,
+          });
+          const iceMat = new THREE.MeshStandardMaterial({
+            color: 0x9be7ff, roughness: 0.35, metalness: 0.18, emissive: 0x123040, emissiveIntensity: 0.22,
+          });
+          const woodMat = new THREE.MeshStandardMaterial({
+            color: 0x6a4a28, roughness: 0.84, metalness: 0.06, emissive: 0x1a1008, emissiveIntensity: 0.12,
+          });
+          const darkMat = new THREE.MeshStandardMaterial({
+            color: 0x3a4048, roughness: 0.7, metalness: 0.2, emissive: 0x101418, emissiveIntensity: 0.14,
+          });
+          const clothMat = new THREE.MeshStandardMaterial({
+            color: 0xc45a3a, roughness: 0.6, metalness: 0.08, emissive: 0x2a1008, emissiveIntensity: 0.2,
+          });
+          const gearMat = new THREE.MeshStandardMaterial({
+            color: 0x3a3a38, roughness: 0.45, metalness: 0.55, emissive: 0x101010, emissiveIntensity: 0.16,
+          });
+
+          const field = new THREE.Mesh(new THREE.CircleGeometry(FIELD + 0.6, 28), snowMat);
+          field.rotation.x = -Math.PI / 2;
+          field.position.y = -0.02;
+          scene.add(field);
+
+          const moundGeo = new THREE.SphereGeometry(1.4, 8, 6);
+          const mounds = [];
+          for (let index = 0; index < 14; index += 1) {
+            const mound = new THREE.Mesh(moundGeo, index % 3 ? snowMat : iceMat);
+            const a = (index / 14) * Math.PI * 2;
+            const r = 3.2 + (index % 4) * 1.6;
+            mound.position.set(Math.cos(a) * r, -0.55, Math.sin(a) * r);
+            mound.scale.set(1.2 + (index % 3) * 0.3, 0.35, 1.1);
+            scene.add(mound);
+            mounds.push(mound);
+          }
+
+          const trunkGeo = new THREE.CylinderGeometry(0.08, 0.14, 2.4, 6);
+          const trees = [];
+          for (let index = 0; index < 10; index += 1) {
+            const tree = new THREE.Group();
+            const trunk = new THREE.Mesh(trunkGeo, woodMat);
+            trunk.rotation.z = Math.PI / 2 + (index % 2 ? 0.4 : -0.5);
+            trunk.position.y = 0.2;
+            tree.add(trunk);
+            tree.position.set(-8 + (index % 5) * 4.1, 0.1, -7 + Math.floor(index / 5) * 12);
+            scene.add(tree);
+            trees.push(tree);
+          }
+
+          const skiGeo = new THREE.BoxGeometry(1.6, 0.04, 0.12);
+          for (let index = 0; index < 4; index += 1) {
+            const ski = new THREE.Mesh(skiGeo, darkMat);
+            ski.position.set(-3 + index * 2.1, 0.06, 3.5 - index * 1.4);
+            ski.rotation.y = index * 0.7;
+            scene.add(ski);
+          }
+          const pack = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.28, 0.22), clothMat);
+          pack.position.set(4.2, 0.18, -2.4);
+          pack.rotation.z = 0.4;
+          scene.add(pack);
+
+          const peakGeo = new THREE.ConeGeometry(4.5, 7, 6);
+          const peakMat = new THREE.MeshStandardMaterial({
+            color: 0x8aa0b0, roughness: 0.85, metalness: 0.08, emissive: 0x1a2830, emissiveIntensity: 0.1,
+          });
+          const peakL = new THREE.Mesh(peakGeo, peakMat);
+          peakL.position.set(-14, 3.2, -10);
+          const peakR = new THREE.Mesh(peakGeo, peakMat);
+          peakR.position.set(15, 2.6, -12);
+          scene.add(peakL, peakR);
+
+          const cornice = new THREE.Mesh(new THREE.BoxGeometry(10, 0.7, 2.2), snowMat);
+          cornice.position.set(0, 4.6, -14);
+          cornice.rotation.x = -0.2;
+          scene.add(cornice);
+
+          const rescue = new THREE.Group();
+          const body = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 0.7, 8), clothMat);
+          body.position.y = 0.7;
+          const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 8), new THREE.MeshStandardMaterial({
+            color: 0xd4b090, roughness: 0.6, metalness: 0.05,
+          }));
+          head.position.y = 1.16;
+          const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 2.1, 6), gearMat);
+          pole.position.set(0.22, 1.1, 0);
+          rescue.add(body, head, pole);
+          scene.add(rescue);
+
+          const beaconMesh = new THREE.Group();
+          const box = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.08, 0.28), darkMat);
+          const led = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 8), iceMat);
+          led.position.set(0, 0.08, -0.12);
+          beaconMesh.add(box, led);
+          beaconMesh.position.set(0.15, 0.85, 0.1);
+          rescue.add(beaconMesh);
+
+          const probeGeo = new THREE.CylinderGeometry(0.02, 0.02, 1.4, 5);
+          const probeMeshes = [];
+          for (let index = 0; index < 16; index += 1) {
+            const mesh = new THREE.Mesh(probeGeo, gearMat);
+            mesh.visible = false;
+            scene.add(mesh);
+            probeMeshes.push(mesh);
+          }
+          const flagGeo = new THREE.ConeGeometry(0.12, 0.3, 5);
+          const flagMeshes = [];
+          for (let index = 0; index < 4; index += 1) {
+            const mesh = new THREE.Mesh(flagGeo, clothMat);
+            mesh.visible = false;
+            scene.add(mesh);
+            flagMeshes.push(mesh);
+          }
+
+          const gridMat = new THREE.LineBasicMaterial({
+            color: 0x9be7ff, transparent: true, opacity: 0.28,
+          });
+          const grid = new THREE.GridHelper(6, 6, 0x9be7ff, 0x4a7080);
+          grid.position.y = 0.02;
+          scene.add(grid);
+
+          const sled = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.12, 0.55), darkMat);
+          sled.position.set(-5.4, 0.12, 2.6);
+          sled.rotation.y = 0.5;
+          sled.rotation.z = 0.12;
+          scene.add(sled);
+          const shovel = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.04, 1.1), gearMat);
+          shovel.position.set(2.8, 0.08, 4.1);
+          shovel.rotation.y = -0.6;
+          scene.add(shovel);
+          const blade = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.02, 0.28), iceMat);
+          blade.position.set(2.4, 0.06, 4.55);
+          scene.add(blade);
+          const cairnGeo = new THREE.DodecahedronGeometry(0.28, 0);
+          for (let index = 0; index < 6; index += 1) {
+            const rock = new THREE.Mesh(cairnGeo, darkMat);
+            rock.position.set(6.2 + (index % 3) * 0.25, 0.12 + Math.floor(index / 3) * 0.22, -5.4);
+            rock.rotation.set(index, index * 0.4, 0.2);
+            scene.add(rock);
+          }
+          const radio = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.28, 0.08), gearMat);
+          radio.position.set(0.32, 0.95, 0.05);
+          rescue.add(radio);
+          const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.45, 5), gearMat);
+          antenna.position.set(0.32, 1.22, 0.05);
+          rescue.add(antenna);
+          const goggle = new THREE.Mesh(new THREE.TorusGeometry(0.08, 0.015, 5, 10), darkMat);
+          goggle.position.set(0, 1.16, 0.1);
+          goggle.rotation.x = Math.PI / 2;
+          rescue.add(goggle);
+          const bootL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 0.28), darkMat);
+          bootL.position.set(-0.1, 0.08, 0.04);
+          const bootR = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.1, 0.28), darkMat);
+          bootR.position.set(0.1, 0.08, 0.04);
+          rescue.add(bootL, bootR);
+          const fenceGeo = new THREE.BoxGeometry(0.08, 1.1, 0.08);
+          for (let index = 0; index < 8; index += 1) {
+            const post = new THREE.Mesh(fenceGeo, woodMat);
+            post.position.set(-10 + index * 2.8, 0.5, 10.4);
+            scene.add(post);
+          }
+
+          const flakeCount = reducedMotion ? 80 : 240;
+          const flakePos = new Float32Array(flakeCount * 3);
+          for (let index = 0; index < flakeCount; index += 1) {
+            flakePos[index * 3] = (Math.random() - 0.5) * 22;
+            flakePos[index * 3 + 1] = Math.random() * 8;
+            flakePos[index * 3 + 2] = (Math.random() - 0.5) * 22;
+          }
+          const flakeGeo = new THREE.BufferGeometry();
+          flakeGeo.setAttribute("position", new THREE.BufferAttribute(flakePos, 3));
+          const flakes = new THREE.Points(flakeGeo, new THREE.PointsMaterial({
+            color: 0xe9f7ff, size: 0.07, transparent: true, opacity: 0.55, sizeAttenuation: true,
+          }));
+          scene.add(flakes);
+
+          const particleGeo = new THREE.SphereGeometry(0.05, 5, 5);
+          const particleMat = new THREE.MeshBasicMaterial({
+            color: 0xe9f7ff, transparent: true, opacity: 0.8, depthWrite: false,
+          });
+
+          return {
+            renderer, scene, camera, beaconLight, rescue, pole: pole, led,
+            probeMeshes, flagMeshes, grid, flakes, mounds, trees,
+            particleGeo, particleMat, particleMeshes: [], look: new THREE.Vector3(),
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const p = state.player;
+          const t = state.elapsed;
+          webgl.rescue.position.set(p.x, 0, p.z);
+          webgl.rescue.rotation.y = p.yaw;
+          webgl.pole.rotation.x = state.probeAnim > 0 ? -1.1 : -0.15;
+          webgl.pole.position.y = state.probeAnim > 0 ? 0.55 : 1.1;
+          webgl.led.material.emissiveIntensity = 0.3 + state.beacon.strength * 1.4;
+          webgl.beaconLight.position.set(p.x, 1.3, p.z);
+          webgl.beaconLight.intensity = 0.4 + state.beacon.strength * 1.3;
+          webgl.grid.visible = state.beacon.grid;
+          webgl.grid.position.set(
+            Math.round(state.victim.x * 2) / 2,
+            0.02,
+            Math.round(state.victim.z * 2) / 2
+          );
+
+          webgl.probeMeshes.forEach((mesh, index) => {
+            const probe = state.probes[index];
+            if (!probe) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(probe.x, 0.7, probe.z);
+            mesh.material.color.setHex(probe.hit ? 0xc45a3a : 0x3a3a38);
+          });
+          webgl.flagMeshes.forEach((mesh, index) => {
+            const flag = state.flags[index];
+            if (!flag) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(flag.x, 0.35, flag.z);
+          });
+
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.particleMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const particle = state.particles[index];
+            if (!particle) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(particle.x, particle.y, particle.z);
+            mesh.material.opacity = clamp(particle.life * 1.5, 0, 1);
+          });
+
+          const pos = webgl.flakes.geometry.attributes.position;
+          for (let index = 0; index < pos.count; index += 1) {
+            let y = pos.getY(index) - dtSafe() * (0.6 + (index % 4) * 0.15);
+            if (y < 0) y = 7.5;
+            pos.setY(index, y);
+            pos.setX(index, pos.getX(index) + Math.sin(t + index) * 0.004);
+          }
+          pos.needsUpdate = true;
+        }
+
+        function dtSafe() { return FIXED_DT; }
+
+        function renderScene() {
+          if (!webgl) return;
+          const p = state.player;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.35 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.25 : 0;
+          const back = 5.6;
+          webgl.camera.position.set(
+            p.x - Math.sin(p.yaw) * back + shakeX,
+            3.4 + shakeY,
+            p.z + Math.cos(p.yaw) * back
+          );
+          webgl.look.set(p.x + Math.sin(p.yaw) * 3, 0.4, p.z - Math.cos(p.yaw) * 3);
+          webgl.camera.lookAt(webgl.look);
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            const v = new THREE.Vector3(x, y, z).project(webgl.camera);
+            return {
+              x: (v.x * 0.5 + 0.5) * VIEW_W,
+              y: (-v.y * 0.5 + 0.5) * VIEW_H,
+              visible: v.z < 1,
+            };
+          }
+          const dx = x - state.player.x;
+          const dz = z - state.player.z;
+          const ang = -state.player.yaw;
+          const lx = dx * Math.cos(ang) - dz * Math.sin(ang);
+          const lz = dx * Math.sin(ang) + dz * Math.cos(ang);
+          return {
+            x: VIEW_W * 0.5 + lx * 28,
+            y: VIEW_H * 0.55 - y * 40 + lz * 18,
+            visible: true,
+          };
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, "#6a8498");
+          sky.addColorStop(0.5, "#0c141c");
+          sky.addColorStop(1, "#d8eef8");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+          ctx.fillStyle = "#c8dce8";
+          ctx.beginPath();
+          ctx.moveTo(-20, VIEW_H * 0.42);
+          ctx.lineTo(VIEW_W * 0.3, VIEW_H * 0.22);
+          ctx.lineTo(VIEW_W * 0.55, VIEW_H * 0.4);
+          ctx.lineTo(VIEW_W * 0.8, VIEW_H * 0.18);
+          ctx.lineTo(VIEW_W + 20, VIEW_H * 0.4);
+          ctx.lineTo(VIEW_W + 20, VIEW_H);
+          ctx.lineTo(-20, VIEW_H);
+          ctx.fill();
+          ctx.fillStyle = "rgba(155,231,255,0.18)";
+          ctx.fillRect(0, VIEW_H * 0.5, VIEW_W, VIEW_H * 0.5);
+          ctx.strokeStyle = "#6a4a28";
+          ctx.lineWidth = 5;
+          for (let index = 0; index < 5; index += 1) {
+            const tx = 70 + index * 160;
+            ctx.beginPath();
+            ctx.moveTo(tx, VIEW_H * 0.52);
+            ctx.lineTo(tx + 70, VIEW_H * 0.6);
+            ctx.stroke();
+          }
+          ctx.fillStyle = "#3a4048";
+          ctx.fillRect(VIEW_W * 0.18, VIEW_H * 0.62, 48, 10);
+          ctx.fillStyle = "#c45a3a";
+          ctx.fillRect(VIEW_W * 0.72, VIEW_H * 0.58, 18, 14);
+
+          if (state.beacon.grid) {
+            ctx.strokeStyle = "rgba(155,231,255,0.35)";
+            ctx.lineWidth = 1;
+            for (let index = -3; index <= 3; index += 1) {
+              const a = projectToScreen(state.victim.x + index, 0, state.victim.z - 3);
+              const b = projectToScreen(state.victim.x + index, 0, state.victim.z + 3);
+              ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+              const c = projectToScreen(state.victim.x - 3, 0, state.victim.z + index);
+              const d = projectToScreen(state.victim.x + 3, 0, state.victim.z + index);
+              ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(d.x, d.y); ctx.stroke();
+            }
+          }
+          state.probes.forEach((probe) => {
+            const p = projectToScreen(probe.x, 0.2, probe.z);
+            ctx.strokeStyle = probe.hit ? COLORS.danger : COLORS.ice;
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y - 16);
+            ctx.lineTo(p.x, p.y + 6);
+            ctx.stroke();
+          });
+          const me = projectToScreen(state.player.x, 0.6, state.player.z);
+          ctx.fillStyle = "#c45a3a";
+          ctx.fillRect(me.x - 8, me.y - 20, 16, 28);
+          const ledX = me.x + Math.sin(state.beacon.dir) * 26;
+          const ledY = me.y - 28;
+          ctx.fillStyle = `rgba(155,231,255,${0.3 + state.beacon.strength})`;
+          ctx.beginPath();
+          ctx.arc(ledX, ledY, 6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(233,247,255,0.72)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const airSec = Math.max(0, state.air * DURATION);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          const sig = Math.round(state.beacon.strength * 100);
+          if (objective) objective.textContent = `${sig}%`;
+          if (meter) meter.style.width = `${sig}%`;
+          if (time) time.textContent = Math.min(remain, airSec).toFixed(1);
+          if (sub) {
+            const mode = state.beacon.grid ? "격자 탐침" : "비콘 수색";
+            sub.textContent = `격자 ${mode} · 거리 ${state.beacon.dist.toFixed(1)}m`;
+          }
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          const cx = VIEW_W * 0.5;
+          const cy = VIEW_H * 0.78;
+          hud.strokeStyle = "rgba(155,231,255,0.45)";
+          hud.lineWidth = 2;
+          hud.beginPath();
+          hud.arc(cx, cy, 34, 0, Math.PI * 2);
+          hud.stroke();
+          hud.save();
+          hud.translate(cx, cy);
+          hud.rotate(state.beacon.dir);
+          hud.fillStyle = COLORS.ice;
+          hud.beginPath();
+          hud.moveTo(0, -28);
+          hud.lineTo(7, -12);
+          hud.lineTo(-7, -12);
+          hud.closePath();
+          hud.fill();
+          hud.restore();
+          if (state.beacon.grid) {
+            hud.fillStyle = COLORS.ice;
+            hud.font = "800 14px Trebuchet MS, sans-serif";
+            hud.textAlign = "center";
+            hud.fillText("PROBE GRID", VIEW_W / 2, VIEW_H - 28);
+          }
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = COLORS.ice;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 118);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(155,231,255,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; debris field xz; camera behind rescuer",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            air: Number(state.air.toFixed(3)),
+            beacon: {
+              dist: Number(state.beacon.dist.toFixed(2)),
+              dir: Number(state.beacon.dir.toFixed(3)),
+              strength: Number(state.beacon.strength.toFixed(3)),
+              grid: state.beacon.grid,
+            },
+            player: {
+              x: Number(state.player.x.toFixed(2)),
+              z: Number(state.player.z.toFixed(2)),
+              yaw: Number(state.player.yaw.toFixed(3)),
+            },
+            probes: state.probes.length,
+            misses: state.misses,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function pointerMoveVec(event) {
+          const rect = hudCanvas.getBoundingClientRect();
+          const nx = (event.clientX - rect.left) / Math.max(1, rect.width);
+          const ny = (event.clientY - rect.top) / Math.max(1, rect.height);
+          input.mx = (nx - 0.5) * 2;
+          input.mz = (ny - 0.42) * 2.2;
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.dragging = true;
+          input.moved = false;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.pointerId = event.pointerId;
+          pointerMoveVec(event);
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.dragging || state.mode !== "running") return;
+          event.preventDefault();
+          if (Math.hypot(event.clientX - input.downX, event.clientY - input.downY) > TAP_PX) input.moved = true;
+          pointerMoveVec(event);
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.dragging = false;
+            input.mx = 0;
+            input.mz = 0;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          if (state.mode === "running" && input.dragging && !input.moved) {
+            doProbe(difficultyAt(state.elapsed));
+          }
+          input.dragging = false;
+          input.mx = 0;
+          input.mz = 0;
+          safeRelease(stageEl, event.pointerId);
+        }
+        const keyMap = {
+          ArrowLeft: "left", KeyA: "left", ArrowRight: "right", KeyD: "right",
+          ArrowUp: "up", KeyW: "up", ArrowDown: "down", KeyS: "down",
+        };
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            doProbe(difficultyAt(state.elapsed));
+            return;
+          }
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = true; }
+        }
+        function onKeyUp(event) {
+          const name = keyMap[event.code];
+          if (name) { event.preventDefault(); input[name] = false; }
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.flags.push({ x: state.victim.x, z: state.victim.z });
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.left = input.right = input.up = input.down = false;
+          input.dragging = false; input.mx = 0; input.mz = 0;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>

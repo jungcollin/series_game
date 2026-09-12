@@ -1,0 +1,1361 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>증기 언덕</title>
+    <link rel="stylesheet" href="../v2-stage.css" />
+    <style>
+      :root { --bg: #1a100c; --accent: #ffb15a; --accent-ink: #1a100c; --danger: #ff6b7a; --ink: #ffe8d0; --muted: rgba(255,232,208,.68); }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#hud">게임 화면으로 건너뛰기</a>
+    <p id="stage-instructions" class="sr-only">증기 언덕. 화실과 수위를 같이 맞춰 증기기관차를 언덕 너머로 넘기세요. 드래그로 스로틀, 탭으로 석탄, 홀드로 급수. 언덕 3곳을 넘기면 클리어. 보일러가 터지거나 정차하면 실패. 화면 터치 또는 Enter로 시작. 모바일에서는 화면을 위아래로 드래그해 스로틀을 잡고, 짧게 탭해 석탄을 넣으며, 길게 눌러 급수합니다.</p>
+    <main class="stage" aria-label="증기 언덕 게임 영역">
+      <canvas id="game" width="960" height="540" aria-hidden="true"></canvas>
+      <canvas id="hud" width="960" height="540" tabindex="0" aria-label="증기 언덕" aria-describedby="stage-instructions"></canvas>
+      <section class="hud-live" hidden>
+        <div class="hud-cluster">
+          <p class="hud-kicker">언덕</p>
+          <p class="hud-value" id="hud-objective">0 / 3</p>
+          <div class="hud-meter" aria-hidden="true"><span id="hud-meter"></span></div>
+        </div>
+        <div class="hud-cluster hud-cluster--right">
+          <p class="hud-kicker">남은 시간</p>
+          <p class="hud-value" id="hud-time">50.0</p>
+          <p class="hud-sub" id="hud-sub">압력 0.58 · 수위 0.62</p>
+        </div>
+      </section>
+      <div class="overlay is-open">
+        <section class="brief is-on" data-screen="menu" id="menu">
+          <p class="brief-kicker">Steam Grade</p>
+          <h1>증기 언덕</h1>
+          <p class="brief-lead">화실과 수위를 같이 맞춰 증기기관차를 언덕 너머로 넘기세요.</p>
+          <ul class="brief-rules">
+            <li><strong>조작</strong><span>드래그로 스로틀, 탭으로 석탄, 홀드로 급수</span></li>
+            <li><strong>클리어</strong><span>언덕 3곳을 넘기면 클리어</span></li>
+            <li><strong>실패</strong><span>보일러가 터지거나 정차하면 실패</span></li>
+          </ul>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief brief--fail" data-screen="failed" id="fail" hidden>
+          <p class="brief-kicker">기관 정지</p>
+          <h2>언덕에서 멈췄다</h2>
+          <p class="brief-lead" id="fail-detail">보일러가 터지거나 정차하면 실패</p>
+          <p class="hud-sub" id="fail-stat"></p>
+          <button type="button" class="brief-go">화면 터치 또는 Enter로 시작</button>
+        </section>
+        <section class="brief" data-screen="cleared" id="clear" hidden>
+          <p class="brief-kicker">능선 돌파</p>
+          <h2>세 언덕을 넘었다</h2>
+          <p class="brief-lead">화실과 수위를 맞춰 기관차를 언덕 너머로 넘겼습니다.</p>
+          <p class="hud-sub" id="clear-stat">언덕 3곳을 넘기면 클리어</p>
+        </section>
+      </div>
+    </main>
+    <script src="../relay-runtime.js"></script>
+    <script src="../registry.js"></script>
+    <script src="../vendor/three/three.min.js"></script>
+    <script src="../v2-stage-chrome.js"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        let VIEW_W = 960;
+        let VIEW_H = 540;
+        const FIXED_DT = 1 / 60;
+        const MAX_DT = 1 / 20;
+        const DURATION = 50;
+        const GOAL = 3;
+        const GRACE = 6.2;
+        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const META = {
+          id: "steam-grade",
+          title: "증기 언덕",
+          description: "화실과 수위를 같이 맞춰 증기기관차를 언덕 너머로 넘기세요.",
+          creator: "collin",
+          genre: "3D steam locomotive",
+          clearCondition: "언덕 3곳을 넘기면 클리어",
+          failCondition: "보일러가 터지거나 정차하면 실패",
+          controls: "드래그로 스로틀, 탭으로 석탄, 홀드로 급수",
+        };
+        const COLORS = {
+          bg: "#1a100c",
+          ink: "#ffe8d0",
+          accent: "#ffb15a",
+          brass: "#c4a056",
+          ember: "#ff6a2a",
+          steel: "#4a3a34",
+          danger: "#ff6b7a",
+        };
+        const FAIL_COPY = {
+          boiler_blow: "안전밸브가 버티지 못하고 보일러가 터졌습니다",
+          stall: "급구배에서 점착력이 떨어져 정차했습니다",
+          time_limit: "제한 시간 50초 초과",
+          debug_force_fail: "디버그 강제 실패",
+        };
+        const HILLS = [
+          { id: 0, start: 40, peak: 58, end: 82, height: 6.6, tunnelA: 49, tunnelB: 74 },
+          { id: 1, start: 104, peak: 128, end: 156, height: 8.8, tunnelA: 118, tunnelB: 146 },
+          { id: 2, start: 182, peak: 210, end: 248, height: 11.4, tunnelA: 198, tunnelB: 232 },
+        ];
+        const TREES = [
+          [-18, 12], [-22, 28], [16, 22], [-19, 48], [21, 62], [-24, 88],
+          [18, 96], [-20, 118], [22, 134], [-17, 162], [19, 176], [-23, 198],
+          [17, 214], [-21, 238], [20, 252], [-16, 8], [15, 36], [-25, 70],
+        ];
+        const POLES = [6, 24, 44, 66, 90, 112, 136, 160, 184, 208, 232, 256];
+        const CAM2D = {
+          eye: { x: 0.15, y: 2.05, z: 2.4 },
+          right: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 0.97, z: 0.24 },
+          fwd: { x: 0, y: 0.24, z: -0.97 },
+          focal: 520,
+        };
+        const relayContext = window.RelayRuntime?.readContext(META.id) || {
+          history: [], clearCount: 0, previousStageId: null,
+        };
+
+        let runSeed = 1;
+        function reseed(seed) { runSeed = seed >>> 0 || 1; }
+        function random() {
+          runSeed = (runSeed + 0x6D2B79F5) >>> 0;
+          let t = runSeed;
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function randRange(lo, hi) { return lo + random() * (hi - lo); }
+        function clamp(value, lo, hi) { return Math.max(lo, Math.min(hi, value)); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function dist3(ax, ay, az, bx, by, bz) { return Math.hypot(ax - bx, ay - by, az - bz); }
+        function smooth01(t) {
+          const u = clamp(t, 0, 1);
+          return u * u * (3 - 2 * u);
+        }
+
+        const state = {
+          mode: "menu",
+          elapsed: 0,
+          lastRunTime: 0,
+          z: 0,
+          speed: 5.1,
+          heat: 0.56,
+          water: 0.64,
+          pressure: 0.6,
+          throttle: 0.38,
+          crests: [false, false, false],
+          crestCount: 0,
+          blowTime: 0,
+          stallTime: 0,
+          shovel: 0,
+          injector: 0,
+          chuff: 0,
+          chuffAcc: 0,
+          whistle: 0,
+          particles: [],
+          flash: 0,
+          shake: 0,
+          message: "",
+          messageTime: 0,
+          failReason: "",
+          needleP: 0.6,
+          needleW: 0.64,
+          firePulse: 0,
+        };
+        const input = {
+          pointerDown: false,
+          pointerId: null,
+          downX: 0,
+          downY: 0,
+          downAt: 0,
+          moved: 0,
+          throttle: 0.38,
+          inject: false,
+          coalQueued: false,
+          up: false,
+          down: false,
+          shift: false,
+          space: false,
+        };
+        let ignoreUp = false;
+
+        function difficultyAt(seconds) {
+          const difficulty = clamp(Number(seconds || 0) / DURATION, 0, 1);
+          const phase = Math.min(3, 1 + Math.floor(difficulty * 3));
+          return {
+            difficulty,
+            phase,
+            genRate: phase === 1 ? 0.46 : phase === 2 ? 0.39 : 0.33,
+            throttleDrain: phase === 1 ? 0.16 : phase === 2 ? 0.24 : 0.34,
+            injectCool: phase === 1 ? 0.1 : phase === 2 ? 0.16 : 0.24,
+            stallSlope: phase === 1 ? 0.13 : phase === 2 ? 0.105 : 0.082,
+            tractive: phase === 1 ? 11.2 : phase === 2 ? 10.4 : 9.6,
+            tunnelDraft: phase === 1 ? 0.82 : phase === 2 ? 0.7 : 0.55,
+            evaporate: phase === 1 ? 0.055 : phase === 2 ? 0.07 : 0.09,
+          };
+        }
+
+        function bumpHeight(z, hill) {
+          if (z < hill.start || z > hill.end) return 0;
+          if (z <= hill.peak) return hill.height * smooth01((z - hill.start) / Math.max(0.01, hill.peak - hill.start));
+          return hill.height * smooth01((hill.end - z) / Math.max(0.01, hill.end - hill.peak));
+        }
+        function heightAt(z) {
+          let h = 0;
+          for (let i = 0; i < HILLS.length; i += 1) h += bumpHeight(z, HILLS[i]);
+          return h;
+        }
+        function slopeAt(z) {
+          const dz = 0.55;
+          return (heightAt(z + dz) - heightAt(z - dz)) / (2 * dz);
+        }
+        function inTunnel(z) {
+          for (let i = 0; i < HILLS.length; i += 1) {
+            if (z >= HILLS[i].tunnelA && z <= HILLS[i].tunnelB) return true;
+          }
+          return false;
+        }
+        function waterFactor(water) {
+          if (water < 0.2) return (water / 0.2) * 0.18;
+          if (water > 0.86) return clamp(1 - (water - 0.86) / 0.22, 0, 1) * 0.55;
+          const mid = 1 - Math.abs(water - 0.58) * 0.35;
+          return clamp(mid, 0.55, 1);
+        }
+
+        function burst(x, y, z, count, kind) {
+          const amount = reducedMotion ? Math.min(5, count) : count;
+          for (let i = 0; i < amount; i += 1) {
+            const a = (Math.PI * 2 * i) / amount + randRange(-0.2, 0.2);
+            state.particles.push({
+              x, y, z,
+              vx: Math.cos(a) * randRange(0.4, 2.6),
+              vy: randRange(0.8, 3.8),
+              vz: Math.sin(a) * randRange(0.3, 2.2) + (kind === "steam" ? 2.2 : 0.4),
+              life: randRange(0.28, 0.8),
+              kind,
+              size: randRange(0.04, 0.14),
+            });
+          }
+          if (state.particles.length > 72) state.particles.splice(0, state.particles.length - 72);
+        }
+
+        let audioCtx = null;
+        function resumeAudio() {
+          if (reducedMotion) return null;
+          try {
+            const Ctor = window.AudioContext || window.webkitAudioContext;
+            if (!Ctor) return null;
+            audioCtx = audioCtx || new Ctor();
+            if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+            return audioCtx;
+          } catch (_error) {
+            return null;
+          }
+        }
+        function playSfx(kind) {
+          try {
+            const ctx = resumeAudio();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (kind === "coal") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(90, now);
+              osc.frequency.exponentialRampToValueAtTime(46, now + 0.08);
+              gain.gain.setValueAtTime(0.04, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "inject") {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(320, now);
+              osc.frequency.exponentialRampToValueAtTime(180, now + 0.09);
+              gain.gain.setValueAtTime(0.018, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+              osc.start(now); osc.stop(now + 0.11);
+            } else if (kind === "chuff") {
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(70 + state.speed * 4, now);
+              osc.frequency.exponentialRampToValueAtTime(38, now + 0.06);
+              gain.gain.setValueAtTime(0.028, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+              osc.start(now); osc.stop(now + 0.08);
+            } else if (kind === "crest") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(420, now);
+              osc.frequency.exponentialRampToValueAtTime(880, now + 0.22);
+              gain.gain.setValueAtTime(0.05, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+              osc.start(now); osc.stop(now + 0.3);
+            } else if (kind === "warn") {
+              osc.type = "square";
+              osc.frequency.setValueAtTime(240, now);
+              osc.frequency.exponentialRampToValueAtTime(160, now + 0.12);
+              gain.gain.setValueAtTime(0.03, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+              osc.start(now); osc.stop(now + 0.15);
+            } else if (kind === "clear") {
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(480, now);
+              osc.frequency.exponentialRampToValueAtTime(1320, now + 0.28);
+              gain.gain.setValueAtTime(0.055, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+              osc.start(now); osc.stop(now + 0.34);
+            } else {
+              osc.type = "sawtooth";
+              osc.frequency.setValueAtTime(110, now);
+              osc.frequency.exponentialRampToValueAtTime(28, now + 0.28);
+              gain.gain.setValueAtTime(0.08, now);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+              osc.start(now); osc.stop(now + 0.32);
+            }
+          } catch (_error) { /* audio optional */ }
+        }
+
+        function resetState() {
+          state.elapsed = 0;
+          state.lastRunTime = 0;
+          state.z = 2;
+          state.speed = 5.15;
+          state.heat = 0.56;
+          state.water = 0.64;
+          state.pressure = 0.6;
+          state.throttle = 0.38;
+          state.crests = [false, false, false];
+          state.crestCount = 0;
+          state.blowTime = 0;
+          state.stallTime = 0;
+          state.shovel = 0;
+          state.injector = 0;
+          state.chuff = 0;
+          state.chuffAcc = 0;
+          state.whistle = 0;
+          state.particles = [];
+          state.flash = 0;
+          state.shake = 0;
+          state.message = "화실을 살리고 수위를 지키세요";
+          state.messageTime = 1.6;
+          state.failReason = "";
+          state.needleP = 0.6;
+          state.needleW = 0.64;
+          state.firePulse = 0;
+          input.throttle = 0.38;
+          input.inject = false;
+          input.coalQueued = false;
+          input.pointerDown = false;
+          reseed((Date.now() ^ 0xa5a5) >>> 0);
+          hostClearReported = false;
+          hostFailReported = false;
+        }
+
+        let hostReadyReported = false;
+        let hostClearReported = false;
+        let hostFailReported = false;
+        function inRelayHost() {
+          try { return window.parent && window.parent !== window && window.RelayStageHost; }
+          catch (_error) { return false; }
+        }
+        function reportReady() {
+          if (!inRelayHost() || hostReadyReported) return;
+          hostReadyReported = true;
+          window.RelayStageHost.onStageReady?.(window.relayStageMeta);
+        }
+        function reportClear() {
+          if (!inRelayHost() || hostClearReported) return;
+          hostClearReported = true;
+          window.RelayStageHost.onStageCleared?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            clearCountAfter: relayContext.clearCount + 1,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function reportFail(reason) {
+          if (!inRelayHost() || hostFailReported) return;
+          hostFailReported = true;
+          window.RelayStageHost.onStageFailed?.({
+            stageId: META.id,
+            stageTitle: META.title,
+            reason,
+            durationSec: Number(state.lastRunTime.toFixed(1)),
+          });
+        }
+        function startStage() {
+          if (state.mode === "running") return;
+          resetState();
+          state.mode = "running";
+          window.relayStageResult.status = "running";
+          syncChrome();
+        }
+        function clearStage() {
+          if (state.mode !== "running") return;
+          state.mode = "cleared";
+          state.lastRunTime = state.elapsed;
+          window.relayStageResult.status = "cleared";
+          playSfx("clear");
+          reportClear();
+          syncChrome();
+        }
+        function failStage(reason) {
+          if (state.mode !== "running") return;
+          state.mode = "failed";
+          state.lastRunTime = state.elapsed;
+          state.failReason = reason;
+          window.relayStageResult.status = "failed";
+          state.shake = reducedMotion ? 0.16 : 0.7;
+          playSfx("boom");
+          burst(0.2, 1.4, 3.2, 22, reason === "boiler_blow" ? "ember" : "steam");
+          reportFail(reason);
+          syncChrome();
+        }
+
+        function shovelCoal() {
+          if (state.mode !== "running") return;
+          state.heat = clamp(state.heat + 0.17, 0, 1.24);
+          state.shovel = 1;
+          state.firePulse = 1;
+          state.flash = 0.22;
+          burst(0.05, 0.55, 1.15, 10, "ember");
+          playSfx("coal");
+          state.message = "석탄 투입";
+          state.messageTime = 0.55;
+        }
+
+        function maybeCrest() {
+          for (let i = 0; i < HILLS.length; i += 1) {
+            if (state.crests[i]) continue;
+            if (state.z >= HILLS[i].peak && state.speed > 0.9) {
+              state.crests[i] = true;
+              state.crestCount += 1;
+              state.whistle = 0.8;
+              state.flash = 0.4;
+              state.message = `능선 ${state.crestCount}/${GOAL}`;
+              state.messageTime = 1.1;
+              burst(0, 3.4, 6.5, 16, "steam");
+              playSfx("crest");
+              if (state.crestCount >= GOAL) clearStage();
+            }
+          }
+        }
+
+        function updateBoiler(dt, params) {
+          const tunneled = inTunnel(state.z);
+          const draft = tunneled ? params.tunnelDraft : 1;
+          if (input.inject) {
+            state.water = clamp(state.water + 0.4 * dt, 0, 1.2);
+            const drown = clamp((state.water - 0.78) / 0.28, 0, 1);
+            state.heat = Math.max(0, state.heat - (0.05 + drown * params.injectCool) * dt);
+            state.injector = Math.min(1, state.injector + dt * 4);
+            if (random() < 0.08) playSfx("inject");
+          } else {
+            state.injector = Math.max(0, state.injector - dt * 3);
+          }
+          state.heat = Math.max(0, state.heat - 0.042 * dt);
+          if (tunneled) state.heat = Math.max(0, state.heat - 0.05 * dt);
+          const gen = state.heat * waterFactor(state.water) * params.genRate * draft;
+          state.pressure += gen * dt;
+          state.pressure -= (0.05 + state.throttle * params.throttleDrain) * dt;
+          state.water -= state.heat * params.evaporate * dt;
+          state.pressure = clamp(state.pressure, 0, 1.22);
+          state.heat = clamp(state.heat, 0, 1.24);
+          state.water = clamp(state.water, 0, 1.2);
+          state.needleP = lerp(state.needleP, state.pressure, 1 - Math.exp(-7 * dt));
+          state.needleW = lerp(state.needleW, state.water, 1 - Math.exp(-6 * dt));
+        }
+
+        function updateMotion(dt, params) {
+          const slope = slopeAt(state.z);
+          const pull = state.throttle * state.pressure * params.tractive - slope * 15.5 - 0.42;
+          state.speed += pull * dt;
+          if (state.speed < 0) state.speed = 0;
+          if (state.speed > 15.5) state.speed = 15.5;
+          state.z += state.speed * dt;
+          if (state.pressure >= 1.02) {
+            state.blowTime += dt;
+            if (state.blowTime > 0.18 && state.messageTime <= 0) {
+              state.message = "안전밸브!";
+              state.messageTime = 0.7;
+              playSfx("warn");
+            }
+            if (state.blowTime > 0.48) failStage("boiler_blow");
+          } else {
+            state.blowTime = Math.max(0, state.blowTime - dt * 0.6);
+          }
+          if (state.elapsed > GRACE && slope > params.stallSlope && state.speed < 0.45) {
+            state.stallTime += dt;
+            if (state.stallTime > 0.28 && state.messageTime <= 0) {
+              state.message = "점착 저하";
+              state.messageTime = 0.6;
+            }
+            if (state.stallTime > 0.72) failStage("stall");
+          } else {
+            state.stallTime = Math.max(0, state.stallTime - dt);
+          }
+        }
+
+        function updateParticles(dt) {
+          state.particles.forEach((p) => {
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.z += p.vz * dt;
+            p.vy += (p.kind === "steam" ? 1.1 : -2.4) * dt;
+            p.life -= dt;
+          });
+          state.particles = state.particles.filter((p) => p.life > 0);
+          if (state.mode === "running" && random() < 0.35) {
+            burst(0.02, 2.9 + state.heat * 0.4, 6.8, state.heat > 0.4 ? 3 : 1, "steam");
+          }
+          if (state.firePulse > 0.3 && random() < 0.2) burst(0.0, 0.5, 1.1, 2, "ember");
+        }
+
+        function applyInput(dt) {
+          let throttleTarget = input.throttle;
+          if (input.up) throttleTarget += 0.9 * dt;
+          if (input.down) throttleTarget -= 0.9 * dt;
+          if (input.shift) input.inject = true;
+          throttleTarget = clamp(throttleTarget, 0, 1);
+          input.throttle = throttleTarget;
+          state.throttle = lerp(state.throttle, throttleTarget, 1 - Math.exp(-10 * dt));
+          if (input.coalQueued) {
+            input.coalQueued = false;
+            shovelCoal();
+          }
+        }
+
+        function update(dt) {
+          state.flash = Math.max(0, state.flash - dt * 2.4);
+          state.shake = Math.max(0, state.shake - dt * 2.8);
+          state.messageTime = Math.max(0, state.messageTime - dt);
+          state.shovel = Math.max(0, state.shovel - dt * 2.2);
+          state.whistle = Math.max(0, state.whistle - dt);
+          state.firePulse = lerp(state.firePulse, state.heat, 1 - Math.exp(-4 * dt));
+          state.chuff = Math.max(0, state.chuff - dt * 4);
+          if (state.mode !== "running") return;
+          state.elapsed += dt;
+          const params = difficultyAt(state.elapsed);
+          applyInput(dt);
+          updateBoiler(dt, params);
+          if (state.mode !== "running") return;
+          updateMotion(dt, params);
+          if (state.mode !== "running") return;
+          maybeCrest();
+          if (state.mode !== "running") return;
+          state.chuffAcc += state.speed * dt * 0.55;
+          if (state.chuffAcc > 1) {
+            state.chuffAcc -= 1;
+            state.chuff = 1;
+            if (!reducedMotion) playSfx("chuff");
+            if (!reducedMotion) state.shake = Math.max(state.shake, 0.08 * state.throttle);
+          }
+          updateParticles(dt);
+          if (inTunnel(state.z) && state.messageTime <= 0 && random() < 0.01) {
+            state.message = "터널 · 통풍 부족";
+            state.messageTime = 0.7;
+          }
+          if (state.elapsed >= DURATION && state.mode === "running") failStage("time_limit");
+        }
+
+        const glCanvas = document.querySelector("#game");
+        const hudCanvas = document.querySelector("#hud");
+        const hud = hudCanvas.getContext("2d");
+        const stageEl = document.querySelector(".stage");
+        const failDetail = document.querySelector("#fail-detail");
+        const failStat = document.querySelector("#fail-stat");
+        const clearStat = document.querySelector("#clear-stat");
+        let webgl = null;
+        let game2d = null;
+
+        function fitView() {
+          const sized = window.V2StageChrome.resize(stageEl, glCanvas, hudCanvas, webgl);
+          VIEW_W = sized.width;
+          VIEW_H = sized.height;
+        }
+        function syncChrome() {
+          window.V2StageChrome.setMode(stageEl, state.mode);
+          if (state.mode === "failed") {
+            if (failDetail) failDetail.textContent = FAIL_COPY[state.failReason] || META.failCondition;
+            if (failStat) failStat.textContent = `언덕 ${state.crestCount} / ${GOAL} · 압력 ${state.pressure.toFixed(2)} · 수위 ${state.water.toFixed(2)}`;
+          }
+          if (state.mode === "cleared" && clearStat) {
+            clearStat.textContent = `${state.lastRunTime.toFixed(1)}초 · 압력 ${state.pressure.toFixed(2)}`;
+          }
+        }
+
+        function setupThree() {
+          if (typeof THREE === "undefined") return null;
+          let renderer;
+          try {
+            renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: false });
+          } catch (_error) {
+            return null;
+          }
+          renderer.setPixelRatio(1);
+          renderer.setSize(VIEW_W, VIEW_H, false);
+          renderer.setClearColor(0x1a100c, 1);
+
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a100c);
+          scene.fog = new THREE.Fog(0x1a100c, 12, 58);
+
+          const camera = new THREE.PerspectiveCamera(62, VIEW_W / VIEW_H, 0.08, 160);
+          camera.position.set(0.12, 1.72, 1.55);
+
+          scene.add(new THREE.AmbientLight(0x4a3024, 0.42));
+          const hemi = new THREE.HemisphereLight(0xffc090, 0x1a100c, 0.38);
+          scene.add(hemi);
+          const sun = new THREE.DirectionalLight(0xffd0a0, 0.55);
+          sun.position.set(-8, 18, 6);
+          scene.add(sun);
+          const fireLight = new THREE.PointLight(0xff6a2a, 1.35, 9);
+          fireLight.position.set(0.05, 0.62, 1.05);
+          scene.add(fireLight);
+          const cabLamp = new THREE.PointLight(0xffb15a, 0.55, 6);
+          cabLamp.position.set(0.2, 1.9, 1.4);
+          scene.add(cabLamp);
+
+          const groundMat = new THREE.MeshStandardMaterial({
+            color: 0x2a1810, roughness: 0.95, metalness: 0.04, emissive: 0x120804, emissiveIntensity: 0.15,
+          });
+          const ground = new THREE.Mesh(new THREE.PlaneGeometry(90, 320), groundMat);
+          ground.rotation.x = -Math.PI / 2;
+          ground.position.set(0, -0.2, 120);
+          scene.add(ground);
+
+          const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+          const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 10);
+          const sphereGeo = new THREE.SphereGeometry(1, 10, 8);
+          const coneGeo = new THREE.ConeGeometry(1, 1, 7);
+          const planeGeo = new THREE.PlaneGeometry(1, 1);
+
+          const steelMat = new THREE.MeshStandardMaterial({
+            color: 0x3a2a24, roughness: 0.42, metalness: 0.62, emissive: 0x120804, emissiveIntensity: 0.12,
+          });
+          const brassMat = new THREE.MeshStandardMaterial({
+            color: 0xc4a056, roughness: 0.32, metalness: 0.72, emissive: 0x3a2808, emissiveIntensity: 0.25,
+          });
+          const woodMat = new THREE.MeshStandardMaterial({
+            color: 0x5a3820, roughness: 0.86, metalness: 0.06,
+          });
+          const emberMat = new THREE.MeshStandardMaterial({
+            color: 0xff6a2a, roughness: 0.35, metalness: 0.1, emissive: 0xff4a12, emissiveIntensity: 0.9,
+          });
+          const glassMat = new THREE.MeshStandardMaterial({
+            color: 0x6a5040, roughness: 0.15, metalness: 0.3, transparent: true, opacity: 0.28,
+          });
+          const dirtMat = new THREE.MeshStandardMaterial({ color: 0x3a2418, roughness: 0.95, metalness: 0.04 });
+          const leafMat = new THREE.MeshStandardMaterial({ color: 0x2a3a18, roughness: 0.9, metalness: 0.04 });
+          const brickMat = new THREE.MeshStandardMaterial({ color: 0x6a3a28, roughness: 0.82, metalness: 0.08 });
+          const darkMat = new THREE.MeshStandardMaterial({ color: 0x120c0a, roughness: 0.9, metalness: 0.1 });
+          const railMat = new THREE.MeshStandardMaterial({
+            color: 0x8a8078, roughness: 0.28, metalness: 0.78, emissive: 0x201810, emissiveIntensity: 0.1,
+          });
+
+          const world = new THREE.Group();
+          scene.add(world);
+
+          const sleeperGeo = new THREE.BoxGeometry(2.4, 0.12, 0.28);
+          for (let i = 0; i < 90; i += 1) {
+            const sl = new THREE.Mesh(sleeperGeo, woodMat);
+            sl.position.set(0, 0.02, i * 3.1);
+            world.add(sl);
+          }
+          const railL = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 280), railMat);
+          railL.position.set(-0.72, 0.12, 130);
+          world.add(railL);
+          const railR = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 280), railMat);
+          railR.position.set(0.72, 0.12, 130);
+          world.add(railR);
+
+          HILLS.forEach((hill) => {
+            const span = hill.end - hill.start;
+            const mound = new THREE.Mesh(new THREE.BoxGeometry(28, hill.height, span * 0.92), dirtMat);
+            mound.position.set(0, hill.height * 0.38, (hill.start + hill.end) * 0.5);
+            mound.scale.set(1, 1, 1);
+            world.add(mound);
+            const leftCliff = new THREE.Mesh(new THREE.BoxGeometry(8, hill.height * 1.1, span * 0.7), dirtMat);
+            leftCliff.position.set(-11, hill.height * 0.4, (hill.start + hill.end) * 0.5);
+            world.add(leftCliff);
+            const rightCliff = new THREE.Mesh(new THREE.BoxGeometry(8, hill.height * 1.1, span * 0.7), dirtMat);
+            rightCliff.position.set(11, hill.height * 0.4, (hill.start + hill.end) * 0.5);
+            world.add(rightCliff);
+            const portalA = new THREE.Mesh(new THREE.BoxGeometry(6.4, 5.2, 1.4), brickMat);
+            portalA.position.set(0, 2.4, hill.tunnelA);
+            world.add(portalA);
+            const holeA = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.4, 1.6), darkMat);
+            holeA.position.set(0, 1.9, hill.tunnelA);
+            world.add(holeA);
+            const portalB = new THREE.Mesh(new THREE.BoxGeometry(6.4, 5.2, 1.4), brickMat);
+            portalB.position.set(0, 2.4, hill.tunnelB);
+            world.add(portalB);
+            const holeB = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.4, 1.6), darkMat);
+            holeB.position.set(0, 1.9, hill.tunnelB);
+            world.add(holeB);
+            const arch = new THREE.Mesh(new THREE.CylinderGeometry(2.1, 2.1, 1.2, 10, 1, false, 0, Math.PI), brickMat);
+            arch.rotation.z = Math.PI / 2;
+            arch.position.set(0, 3.5, hill.tunnelA + 0.1);
+            world.add(arch);
+          });
+
+          TREES.forEach((row, idx) => {
+            const trunk = new THREE.Mesh(cylGeo, woodMat);
+            trunk.scale.set(0.18, 1.4 + (idx % 3) * 0.2, 0.18);
+            trunk.position.set(row[0], 0.9, row[1]);
+            world.add(trunk);
+            const crown = new THREE.Mesh(coneGeo, leafMat);
+            crown.scale.set(1.1, 2.2, 1.1);
+            crown.position.set(row[0], 2.4, row[1]);
+            world.add(crown);
+          });
+
+          POLES.forEach((z) => {
+            const pole = new THREE.Mesh(cylGeo, woodMat);
+            pole.scale.set(0.08, 3.4, 0.08);
+            pole.position.set(-4.2, 1.7, z);
+            world.add(pole);
+            const arm = new THREE.Mesh(boxGeo, woodMat);
+            arm.scale.set(1.4, 0.08, 0.08);
+            arm.position.set(-3.6, 3.1, z);
+            world.add(arm);
+            const ins = new THREE.Mesh(sphereGeo, brassMat);
+            ins.scale.setScalar(0.08);
+            ins.position.set(-3.1, 3.05, z);
+            world.add(ins);
+          });
+
+          const station = new THREE.Group();
+          const shed = new THREE.Mesh(boxGeo, brickMat);
+          shed.scale.set(6.5, 3.2, 4.2);
+          shed.position.set(8.4, 1.5, 8);
+          station.add(shed);
+          const roof = new THREE.Mesh(coneGeo, woodMat);
+          roof.scale.set(5.2, 1.8, 3.4);
+          roof.rotation.y = Math.PI / 4;
+          roof.position.set(8.4, 3.8, 8);
+          station.add(roof);
+          const platform = new THREE.Mesh(boxGeo, woodMat);
+          platform.scale.set(10, 0.28, 2.2);
+          platform.position.set(6.5, 0.3, 4.5);
+          station.add(platform);
+          const waterTower = new THREE.Mesh(cylGeo, woodMat);
+          waterTower.scale.set(1.1, 1.4, 1.1);
+          waterTower.position.set(-7.5, 3.6, 14);
+          station.add(waterTower);
+          const legs = new THREE.Mesh(boxGeo, woodMat);
+          legs.scale.set(0.25, 3.2, 0.25);
+          legs.position.set(-7.5, 1.5, 14);
+          station.add(legs);
+          const spout = new THREE.Mesh(cylGeo, steelMat);
+          spout.scale.set(0.12, 1.8, 0.12);
+          spout.rotation.z = 0.7;
+          spout.position.set(-6.4, 3.2, 14);
+          station.add(spout);
+          const coalTipple = new THREE.Mesh(boxGeo, steelMat);
+          coalTipple.scale.set(2.4, 3.6, 2.2);
+          coalTipple.position.set(7.2, 1.8, 22);
+          station.add(coalTipple);
+          const chute = new THREE.Mesh(boxGeo, steelMat);
+          chute.scale.set(0.5, 0.2, 3.2);
+          chute.rotation.x = 0.4;
+          chute.position.set(5.4, 1.6, 22);
+          station.add(chute);
+          world.add(station);
+
+          const signal = new THREE.Group();
+          const post = new THREE.Mesh(cylGeo, steelMat);
+          post.scale.set(0.08, 3.6, 0.08);
+          post.position.set(3.2, 1.8, 34);
+          signal.add(post);
+          const lamp = new THREE.Mesh(sphereGeo, emberMat);
+          lamp.scale.setScalar(0.16);
+          lamp.position.set(3.2, 3.5, 34);
+          signal.add(lamp);
+          world.add(signal);
+
+          const loco = new THREE.Group();
+          const boiler = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.78, 6.4, 14), steelMat);
+          boiler.rotation.x = Math.PI / 2;
+          boiler.position.set(0, 1.35, 4.6);
+          loco.add(boiler);
+          const smokebox = new THREE.Mesh(new THREE.CylinderGeometry(0.74, 0.74, 1.1, 12), darkMat);
+          smokebox.rotation.x = Math.PI / 2;
+          smokebox.position.set(0, 1.35, 7.6);
+          loco.add(smokebox);
+          const stack = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 1.15, 10), darkMat);
+          stack.position.set(0, 2.35, 7.35);
+          loco.add(stack);
+          const dome = new THREE.Mesh(sphereGeo, brassMat);
+          dome.scale.set(0.28, 0.22, 0.28);
+          dome.position.set(0, 2.15, 5.1);
+          loco.add(dome);
+          const dome2 = new THREE.Mesh(sphereGeo, brassMat);
+          dome2.scale.set(0.22, 0.18, 0.22);
+          dome2.position.set(0, 2.08, 4.1);
+          loco.add(dome2);
+          const cowcatcher = new THREE.Mesh(coneGeo, steelMat);
+          cowcatcher.rotation.x = Math.PI / 2;
+          cowcatcher.scale.set(0.9, 1.1, 0.35);
+          cowcatcher.position.set(0, 0.55, 8.35);
+          loco.add(cowcatcher);
+          const headlamp = new THREE.Mesh(sphereGeo, emberMat);
+          headlamp.scale.setScalar(0.16);
+          headlamp.position.set(0, 1.55, 8.15);
+          loco.add(headlamp);
+          for (let w = 0; w < 4; w += 1) {
+            const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.16, 12), steelMat);
+            wheel.rotation.z = Math.PI / 2;
+            wheel.position.set(-0.85, 0.42, 2.4 + w * 1.35);
+            loco.add(wheel);
+            const wheelR = wheel.clone();
+            wheelR.position.x = 0.85;
+            loco.add(wheelR);
+          }
+          const rod = new THREE.Mesh(boxGeo, brassMat);
+          rod.scale.set(0.06, 0.06, 3.6);
+          rod.position.set(-0.98, 0.42, 4.4);
+          loco.add(rod);
+
+          const cab = new THREE.Group();
+          const floor = new THREE.Mesh(boxGeo, woodMat);
+          floor.scale.set(2.2, 0.1, 2.4);
+          floor.position.set(0, 0.85, 1.15);
+          cab.add(floor);
+          const cabRoof = new THREE.Mesh(boxGeo, steelMat);
+          cabRoof.scale.set(2.25, 0.08, 2.5);
+          cabRoof.position.set(0, 2.55, 1.15);
+          cab.add(cabRoof);
+          const wallL = new THREE.Mesh(boxGeo, steelMat);
+          wallL.scale.set(0.08, 1.6, 2.4);
+          wallL.position.set(-1.08, 1.7, 1.15);
+          cab.add(wallL);
+          const wallR = new THREE.Mesh(boxGeo, steelMat);
+          wallR.scale.set(0.08, 1.6, 2.4);
+          wallR.position.set(1.08, 1.7, 1.15);
+          cab.add(wallR);
+          const back = new THREE.Mesh(boxGeo, steelMat);
+          back.scale.set(2.2, 1.6, 0.08);
+          back.position.set(0, 1.7, 0.02);
+          cab.add(back);
+          const windowL = new THREE.Mesh(planeGeo, glassMat);
+          windowL.position.set(-1.09, 2.05, 1.7);
+          windowL.rotation.y = Math.PI / 2;
+          windowL.scale.set(0.7, 0.55, 1);
+          cab.add(windowL);
+          const windowR = windowL.clone();
+          windowR.position.x = 1.09;
+          windowR.rotation.y = -Math.PI / 2;
+          cab.add(windowR);
+          const frontWin = new THREE.Mesh(planeGeo, glassMat);
+          frontWin.position.set(0.55, 2.12, 2.32);
+          frontWin.scale.set(0.55, 0.48, 1);
+          cab.add(frontWin);
+          const frontWin2 = frontWin.clone();
+          frontWin2.position.x = -0.55;
+          cab.add(frontWin2);
+          loco.add(cab);
+
+          const backhead = new THREE.Mesh(cylGeo, steelMat);
+          backhead.scale.set(0.7, 0.18, 0.7);
+          backhead.rotation.x = Math.PI / 2;
+          backhead.position.set(0, 1.35, 2.35);
+          loco.add(backhead);
+          const firebox = new THREE.Mesh(sphereGeo, emberMat);
+          firebox.scale.set(0.28, 0.22, 0.18);
+          firebox.position.set(0, 0.95, 1.25);
+          loco.add(firebox);
+          const door = new THREE.Mesh(boxGeo, brassMat);
+          door.scale.set(0.55, 0.45, 0.06);
+          door.position.set(0, 0.95, 1.42);
+          loco.add(door);
+          const gaugeP = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.05, 16), brassMat);
+          gaugeP.rotation.x = Math.PI / 2;
+          gaugeP.position.set(-0.42, 1.72, 2.22);
+          loco.add(gaugeP);
+          const gaugeW = gaugeP.clone();
+          gaugeW.position.x = 0.42;
+          loco.add(gaugeW);
+          const throttleLever = new THREE.Mesh(boxGeo, brassMat);
+          throttleLever.scale.set(0.06, 0.55, 0.06);
+          throttleLever.position.set(0.72, 1.45, 1.55);
+          loco.add(throttleLever);
+          const injectorPipe = new THREE.Mesh(cylGeo, brassMat);
+          injectorPipe.scale.set(0.04, 0.7, 0.04);
+          injectorPipe.position.set(-0.72, 1.25, 1.55);
+          loco.add(injectorPipe);
+          const seat = new THREE.Mesh(boxGeo, woodMat);
+          seat.scale.set(0.5, 0.35, 0.45);
+          seat.position.set(0.7, 1.15, 0.55);
+          loco.add(seat);
+          const tender = new THREE.Mesh(boxGeo, steelMat);
+          tender.scale.set(1.9, 1.5, 2.6);
+          tender.position.set(0, 1.2, -1.35);
+          loco.add(tender);
+          const coalPile = new THREE.Mesh(coneGeo, darkMat);
+          coalPile.scale.set(0.7, 0.55, 0.9);
+          coalPile.position.set(0, 2.05, -1.2);
+          loco.add(coalPile);
+          scene.add(loco);
+
+          const particleGeo = new THREE.SphereGeometry(0.07, 6, 6);
+          const steamMat = new THREE.MeshBasicMaterial({
+            color: 0xffe8d0, transparent: true, opacity: 0.45, depthWrite: false,
+          });
+          const sparkMat = new THREE.MeshBasicMaterial({
+            color: 0xff6a2a, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending,
+          });
+
+          const hazeGeo = new THREE.PlaneGeometry(8, 4, 8, 4);
+          const hazeMat = new THREE.MeshBasicMaterial({
+            color: 0xffb15a, transparent: true, opacity: 0.07, depthWrite: false, side: THREE.DoubleSide,
+          });
+          const haze = new THREE.Mesh(hazeGeo, hazeMat);
+          haze.position.set(0, 2.4, 5.5);
+          scene.add(haze);
+
+          const milePosts = [];
+          for (let m = 0; m < 6; m += 1) {
+            const postM = new THREE.Mesh(boxGeo, woodMat);
+            postM.scale.set(0.12, 1.1, 0.08);
+            postM.position.set(2.6, 0.55, 20 + m * 40);
+            world.add(postM);
+            milePosts.push(postM);
+          }
+
+          const trestle = new THREE.Group();
+          for (let t = 0; t < 5; t += 1) {
+            const beam = new THREE.Mesh(boxGeo, woodMat);
+            beam.scale.set(0.18, 4.2, 0.18);
+            beam.position.set(-2.4 + (t % 2) * 4.8, 1.6, 168 + t * 2.2);
+            trestle.add(beam);
+          }
+          world.add(trestle);
+
+          return {
+            renderer, scene, camera, world, loco, firebox, fireLight, door, throttleLever,
+            injectorPipe, stack, haze, particleGeo, steamMat, sparkMat,
+            particleMeshes: [],
+            look: new THREE.Vector3(),
+            proj: new THREE.Vector3(),
+            cabLamp,
+          };
+        }
+
+        function syncMeshes() {
+          if (!webgl) return;
+          const y = 0.02 + heightAt(state.z) * 0.02;
+          webgl.world.position.set(0, -y, -state.z);
+          webgl.loco.position.set(0, y, 0);
+          webgl.loco.rotation.x = -slopeAt(state.z) * 0.35;
+          const heatGlow = 0.45 + state.firePulse * 0.9;
+          webgl.firebox.material.emissiveIntensity = heatGlow;
+          webgl.firebox.scale.set(0.28 + state.heat * 0.08, 0.22 + state.heat * 0.06, 0.18);
+          webgl.fireLight.intensity = 0.4 + state.heat * 1.4;
+          webgl.door.rotation.x = -state.shovel * 0.9;
+          webgl.throttleLever.rotation.z = (0.5 - state.throttle) * 0.9;
+          webgl.injectorPipe.scale.y = 0.7 + state.injector * 0.2;
+          webgl.stack.scale.y = 1 + state.chuff * 0.08;
+          if (!reducedMotion) {
+            webgl.haze.material.opacity = 0.05 + state.heat * 0.08;
+            webgl.haze.position.y = 2.3 + Math.sin(state.elapsed * 1.4) * 0.12;
+          }
+          while (webgl.particleMeshes.length < state.particles.length) {
+            const mesh = new THREE.Mesh(webgl.particleGeo, webgl.steamMat.clone());
+            webgl.scene.add(mesh);
+            webgl.particleMeshes.push(mesh);
+          }
+          webgl.particleMeshes.forEach((mesh, index) => {
+            const p = state.particles[index];
+            if (!p) { mesh.visible = false; return; }
+            mesh.visible = true;
+            mesh.position.set(p.x, p.y, p.z);
+            mesh.scale.setScalar(p.size / 0.07);
+            mesh.material.color.setHex(p.kind === "ember" ? 0xff6a2a : 0xffe8d0);
+            mesh.material.opacity = clamp(p.life * 1.5, 0, 0.8);
+          });
+        }
+
+        function renderScene() {
+          if (!webgl) return;
+          const shakeX = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.18 : 0;
+          const shakeY = state.shake > 0 && !reducedMotion ? (Math.random() - 0.5) * state.shake * 0.12 : 0;
+          const sway = reducedMotion ? 0 : Math.sin(state.elapsed * 2.2) * 0.012 * state.speed;
+          webgl.camera.position.set(0.18 + shakeX + sway, 1.78 + shakeY, 1.42);
+          webgl.look.set(0.05, 1.45 + slopeAt(state.z) * 0.4, 8.5);
+          webgl.camera.lookAt(webgl.look);
+          const tunneled = inTunnel(state.z);
+          webgl.scene.fog.near = tunneled ? 4 : 12;
+          webgl.scene.fog.far = tunneled ? 16 : 58;
+          webgl.cabLamp.intensity = tunneled ? 1.1 : 0.5;
+          syncMeshes();
+          webgl.renderer.render(webgl.scene, webgl.camera);
+        }
+
+        function projectToScreen(x, y, z) {
+          if (webgl) {
+            webgl.proj.set(x, y, z).project(webgl.camera);
+            return {
+              x: (webgl.proj.x * 0.5 + 0.5) * VIEW_W,
+              y: (-webgl.proj.y * 0.5 + 0.5) * VIEW_H,
+              visible: webgl.proj.z < 1,
+            };
+          }
+          const ex = x - CAM2D.eye.x;
+          const ey = y - CAM2D.eye.y;
+          const ez = z - CAM2D.eye.z;
+          const depth = ex * CAM2D.fwd.x + ey * CAM2D.fwd.y + ez * CAM2D.fwd.z;
+          const lx = ex * CAM2D.right.x + ey * CAM2D.right.y + ez * CAM2D.right.z;
+          const ly = ex * CAM2D.up.x + ey * CAM2D.up.y + ez * CAM2D.up.z;
+          const w = CAM2D.focal / Math.max(1.8, depth);
+          return { x: VIEW_W * 0.5 + lx * w, y: VIEW_H * 0.5 - ly * w, visible: depth > 0.5 };
+        }
+
+        function drawGauge(ctx, x, y, value, label, danger) {
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.strokeStyle = COLORS.brass;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(0, 0, 28, Math.PI * 0.75, Math.PI * 2.25);
+          ctx.stroke();
+          ctx.strokeStyle = danger ? COLORS.danger : COLORS.accent;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(0, 0, 22, Math.PI * 0.75, Math.PI * 0.75 + value * Math.PI * 1.5);
+          ctx.stroke();
+          ctx.rotate(Math.PI * 0.75 + clamp(value, 0, 1) * Math.PI * 1.5);
+          ctx.strokeStyle = COLORS.ink;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(20, 0);
+          ctx.stroke();
+          ctx.restore();
+          ctx.fillStyle = COLORS.ink;
+          ctx.font = "700 11px Trebuchet MS, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(label, x, y + 42);
+        }
+
+        function drawWorld2D(ctx) {
+          const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+          sky.addColorStop(0, inTunnel(state.z) ? "#080604" : "#3a2218");
+          sky.addColorStop(0.45, "#1a100c");
+          sky.addColorStop(1, "#120c0a");
+          ctx.fillStyle = sky;
+          ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+          const horizon = VIEW_H * 0.42;
+          ctx.fillStyle = "#2a1810";
+          HILLS.forEach((hill) => {
+            const x0 = VIEW_W * 0.2 + (hill.start - state.z) * 2.1;
+            const xp = VIEW_W * 0.2 + (hill.peak - state.z) * 2.1;
+            const x1 = VIEW_W * 0.2 + (hill.end - state.z) * 2.1;
+            ctx.beginPath();
+            ctx.moveTo(x0, horizon + 40);
+            ctx.lineTo(xp, horizon - hill.height * 6);
+            ctx.lineTo(x1, horizon + 40);
+            ctx.closePath();
+            ctx.fill();
+            if (state.z > hill.tunnelA - 8 && state.z < hill.tunnelB + 8) {
+              ctx.fillStyle = "#050302";
+              ctx.fillRect(xp - 18, horizon - 20, 36, 48);
+              ctx.fillStyle = "#2a1810";
+            }
+          });
+
+          ctx.strokeStyle = "#8a8078";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(0, horizon + 52);
+          ctx.lineTo(VIEW_W, horizon + 36);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(0, horizon + 64);
+          ctx.lineTo(VIEW_W, horizon + 48);
+          ctx.stroke();
+
+          ctx.fillStyle = "#3a2a24";
+          ctx.fillRect(VIEW_W * 0.28, horizon + 8, 220, 70);
+          ctx.fillStyle = COLORS.brass;
+          ctx.fillRect(VIEW_W * 0.28 + 20, horizon - 10, 180, 28);
+          ctx.fillStyle = COLORS.ember;
+          ctx.globalAlpha = 0.4 + state.heat * 0.6;
+          ctx.beginPath();
+          ctx.arc(VIEW_W * 0.42, horizon + 48, 16 + state.heat * 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+
+          ctx.fillStyle = "#2a1c16";
+          ctx.fillRect(0, VIEW_H * 0.62, VIEW_W, VIEW_H * 0.4);
+          ctx.fillStyle = "rgba(255,177,90,0.08)";
+          ctx.fillRect(24, VIEW_H * 0.66, VIEW_W - 48, VIEW_H * 0.28);
+
+          drawGauge(ctx, 86, VIEW_H * 0.78, state.needleP, "압력", state.pressure > 0.92);
+          drawGauge(ctx, 168, VIEW_H * 0.78, state.needleW, "수위", state.water > 0.9 || state.water < 0.22);
+          ctx.fillStyle = COLORS.accent;
+          ctx.fillRect(240, VIEW_H * 0.74, 12, 64);
+          ctx.fillStyle = COLORS.ink;
+          ctx.fillRect(242, VIEW_H * 0.74 + (1 - state.throttle) * 64, 8, 6);
+          ctx.fillStyle = COLORS.ember;
+          ctx.fillRect(268, VIEW_H * 0.78, 10, 48 * state.heat);
+
+          state.particles.forEach((p) => {
+            const sp = projectToScreen(p.x, p.y, p.z);
+            ctx.globalAlpha = clamp(p.life * 1.4, 0, 1);
+            ctx.fillStyle = p.kind === "ember" ? COLORS.ember : COLORS.ink;
+            ctx.fillRect(sp.x, sp.y, 4, 4);
+          });
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "rgba(255,232,208,0.7)";
+          ctx.font = "700 12px Trebuchet MS, sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText("2D 대체 화면", 18, VIEW_H - 16);
+        }
+
+        function updateLiveHud() {
+          const remain = Math.max(0, DURATION - state.elapsed);
+          const objective = document.querySelector("#hud-objective");
+          const meter = document.querySelector("#hud-meter");
+          const time = document.querySelector("#hud-time");
+          const sub = document.querySelector("#hud-sub");
+          if (objective) objective.textContent = `${state.crestCount} / ${GOAL}`;
+          if (meter) meter.style.width = `${(state.crestCount / GOAL) * 100}%`;
+          if (time) time.textContent = remain.toFixed(1);
+          if (sub) sub.textContent = `압력 ${state.pressure.toFixed(2)} · 수위 ${state.water.toFixed(2)}`;
+        }
+
+        function drawHud() {
+          updateLiveHud();
+          hud.save();
+          hud.globalAlpha = 0.9;
+          hud.fillStyle = "rgba(26,16,12,0.35)";
+          hud.fillRect(VIEW_W * 0.5 - 110, 16, 220, 10);
+          hud.fillStyle = COLORS.accent;
+          hud.fillRect(VIEW_W * 0.5 - 110, 16, 220 * clamp(state.z / 248, 0, 1), 10);
+          HILLS.forEach((hill) => {
+            const x = VIEW_W * 0.5 - 110 + 220 * clamp(hill.peak / 248, 0, 1);
+            hud.fillStyle = state.crests[hill.id] ? COLORS.accent : COLORS.ink;
+            hud.fillRect(x - 2, 12, 4, 18);
+          });
+          hud.restore();
+          if (state.messageTime > 0) {
+            hud.save();
+            hud.globalAlpha = Math.min(1, state.messageTime * 2);
+            hud.textAlign = "center";
+            hud.fillStyle = state.message.indexOf("밸브") >= 0 || state.message.indexOf("점착") >= 0 ? COLORS.danger : COLORS.accent;
+            hud.font = "900 28px Trebuchet MS, sans-serif";
+            hud.fillText(state.message, VIEW_W / 2, 92);
+            hud.restore();
+          }
+          if (state.flash > 0) {
+            hud.fillStyle = `rgba(255,177,90,${state.flash * 0.16})`;
+            hud.fillRect(0, 0, VIEW_W, VIEW_H);
+          }
+          const p = projectToScreen(0, 1.7, 2.22);
+          if (p.visible && webgl) {
+            hud.strokeStyle = "rgba(255,177,90,0.35)";
+            hud.beginPath();
+            hud.arc(p.x - 40, p.y, 16, 0, Math.PI * 2);
+            hud.stroke();
+          }
+        }
+
+        function render() {
+          fitView();
+          if (webgl) renderScene();
+          hud.clearRect(0, 0, VIEW_W, VIEW_H);
+          if (!webgl) {
+            drawWorld2D(hud);
+            if (game2d) {
+              game2d.clearRect(0, 0, VIEW_W, VIEW_H);
+              drawWorld2D(game2d);
+            }
+          }
+          if (state.mode === "running") drawHud();
+        }
+
+        function renderGameToText() {
+          const params = difficultyAt(state.elapsed);
+          return JSON.stringify({
+            coordinate_system: "world units; cab origin; +z down the boiler and track",
+            mode: state.mode,
+            elapsed: Number(state.elapsed.toFixed(2)),
+            difficulty: Number(params.difficulty.toFixed(3)),
+            phase: params.phase,
+            z: Number(state.z.toFixed(2)),
+            speed: Number(state.speed.toFixed(2)),
+            heat: Number(state.heat.toFixed(3)),
+            water: Number(state.water.toFixed(3)),
+            pressure: Number(state.pressure.toFixed(3)),
+            throttle: Number(state.throttle.toFixed(3)),
+            slope: Number(slopeAt(state.z).toFixed(3)),
+            tunnel: inTunnel(state.z),
+            crests: state.crestCount,
+            webgl: Boolean(webgl),
+            result: window.relayStageResult.status,
+          });
+        }
+
+        function safeCapture(element, pointerId) {
+          try { element.setPointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function safeRelease(element, pointerId) {
+          try { element.releasePointerCapture?.(pointerId); } catch (_error) { /* synthetic */ }
+        }
+        function onPointerDown(event) {
+          event.preventDefault();
+          hudCanvas.focus();
+          resumeAudio();
+          if (state.mode !== "running") {
+            startStage();
+            ignoreUp = true;
+            return;
+          }
+          ignoreUp = false;
+          input.pointerDown = true;
+          input.pointerId = event.pointerId;
+          input.downX = event.clientX;
+          input.downY = event.clientY;
+          input.downAt = performance.now();
+          input.moved = 0;
+          const rect = hudCanvas.getBoundingClientRect();
+          input.throttle = clamp(1 - (event.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+          safeCapture(stageEl, event.pointerId);
+        }
+        function onPointerMove(event) {
+          if (!input.pointerDown || state.mode !== "running") return;
+          event.preventDefault();
+          const dx = event.clientX - input.downX;
+          const dy = event.clientY - input.downY;
+          input.moved = Math.hypot(dx, dy);
+          const rect = hudCanvas.getBoundingClientRect();
+          input.throttle = clamp(1 - (event.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+          input.inject = input.moved < 36 && performance.now() - input.downAt > 180;
+        }
+        function onPointerUp(event) {
+          if (ignoreUp) {
+            ignoreUp = false;
+            input.pointerDown = false;
+            input.inject = false;
+            safeRelease(stageEl, event.pointerId);
+            return;
+          }
+          const held = performance.now() - input.downAt;
+          if (state.mode === "running" && input.pointerDown && held < 220 && input.moved < 18) {
+            shovelCoal();
+          }
+          input.pointerDown = false;
+          input.inject = false;
+          safeRelease(stageEl, event.pointerId);
+        }
+        function onKeyDown(event) {
+          if (event.key === "Enter" && state.mode !== "running") {
+            event.preventDefault();
+            startStage();
+            return;
+          }
+          if (event.code === "Space") {
+            event.preventDefault();
+            if (event.repeat) return;
+            if (state.mode !== "running") { startStage(); return; }
+            shovelCoal();
+            return;
+          }
+          if (event.code === "ShiftLeft" || event.code === "ShiftRight" || event.code === "KeyF") {
+            input.shift = true;
+            input.inject = true;
+          }
+          if (event.code === "ArrowUp" || event.code === "KeyW") { event.preventDefault(); input.up = true; }
+          if (event.code === "ArrowDown" || event.code === "KeyS") { event.preventDefault(); input.down = true; }
+        }
+        function onKeyUp(event) {
+          if (event.code === "ShiftLeft" || event.code === "ShiftRight" || event.code === "KeyF") {
+            input.shift = false;
+            if (!input.pointerDown) input.inject = false;
+          }
+          if (event.code === "ArrowUp" || event.code === "KeyW") input.up = false;
+          if (event.code === "ArrowDown" || event.code === "KeyS") input.down = false;
+        }
+
+        let animationFrame = 0;
+        let lastTimestamp = 0;
+        function frame(timestamp) {
+          const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, MAX_DT) : FIXED_DT;
+          lastTimestamp = timestamp;
+          if (input.pointerDown && state.mode === "running") {
+            const held = performance.now() - input.downAt;
+            if (held > 180 && input.moved < 36) input.inject = true;
+          }
+          update(dt);
+          render();
+          animationFrame = requestAnimationFrame(frame);
+        }
+
+        window.relayStageMeta = {
+          id: META.id,
+          title: META.title,
+          creator: META.creator,
+          genre: META.genre,
+          clearCondition: META.clearCondition,
+        };
+        window.relayStageResult = { status: "menu" };
+        window.render_game_to_text = renderGameToText;
+        window.advanceTime = (ms = 16.67) => {
+          const steps = Math.max(1, Math.round(Number(ms) / (FIXED_DT * 1000)));
+          for (let index = 0; index < steps; index += 1) update(FIXED_DT);
+          render();
+          return renderGameToText();
+        };
+        window.relayStageDebug = {
+          forceClear() {
+            if (state.mode !== "running") startStage();
+            state.crestCount = GOAL;
+            state.crests = [true, true, true];
+            clearStage();
+            render();
+          },
+          forceFail() {
+            if (state.mode !== "running") startStage();
+            failStage("debug_force_fail");
+            render();
+          },
+          difficultyAt(seconds) { return difficultyAt(seconds); },
+        };
+
+        stageEl.addEventListener("pointerdown", onPointerDown, { passive: false });
+        document.querySelectorAll(".brief-go").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (state.mode !== "running") startStage();
+          });
+        });
+        window.addEventListener("resize", () => { fitView(); render(); });
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+        window.addEventListener("blur", () => {
+          input.pointerDown = false; input.inject = false; input.up = false; input.down = false; input.shift = false;
+        });
+        window.addEventListener("beforeunload", () => cancelAnimationFrame(animationFrame));
+
+        webgl = setupThree();
+        if (!webgl) {
+          try { game2d = glCanvas.getContext("2d"); } catch (_error) { game2d = null; }
+        }
+        resetState();
+        state.mode = "menu";
+        window.relayStageResult.status = "menu";
+        fitView();
+        syncChrome();
+        reportReady();
+        render();
+        animationFrame = requestAnimationFrame(frame);
+      })();
+    </script>
+  </body>
+</html>
