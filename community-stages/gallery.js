@@ -28,6 +28,8 @@
   var activeEventStageIds = null;
   var hasLoadedVoteScores = false;
 
+  bindPromptModal();
+
   var GENRE_STYLES = {
     "Luck & Speed": { bg: "#f3c677", icon: "\uD83C\uDFB0" },
     "Arcade survival": { bg: "#7bc8f6", icon: "\u26A1" },
@@ -265,7 +267,12 @@
       gen: currentGen,
       sort: currentSort,
       fav: favOnly,
-      event: eventOnly && activeEventStageIds ? true : false,
+      event:
+        eventOnly &&
+        Array.isArray(activeEventStageIds) &&
+        activeEventStageIds.length
+          ? true
+          : false,
     });
     window.history.replaceState(null, "", window.location.pathname + query);
   }
@@ -285,7 +292,10 @@
         gen: currentGen,
         sort: currentSort,
         fav: favOnly,
-        event: eventOnly,
+        event:
+          eventOnly &&
+          Array.isArray(activeEventStageIds) &&
+          activeEventStageIds.length > 0,
         eventIds: activeEventStageIds || [],
         favorites: favorites,
         scores: scores,
@@ -303,6 +313,12 @@
 
   function renderGrid() {
     if (!gridEl) return;
+    if (eventOnly && activeEventStageIds === null) {
+      // pi-lens-ignore: no-inner-html-js, no-inner-html
+      gridEl.innerHTML =
+        '<p class="gallery-status" role="status">행사 스테이지를 불러오는 중…</p>';
+      return;
+    }
     if (currentSort === "popular" && !hasLoadedVoteScores) {
       // pi-lens-ignore: no-inner-html-js, no-inner-html
       gridEl.innerHTML =
@@ -481,26 +497,50 @@
     });
   }
 
+  function applyEventSelection(eventsData) {
+    var selectedEvent = null;
+    if (window.RelayEvents) {
+      selectedEvent = window.RelayEvents.selectActiveEvent(eventsData);
+      if (!selectedEvent && eventOnly && window.RelayEvents.selectLatestEvent) {
+        selectedEvent = window.RelayEvents.selectLatestEvent(eventsData);
+      }
+    }
+    if (!selectedEvent) {
+      activeEventStageIds = [];
+      if (eventOnly) {
+        eventOnly = false;
+        if (eventOnlyBtn) {
+          eventOnlyBtn.hidden = true;
+          eventOnlyBtn.setAttribute("aria-pressed", "false");
+          eventOnlyBtn.dataset.active = "false";
+        }
+        syncUrl();
+      }
+      renderGrid();
+      return;
+    }
+    activeEventStageIds = Array.from(
+      window.RelayEvents.stageIdSet(selectedEvent),
+    );
+    if (eventOnlyBtn) {
+      eventOnlyBtn.hidden = false;
+      eventOnlyBtn.setAttribute("aria-pressed", eventOnly ? "true" : "false");
+      eventOnlyBtn.dataset.active = eventOnly ? "true" : "false";
+      if (selectedEvent.title) {
+        eventOnlyBtn.title = selectedEvent.title;
+      }
+    }
+    renderGrid();
+  }
+
   fetch("../content/events.json")
     .then((response) => (response.ok ? response.json() : null))
     .then((eventsData) => {
-      if (!window.RelayEvents) return;
-      var activeEvent = window.RelayEvents.selectActiveEvent(eventsData);
-      if (!activeEvent) return;
-      activeEventStageIds = Array.from(
-        window.RelayEvents.stageIdSet(activeEvent),
-      );
-      if (eventOnlyBtn) {
-        eventOnlyBtn.hidden = false;
-        eventOnlyBtn.setAttribute("aria-pressed", eventOnly ? "true" : "false");
-        eventOnlyBtn.dataset.active = eventOnly ? "true" : "false";
-        if (activeEvent.title) {
-          eventOnlyBtn.title = activeEvent.title;
-        }
-      }
-      if (eventOnly) renderGrid();
+      applyEventSelection(eventsData);
     })
-    .catch(() => {});
+    .catch(() => {
+      applyEventSelection(null);
+    });
 
   fetch("../content/catalog.json")
     .then((response) => (response.ok ? response.json() : null))
@@ -562,4 +602,134 @@
       sessionStorage.removeItem(SCROLL_STORAGE_KEY);
     }
   });
+
+  function bindPromptModal() {
+    var promptModalEl = document.querySelector("#prompt-modal");
+    var openPromptBtn = document.querySelector("#open-prompt");
+    var closePromptBtn = document.querySelector("#close-prompt");
+    if (!promptModalEl || !openPromptBtn) return;
+
+    var lastFocus = null;
+
+    function getSheet() {
+      return promptModalEl.querySelector(".prompt-sheet");
+    }
+
+    function getFocusable(sheet) {
+      if (!sheet) return [];
+      return Array.prototype.slice
+        .call(
+          sheet.querySelectorAll(
+            'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])',
+          ),
+        )
+        .filter(function (el) {
+          return (
+            !el.hasAttribute("hidden") &&
+            el.getAttribute("aria-hidden") !== "true"
+          );
+        });
+    }
+
+    function setOpen(open) {
+      if (open) lastFocus = document.activeElement;
+      promptModalEl.dataset.open = open ? "true" : "false";
+      promptModalEl.setAttribute("aria-hidden", open ? "false" : "true");
+      document.body.classList.toggle("modal-open", open);
+      var sheet = getSheet();
+      if (open) {
+        window.requestAnimationFrame(function () {
+          var focusable = getFocusable(sheet);
+          (focusable[0] || sheet).focus();
+        });
+      } else if (lastFocus && lastFocus.focus) {
+        lastFocus.focus();
+        lastFocus = null;
+      }
+    }
+
+    function restoreStagesNav() {
+      var current = document.querySelector(
+        ".navbar-actions a[aria-current='page']",
+      );
+      document
+        .querySelectorAll(".navbar-actions .nav-link, .navbar-actions .nav-btn")
+        .forEach(function (n) {
+          n.classList.remove("nav-link--active");
+        });
+      if (current) current.classList.add("nav-link--active");
+    }
+
+    openPromptBtn.addEventListener("click", function () {
+      document
+        .querySelectorAll(".navbar-actions .nav-link, .navbar-actions .nav-btn")
+        .forEach(function (n) {
+          n.classList.remove("nav-link--active");
+        });
+      openPromptBtn.classList.add("nav-link--active");
+      setOpen(true);
+    });
+    if (closePromptBtn) {
+      closePromptBtn.addEventListener("click", function () {
+        setOpen(false);
+        restoreStagesNav();
+      });
+    }
+    promptModalEl.addEventListener("click", function (event) {
+      if (
+        event.target instanceof HTMLElement &&
+        event.target.dataset.closePrompt === "true"
+      ) {
+        setOpen(false);
+        restoreStagesNav();
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (promptModalEl.dataset.open !== "true") return;
+      if (event.key === "Escape") {
+        setOpen(false);
+        restoreStagesNav();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      var sheet = getSheet();
+      var focusable = getFocusable(sheet);
+      if (!focusable.length) {
+        event.preventDefault();
+        if (sheet) sheet.focus();
+        return;
+      }
+      var first = focusable[0];
+      var last = focusable[focusable.length - 1];
+      var active = document.activeElement;
+      if (!sheet.contains(active)) {
+        event.preventDefault();
+        first.focus();
+        return;
+      }
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    promptModalEl
+      .querySelectorAll("[data-copy-target]")
+      .forEach(function (button) {
+        button.addEventListener("click", function () {
+          if (!navigator.clipboard) return;
+          var target = document.getElementById(button.dataset.copyTarget);
+          var text = target ? target.textContent || "" : "";
+          if (!text.trim()) return;
+          navigator.clipboard.writeText(text).then(function () {
+            button.textContent = "복사됨";
+            window.setTimeout(function () {
+              button.textContent = "COPY";
+            }, 1200);
+          });
+        });
+      });
+  }
 })();

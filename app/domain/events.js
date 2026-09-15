@@ -116,6 +116,23 @@
       return active[0];
     }
 
+    function selectLatestEvent(data) {
+      var events = ((data && data.events) || []).filter(
+        (event) => event && event.id,
+      );
+      if (!events.length) return null;
+      events.sort((a, b) => {
+        if (a.endsOn !== b.endsOn) {
+          return a.endsOn < b.endsOn ? 1 : -1;
+        }
+        if (a.startsOn !== b.startsOn) {
+          return a.startsOn < b.startsOn ? 1 : -1;
+        }
+        return String(a.id).localeCompare(String(b.id));
+      });
+      return events[0];
+    }
+
     function resolveEventStages(event, entries) {
       if (!event || !Array.isArray(event.stageIds)) return [];
       var byId = new Map(
@@ -153,6 +170,7 @@
       validateEventsData: validateEventsData,
       isActiveOn: isActiveOn,
       selectActiveEvent: selectActiveEvent,
+      selectLatestEvent: selectLatestEvent,
       resolveEventStages: resolveEventStages,
       stageIdSet: stageIdSet,
       formatPeriod: formatPeriod,

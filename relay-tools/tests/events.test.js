@@ -32,6 +32,23 @@ test("selectActiveEvent returns null outside the period", () => {
   assert.equal(RelayEvents.selectActiveEvent(null, "2026-09-10"), null);
 });
 
+test("selectLatestEvent returns the most recently ended event", () => {
+  const older = Object.assign({}, sampleEvent, {
+    id: "older",
+    startsOn: "2026-08-01",
+    endsOn: "2026-08-07",
+  });
+  const newer = Object.assign({}, sampleEvent, {
+    id: "newer",
+    startsOn: "2026-09-09",
+    endsOn: "2026-09-15",
+  });
+  assert.equal(RelayEvents.selectLatestEvent(eventsData([older, newer])).id, "newer");
+  assert.equal(RelayEvents.selectLatestEvent(eventsData([sampleEvent])).id, "sample-event");
+  assert.equal(RelayEvents.selectLatestEvent(eventsData([])), null);
+  assert.equal(RelayEvents.selectLatestEvent(null), null);
+});
+
 test("selectActiveEvent prefers the most recently started overlapping event", () => {
   const older = Object.assign({}, sampleEvent, { id: "older", startsOn: "2026-09-01", endsOn: "2026-09-30" });
   const newer = Object.assign({}, sampleEvent, { id: "newer", startsOn: "2026-09-10", endsOn: "2026-09-20" });

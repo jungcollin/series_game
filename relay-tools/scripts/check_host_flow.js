@@ -340,6 +340,33 @@ async function runMobileChecks(browser, baseUrl, outputDir, consoleErrors) {
   await page.click("#close-leaderboard");
   await waitForModalState(page, "#leaderboard-modal", false);
 
+  await page.goto(`${baseUrl}/community-stages/gallery.html`, {
+    waitUntil: "networkidle",
+  });
+  const gallery = await assertMobilePageFits(page, "gallery");
+  const galleryScreenshot = path.join(
+    outputDir,
+    "main-host-mobile-gallery.png",
+  );
+  await page.screenshot({ path: galleryScreenshot, fullPage: false });
+  await page.click("#open-prompt");
+  await waitForModalState(page, "#prompt-modal", true);
+  const galleryPrompt = await assertMobilePageFits(
+    page,
+    "gallery prompt modal",
+    "#prompt-modal [role='dialog']",
+  );
+  const galleryPromptScreenshot = path.join(
+    outputDir,
+    "main-host-mobile-gallery-prompt.png",
+  );
+  await page.screenshot({ path: galleryPromptScreenshot, fullPage: false });
+  await page.click("#close-prompt");
+  await waitForModalState(page, "#prompt-modal", false);
+
+  await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
+  await waitForRelayIdle(page);
+
   await startDailyRun(page);
   const frame = await waitForStageReady(page);
   await frame.evaluate(() => {
@@ -364,12 +391,16 @@ async function runMobileChecks(browser, baseUrl, outputDir, consoleErrors) {
       home,
       prompt,
       leaderboard,
+      gallery,
+      galleryPrompt,
       gameOver,
     },
     screenshots: [
       homeScreenshot,
       promptScreenshot,
       leaderboardScreenshot,
+      galleryScreenshot,
+      galleryPromptScreenshot,
       gameOverScreenshot,
     ],
   };
