@@ -25,7 +25,7 @@ const eventPeriodEl = document.querySelector("#event-period");
 const eventStageListEl = document.querySelector("#event-stage-list");
 const startRelayBtn = document.querySelector("#start-relay");
 
-const STAGE_READY_TIMEOUT_MS = 10000;
+const STAGE_READY_TIMEOUT_MS = 20000;
 const LEADERBOARD_LIMIT = 10;
 const LEADERBOARD_FETCH_LIMIT = 50;
 
